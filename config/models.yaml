@@ -4,7 +4,7 @@ models:
   # —— 待评测的自研 agent ——
   - name: my_agent
     runner: openai_compat
-    base_url: http://1239mxgn96959.vicp.fun:4009/v1
+    base_url: http://your-proxy:port/v1
     api_key_env: PROXY_API_KEY
     model: glm-4.7
     concurrency: 4
@@ -13,7 +13,7 @@ models:
   # —— 竞品：doubao（这里用代理上的 deepseek-v4-flash 充当）——
   - name: doubao
     runner: openai_compat
-    base_url: http://1239mxgn96959.vicp.fun:4009/v1
+    base_url: http://your-proxy:port/v1
     api_key_env: PROXY_API_KEY
     model: deepseek-v4-flash-openai
     concurrency: 8

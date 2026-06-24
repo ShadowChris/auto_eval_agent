@@ -5,7 +5,7 @@ judges:
   # —— 主裁判：glm-5.2（聚合代理，支持 function calling，可联网核查）——
   - name: judge_glm
     runner: openai_compat
-    base_url: http://1239mxgn96959.vicp.fun:4009/v1
+    base_url: http://your-proxy:port/v1
     api_key_env: PROXY_API_KEY
     model: glm-5.2
     persona: strict_expert
@@ -18,7 +18,7 @@ judges:
   # —— 第二裁判：glm-5.1（同代理，不同 persona，模拟不同评测员）——
   - name: judge_deepseek_pro
     runner: openai_compat
-    base_url: http://1239mxgn96959.vicp.fun:4009/v1
+    base_url: http://your-proxy:port/v1
     api_key_env: PROXY_API_KEY
     model: deepseek-v4-pro-openai
     persona: end_user              # 与 judge_glm(strict_expert) 形成视角差异
