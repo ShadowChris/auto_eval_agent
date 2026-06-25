@@ -1,0 +1,33 @@
+name: news
+display: 新闻
+matching_categories: [新闻, 时事, 热点, 政治, 财经新闻, 社会新闻, 国际新闻]
+rules: "公共事件、时政、财经和社会热点。必须核查发生时间、信源和最新进展；产品参数等垂直信息优先归入对应垂域。"
+rubrics:
+  - name: 事实准确性
+    description: 人物、事件、地点、数字和因果关系是否准确。
+    weight: 2.0
+    scale: 5
+    sub_dimensions:
+      - {name: 核心事实准确, description: 关键人物、事件和数据是否正确}
+      - {name: 语境因果准确, description: 是否避免错误归因和断章取义}
+  - name: 时效性
+    description: 是否反映正确时间点和最新进展。
+    weight: 1.7
+    scale: 5
+    sub_dimensions:
+      - {name: 日期明确, description: 是否区分事件发生时间与报道时间}
+      - {name: 进展最新, description: 是否核查截至当前的最新状态}
+  - name: 信源质量
+    description: 信息来源是否权威、多源且可追溯。
+    weight: 1.3
+    scale: 5
+    sub_dimensions:
+      - {name: 来源权威, description: 是否优先采用官方或可靠媒体}
+      - {name: 交叉核验, description: 争议信息是否有多源验证}
+  - name: 客观与完整
+    description: 是否覆盖关键背景并区分事实与观点。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - {name: 关键要素完整, description: 是否覆盖何人、何事、何时、何地及影响}
+      - {name: 事实观点分离, description: 是否避免把推测或立场当成事实}

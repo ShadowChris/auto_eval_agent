@@ -52,6 +52,11 @@ def _write_reports(run_dir: Path, results, items, ans_index, cfg, run_id):
     (rep / "B.json").write_text(
         json.dumps(reports["B"], ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    (rep / "C.md").write_text(reports["C_md"], encoding="utf-8")
+    (rep / "C.json").write_text(
+        json.dumps(reports["C"], ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (rep / "cases_detail.csv").write_text(reports["cases_csv"], encoding="utf-8-sig")
     return rep
 
 
@@ -86,7 +91,7 @@ def run(
     typer.echo("▶ ③ 生成报告 …")
     ans_index = {m: {o.item_id: o for o in outs} for m, outs in answers_by_model.items()}
     rep = _write_reports(run_dir, results, items, ans_index, cfg, run_id)
-    typer.echo(f"\n✅ 完成。报告：\n  {rep / 'A.md'}（被测对比）\n  {rep / 'B.md'}（评测可靠性）")
+    typer.echo(f"\n✅ 完成。报告：\n  {rep / 'A.md'}（被测对比）\n  {rep / 'B.md'}（评测可靠性）\n  {rep / 'C.md'}（分垂域）\n  {rep / 'cases_detail.csv'}（逐条诊断）")
 
 
 @app.command(name="eval-only")
@@ -108,7 +113,7 @@ def eval_only(
     results = asyncio.run(engine.evaluate(items, answers_by_model, focal_model=focal))
     ans_index = {m: {o.item_id: o for o in outs} for m, outs in answers_by_model.items()}
     rep = _write_reports(run_dir, results, items, ans_index, cfg, run_dir.name)
-    typer.echo(f"\n✅ 完成。报告：{rep / 'A.md'} / {rep / 'B.md'}")
+    typer.echo(f"\n✅ 完成。报告：{rep / 'A.md'} / {rep / 'B.md'} / {rep / 'C.md'} / {rep / 'cases_detail.csv'}")
 
 
 @app.command()

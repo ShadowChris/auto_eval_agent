@@ -1,0 +1,33 @@
+name: film_tv
+display: 影视
+matching_categories: [影视, 电影, 电视剧, 综艺, 动漫, 导演, 演员]
+rules: "电影、剧集、综艺、动漫及主创信息。区分客观事实与主观评价；涉及剧情时注意用户是否要求避免剧透。"
+rubrics:
+  - name: 信息准确性
+    description: 作品、主创、年份、奖项和平台等信息是否准确。
+    weight: 1.6
+    scale: 5
+    sub_dimensions:
+      - {name: 基础信息准确, description: 片名、演员、导演、年份等是否正确}
+      - {name: 剧情信息准确, description: 剧情、人物关系和设定是否无误}
+  - name: 内容理解
+    description: 对主题、叙事、人物和视听语言的分析是否合理。
+    weight: 1.3
+    scale: 5
+    sub_dimensions:
+      - {name: 主题与叙事, description: 对主题表达和叙事结构的理解是否深入}
+      - {name: 视听与表演, description: 对导演、摄影、剪辑、表演等分析是否恰当}
+  - name: 推荐匹配度
+    description: 推荐是否符合类型、情绪、受众和观看场景。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - {name: 偏好匹配, description: 是否符合用户类型和内容偏好}
+      - {name: 推荐理由, description: 理由是否具体且能支持选择}
+  - name: 剧透与表达
+    description: 剧透控制、内容组织和表达是否得当。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - {name: 剧透控制, description: 未经允许是否避免关键剧透}
+      - {name: 表达清晰, description: 是否有条理、易读且不过度冗长}

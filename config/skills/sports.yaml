@@ -1,0 +1,33 @@
+name: sports
+display: 体育
+matching_categories: [体育, 足球, 篮球, 网球, 乒乓球, 赛事, 运动员, 比赛]
+rules: "赛事、赛程、比分、运动员、规则、数据和技战术。时效性与数据准确性优先，当前赛况必须核查。"
+rubrics:
+  - name: 事实与数据
+    description: 比分、赛程、排名、纪录和人员信息是否准确。
+    weight: 2.0
+    scale: 5
+    sub_dimensions:
+      - {name: 数据准确, description: 比分、统计、排名和纪录是否正确}
+      - {name: 人员赛事准确, description: 队伍、运动员、赛事归属是否正确}
+  - name: 时效性
+    description: 是否使用当前有效的赛况和赛程信息。
+    weight: 1.5
+    scale: 5
+    sub_dimensions:
+      - {name: 时间范围正确, description: 是否对应用户询问的赛季、轮次和日期}
+      - {name: 更新及时, description: 是否避免使用已过期赛况}
+  - name: 规则与分析
+    description: 规则解释和技战术分析是否专业合理。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - {name: 规则准确, description: 比赛规则、赛制和判罚解释是否正确}
+      - {name: 分析有据, description: 战术和表现判断是否有数据或比赛事实支撑}
+  - name: 完整与表达
+    description: 是否完整回应并清楚呈现体育信息。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - {name: 需求覆盖, description: 是否回答全部赛事相关问题}
+      - {name: 信息清晰, description: 时间、队伍和数据是否易于理解}

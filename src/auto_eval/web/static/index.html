@@ -38,8 +38,7 @@
     <div class="row">
       <span class="lbl">裁判：</span>
       <label v-for="j in judges" class="chip">
-        <input type="checkbox" :value="j.name" v-model="selectedJudges"> {{ j.name }}
-        <small v-if="j.persona">{{ j.persona }}</small>
+        <input type="checkbox" :value="j.name" v-model="selectedJudges"> {{ j.display || j.name }}
       </label>
     </div>
     <div class="row" v-if="mode==='online'">
@@ -69,20 +68,90 @@
       <span v-if="summary.judge_accuracy!=null">裁判判题准确率 {{ (summary.judge_accuracy*100).toFixed(0) }}% （{{ summary.meta_n }} 题有参考答案）</span>
       <span v-if="summary.a_winrate!=null">A 胜率 {{ (summary.a_winrate*100).toFixed(0) }}%</span>
     </div>
-    <table class="grid results">
-      <thead><tr><th>#</th><th v-for="c in resultCols" :key="c.key">{{ c.label }}</th></tr></thead>
-      <tbody>
-        <template v-for="(r,i) in results" :key="i">
-          <tr>
-            <td>{{ i+1 }}</td>
-            <td v-for="c in resultCols" :key="c.key">{{ cell(r, c) }}</td>
+    <details class="skill-breakdown" v-if="summary && summary.by_skill && summary.by_skill.overview && summary.by_skill.overview.length" open>
+      <summary>📊 按垂域分析（{{ summary.by_skill.overview.length }} 个垂域 · 维度问题阈值 ≤ {{ summary.by_skill.threshold }}）</summary>
+      <div ref="pieChart" style="width:100%;height:260px;"></div>
+      <table class="grid">
+        <thead><tr><th>垂域</th><th>样本量</th><th>正确率</th><th>平均分</th><th>首要错因</th><th>低一致率</th><th>分类失败</th></tr></thead>
+        <tbody>
+          <tr v-for="s in summary.by_skill.overview" :key="s.skill">
+            <td>{{ s.display }}</td>
+            <td>{{ s.n_items }}</td>
+            <td>{{ s.focal_right_rate != null ? (s.focal_right_rate*100).toFixed(0) + '%' : '—' }}</td>
+            <td>{{ s.focal_mean_total != null ? s.focal_mean_total.toFixed(2) : '—' }}</td>
+            <td>{{ s.first_cluster || '—' }}</td>
+            <td>{{ (s.low_agreement_rate*100).toFixed(0) + '%' }}</td>
+            <td>{{ s.fallback_pct != null ? (s.fallback_pct*100).toFixed(0) + '%' : '—' }}</td>
           </tr>
-          <tr v-if="r.tool_trace && r.tool_trace.length" class="trace">
-            <td colspan="99">🔍 裁判查证轨迹：{{ r.tool_trace.join('  |  ') }}</td>
-          </tr>
+        </tbody>
+      </table>
+      <div class="skill-chart-grid">
+        <template v-for="(s,i) in (summary.by_skill.sections||[])" :key="'sec-'+s.skill">
+          <div v-if="s.n_items>0 && Object.values(s.dim_problem_dist||{}).some(info => info.rate > 0)" class="skill-section">
+            <div :ref="el => setBarRef(el, i)" class="skill-chart"></div>
+            <div class="chart-actions">
+              <button
+                v-for="(info,dim) in (s.dim_problem_dist||{})"
+                v-show="info.rate > 0"
+                :key="dim"
+                class="drilldown-btn"
+                @click="drillDownDimension(s.skill, dim)"
+              >
+                查看「{{ dim }}」问题题目（{{ info.count ?? (info.item_ids||[]).length }}）
+              </button>
+            </div>
+          </div>
         </template>
-      </tbody>
-    </table>
+      </div>
+    </details>
+    <div ref="resultBrowser" class="result-browser">
+      <div v-if="mode!=='compare'" class="skill-tabs">
+        <button v-for="s in skillTabs" :key="s.key" :class="{active:activeSkill===s.key}" @click="selectSkill(s.key)">
+          {{ s.label }} {{ s.count }}
+        </button>
+      </div>
+      <div class="result-filters">
+        <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、回答或理由">
+        <select v-if="mode!=='compare'" v-model="correctnessFilter" @change="resetResultPage">
+          <option value="">全部判定</option>
+          <option value="right">正确</option>
+          <option value="partial">部分正确</option>
+          <option value="wrong">错误</option>
+          <option value="unclear">不清楚</option>
+        </select>
+        <select v-if="mode!=='compare'" v-model="problemDimFilter" @change="resetResultPage">
+          <option value="">全部维度</option>
+          <option v-for="d in rubricDims" :key="d" :value="d">{{ d }}存在问题</option>
+        </select>
+        <span v-if="problemDimFilter" class="active-filter">
+          正在查看「{{ problemDimFilter }}」问题题目
+          <button @click="clearDimensionDrillDown">清除</button>
+        </span>
+        <span class="result-count">共 {{ filteredResults.length }} 条</span>
+      </div>
+      <div class="result-table-wrap">
+        <table class="grid results">
+          <thead><tr><th>#</th><th v-for="c in resultCols" :key="c.key">{{ c.label }}</th></tr></thead>
+          <tbody>
+            <template v-for="(r,i) in pagedResults" :key="r.index ?? i">
+              <tr :class="{'result-error':r.error}">
+                <td>{{ (resultPage-1)*20+i+1 }}</td>
+                <td v-for="c in resultCols" :key="c.key">{{ cell(r, c) }}</td>
+              </tr>
+              <tr v-if="r.error" class="result-error-detail"><td colspan="99">评估失败：{{ r.error }}</td></tr>
+              <tr v-if="r.tool_trace && r.tool_trace.length" class="trace">
+                <td colspan="99">🔍 裁判查证轨迹：{{ r.tool_trace.join('  |  ') }}</td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination" v-if="pageCount>1">
+        <button @click="changePage(-1)" :disabled="resultPage<=1">上一页</button>
+        <span>第 {{ resultPage }} / {{ pageCount }} 页</span>
+        <button @click="changePage(1)" :disabled="resultPage>=pageCount">下一页</button>
+      </div>
+    </div>
   </section>
 </div>
 

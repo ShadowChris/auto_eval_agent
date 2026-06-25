@@ -5,6 +5,8 @@ from typing import Any
 
 from ..analysis import (
     advise,
+    build_case_rows,
+    cases_to_csv,
     dim_gap,
     disagreement_cases,
     focal_vs_competitors,
@@ -16,8 +18,11 @@ from ..analysis import (
 )
 from ..config import AppConfig
 from ..engine import EvalResults
+from ..judges import SkillRouter
 from ..meta import summarize, summarize_noref
 from ..schema import EvalItem, ModelOutput
+
+from .domain_report import build_domain_report
 
 
 def _f(x, d=2) -> str:
@@ -104,7 +109,16 @@ def build_reports(
         "noref_summary": noref_summary,
     }
 
-    return {"A": A, "A_md": _render_a_md(A), "B": B, "B_md": _render_b_md(B)}
+    skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
+    dom = build_domain_report(results, items, ans_index, cfg, skill_router, run_id)
+    case_rows = build_case_rows(results, items, ans_index, cfg, skill_router)
+    cases_csv = cases_to_csv(case_rows, cfg.model_names(), focal)
+    return {
+        "A": A, "A_md": _render_a_md(A),
+        "B": B, "B_md": _render_b_md(B),
+        "C": dom["C"], "C_md": dom["C_md"],
+        "cases_csv": cases_csv,
+    }
 
 
 # --------------------------------------------------------------------------- #

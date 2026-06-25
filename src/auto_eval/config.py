@@ -45,6 +45,7 @@ class JudgeConfig(BaseModel):
     """裁判配置（多裁判）。"""
 
     name: str
+    display: str | None = None  # 前端显示名（如中文"研发人员"），缺省回落 name
     runner: str = "openai_compat"
     base_url: str | None = None
     api_key_env: str | None = None
@@ -91,10 +92,12 @@ class EnsembleConfig(BaseModel):
     bootstrap_ci: bool = True
     n_bootstrap: int = 200
     flag_low_agreement: float = 0.6  # 一致率/稳定性低于此值 → 标红
+    dim_problem_threshold: float = 2.0  # 维度分<=此值视为"问题"（按垂域维度问题分布用，满分通常5）
 
 
 class DomainSkill(BaseModel):
     name: str = ""
+    display: str = ""  # 分类候选展示名（如中文），缺失回落 name；不参与分类的 Skill（default）可留空
     matching_categories: list[str] = Field(default_factory=list)
     rubrics: list[RubricDim] = Field(default_factory=list)  # 该 Skill 自带的一级+二级维度
     rules: str = ""

@@ -52,3 +52,41 @@ select, input[type=number] { padding: 6px; border: 1px solid #d1d5db; border-rad
 details { margin-top: 10px; }
 summary { cursor: pointer; color: #2563eb; font-size: 14px; }
 pre { background: #fef2f2; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; }
+
+.skill-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+.skill-section {
+  min-width: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fcfdff;
+}
+.skill-chart { width: 100%; height: 250px; }
+.chart-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.drilldown-btn { padding: 4px 8px; border-radius: 14px; color: #92400e; border-color: #fcd34d; background: #fffbeb; font-size: 12px; }
+.drilldown-btn:hover:not(:disabled) { background: #fef3c7; }
+@media (max-width: 820px) {
+  .skill-chart-grid { grid-template-columns: 1fr; }
+}
+.result-browser { margin-top: 16px; }
+.skill-tabs { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; }
+.skill-tabs button { padding: 5px 11px; border-radius: 16px; font-size: 13px; }
+.skill-tabs button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+.result-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.result-filters input { min-width: 260px; flex: 1; padding: 7px 9px; border: 1px solid #d1d5db; border-radius: 6px; }
+.result-count { color: #6b7280; font-size: 13px; }
+.result-table-wrap { width: 100%; overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 8px; }
+.result-table-wrap table.grid { margin-top: 0; min-width: 1050px; }
+.result-table-wrap th { position: sticky; top: 0; z-index: 1; white-space: nowrap; }
+.result-table-wrap td { min-width: 72px; }
+.result-table-wrap th:nth-child(1), .result-table-wrap td:nth-child(1) { position: sticky; left: 0; z-index: 2; background: #fff; }
+.result-table-wrap th:nth-child(2), .result-table-wrap td:nth-child(2) { position: sticky; left: 42px; z-index: 2; background: #fff; min-width: 72px; }
+.pagination { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 10px; font-size: 13px; }
+tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; color: #b91c1c; }
+.active-filter { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 14px; background: #eff6ff; color: #1d4ed8; font-size: 12px; }
+.active-filter button { padding: 1px 6px; border: 0; color: #1d4ed8; background: transparent; font-size: 12px; }

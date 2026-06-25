@@ -33,7 +33,7 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
     task.status = "running"
     try:
         await _run(task, cfg)
-        task.summary = _summarize(task, cfg.rubrics[0].scale if cfg.rubrics else 5)
+        task.summary = _summarize(task, cfg)
         task.status = "done"
         await task.publish("done", {"summary": task.summary, "total": len(task.items)})
     except Exception as e:
@@ -89,21 +89,29 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, online_runner, process_dims=None, arbitrator=None) -> dict:
     item = _to_evalitem(item_dict, idx)
     out: dict = {"query": item.question}
-    if item_dict.get("category"):
-        out["category"] = item_dict["category"]
 
     if mode in ("single", "process"):
         answer = item_dict["answer"]
         out["answer"] = answer
+        competitor = item_dict.get("competitor")
+        if competitor:
+            out["competitor"] = competitor
         if mode == "process":
             out["trace"] = (item.trace or "")[:200]
             eval_mode, dims = "process", (process_dims or cfg.rubrics)
         else:
             eval_mode, dims = "result", cfg.rubrics
-        scores = await asyncio.gather(*[
-            r.score(item, "answer", answer, eval_mode=eval_mode, process_dims=process_dims) for r in rubrics
-        ])
-        v = aggregate_scores(list(scores), dims, cfg.ensemble, cfg.ensemble.flag_low_agreement)
+
+        async def _score(r):
+            # 产品专家缺竞品 → 跳过该裁判（不参与本题聚合）
+            if r.client.cfg.persona == "product_expert" and not competitor:
+                return None
+            return await r.score(item, "answer", answer, eval_mode=eval_mode,
+                                 process_dims=process_dims, competitor=competitor)
+
+        raw = await asyncio.gather(*[_score(r) for r in rubrics])
+        scores = [s for s in raw if s is not None]
+        v = aggregate_scores(scores, dims, cfg.ensemble, cfg.ensemble.flag_low_agreement)
         # 多裁判分歧 → 主席仲裁（覆盖为主席最终结论）
         if v and v.low_agreement and len(scores) >= 2 and arbitrator:
             try:
@@ -147,6 +155,14 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
         _fill_verdict(out, v)
         _maybe_meta(out, item, mo.answer, v)
 
+    # 评测时实际归属的垂域（未标注 category 时 _classify 已分类）+ 来源标记 + 题号，供按垂域聚合
+    out["item_id"] = item.id
+    out["category"] = item.category
+    router = rubrics[0].skill_router if rubrics else None
+    resolved_skill = router.resolve(item) if router else "default"
+    out["category_display"] = router.display_of(resolved_skill) if router else "通用"
+    if item.metadata.get("category_source"):
+        out["category_source"] = item.metadata["category_source"]
     return out
 
 
@@ -174,7 +190,8 @@ def _maybe_meta(out: dict, item: EvalItem, answer: str, v) -> None:
         out["agree"] = (v.correctness == obj["objective_correct"]) if v.correctness != "unclear" else None
 
 
-def _summarize(task: Task, scale: int) -> dict:
+def _summarize(task: Task, cfg: AppConfig) -> dict:
+    scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     res = task.results
     ok = [r for r in res if "error" not in r]
     summary: dict = {"total": len(res), "done": len(ok), "mode": task.mode}
@@ -194,4 +211,76 @@ def _summarize(task: Task, scale: int) -> dict:
         t = sum(r.get("ties", 0) for r in ok)
         tot = a + b + t
         summary["a_winrate"] = round((a + 0.5 * t) / tot, 3) if tot else None
+    # 按垂域总览（compare 是两回答对比、无 correctness，不聚合）；失败不拖垮核心 summary
+    if task.mode != "compare":
+        try:
+            summary["by_skill"] = _by_skill(task, cfg)
+        except Exception:
+            summary["by_skill"] = []
     return summary
+
+
+def _by_skill(task: Task, cfg: AppConfig) -> list[dict]:
+    """把 web 的逐题结果桥接到 domain_report，返回垂域总览 overview（每垂域一行）。
+
+    web 的 result 是扁平 dict（非 Verdict 对象），这里按 result 重建 EvalItem/Verdict/MetaResult
+    （model 统一为 "answer"），复用 build_domain_report 的垂域分组与聚类逻辑。
+    """
+    from ..engine import EvalResults
+    from ..report.domain_report import build_domain_report
+    from ..schema import MetaResult, Verdict
+
+    skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
+    items: list[EvalItem] = []
+    verdicts: dict[tuple[str, str], Verdict] = {}
+    metas: list[MetaResult] = []
+
+    for r in task.results:
+        if "error" in r or "correctness" not in r:
+            continue
+        idx = r.get("index")
+        item_dict = task.items[idx] if (idx is not None and idx < len(task.items)) else None
+        if not item_dict:
+            continue
+        iid = item_dict.get("id", f"q{idx}")
+        it = EvalItem(
+            id=iid,
+            question=item_dict.get("query", ""),
+            category=r.get("category") or item_dict.get("category", "default"),
+            has_ref=bool(item_dict.get("reference")),
+            reference=item_dict.get("reference"),
+        )
+        if r.get("category_source"):
+            it.metadata["category_source"] = r["category_source"]
+        items.append(it)
+        verdicts[(iid, "answer")] = Verdict(
+            item_id=iid,
+            model="answer",
+            rubric={k: float(x) for k, x in (r.get("rubric") or {}).items()},
+            total=float(r.get("total") or 0.0),
+            correctness=r.get("correctness", "unclear"),
+            error_type=r.get("error_type"),
+            low_agreement=bool(r.get("low_agreement")),
+        )
+        if "agree" in r:
+            obj = r.get("objective") or {}
+            metas.append(MetaResult(
+                item_id=iid,
+                model="answer",
+                has_ref=True,
+                category=(it.categories()[0] if it.categories() else "default"),
+                objective_correct=obj.get("objective_correct", "na"),
+                judge_correctness=r.get("correctness"),
+                agree=r.get("agree"),
+            ))
+
+    if not items:
+        return {"overview": [], "sections": [], "threshold": 2.0}
+    results = EvalResults(verdicts=verdicts, pairs={}, metas=metas, focal_model="answer")
+    dom = build_domain_report(results, items, {}, cfg, skill_router, task.id)
+    c = dom["C"]
+    return {
+        "overview": c["overview"],
+        "sections": c["sections"],
+        "threshold": c["dim_problem_threshold"],
+    }

@@ -1,0 +1,33 @@
+name: document
+display: 文档
+matching_categories: [文档, PDF, Word, 表格, 报告, 合同, 论文, 摘要, 信息抽取]
+rules: "对给定文档、PDF、表格、报告或合同进行摘要、抽取、比较、改写和问答。回答必须忠实于文档，不得补造未出现的信息。"
+rubrics:
+  - name: 忠实性
+    description: 是否严格依据文档内容，无虚构和曲解。
+    weight: 2.0
+    scale: 5
+    sub_dimensions:
+      - {name: 原文一致, description: 结论是否能在文档中找到依据}
+      - {name: 无幻觉补充, description: 是否避免添加文档未提供的信息}
+  - name: 信息完整性
+    description: 是否覆盖任务要求的关键段落、字段和结论。
+    weight: 1.4
+    scale: 5
+    sub_dimensions:
+      - {name: 要点覆盖, description: 摘要或回答是否覆盖核心信息}
+      - {name: 字段无遗漏, description: 抽取任务是否遗漏重要字段和条目}
+  - name: 结构与格式
+    description: 是否保留必要的层级、表格关系和格式约束。
+    weight: 1.1
+    scale: 5
+    sub_dimensions:
+      - {name: 层级清晰, description: 标题、章节和逻辑结构是否清楚}
+      - {name: 格式保真, description: 数字、表格、引用和编号是否正确保留}
+  - name: 任务适配
+    description: 输出形式是否符合摘要、抽取、比较或改写要求。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - {name: 指令遵循, description: 是否按指定范围、格式和粒度输出}
+      - {name: 可读可用, description: 结果是否便于后续阅读、核对或处理}

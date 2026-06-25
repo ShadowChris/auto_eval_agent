@@ -28,7 +28,9 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
                     raise ValueError("单评模式每行至少需 query ||| answer")
                 item = {"query": parts[0], "answer": parts[1]}
                 if len(parts) >= 3 and parts[2]:
-                    item["reference"] = parts[2]
+                    item["competitor"] = parts[2]  # 第3段：竞品结果（产品专家用）
+                if len(parts) >= 4 and parts[3]:
+                    item["reference"] = parts[3]  # 第4段：参考答案
             elif mode == "compare":
                 if len(parts) < 3:
                     raise ValueError("对比模式每行至少需 query ||| answerA ||| answerB")
@@ -77,6 +79,8 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 errors.append(f"第 {ln} 行 single 模式缺少 answer")
                 continue
             item["answer"] = a
+            if obj.get("competitor"):
+                item["competitor"] = obj["competitor"]
         elif mode == "compare":
             aa = obj.get("answer_a") or obj.get("answerA")
             ab = obj.get("answer_b") or obj.get("answerB")

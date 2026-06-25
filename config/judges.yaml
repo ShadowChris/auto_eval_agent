@@ -2,10 +2,11 @@
 # 裁判是「评测智能体」：在 agent loop 中可多轮调用 web_search / fetch_page / calculate 自主查证，
 # 走 意图理解→理想锚定→多角度分析→对比→判定 的深度推演。
 judges:
-  # —— 主裁判：glm-5.2（聚合代理，支持 function calling，可联网核查）——
-  - name: judge_glm
+  # —— 裁判1：研发人员（严谨学科专家，glm-5.2，联网核查）——
+  - name: judge_1
+    display: 研发人员
     runner: openai_compat
-    base_url: http://your-proxy:port/v1
+    base_url: http://1239mxgn96959.vicp.fun:4009
     api_key_env: PROXY_API_KEY
     model: glm-5.2
     persona: strict_expert
@@ -15,13 +16,28 @@ judges:
     enable_python: false             # 代码执行默认关
     concurrency: 4
 
-  # —— 第二裁判：glm-5.1（同代理，不同 persona，模拟不同评测员）——
-  - name: judge_deepseek_pro
+  # —— 裁判2：终端用户（普通用户视角，deepseek-v4-pro-openai）——
+  - name: judge_2
+    display: 终端用户
     runner: openai_compat
-    base_url: http://your-proxy:port/v1
+    base_url: http://1239mxgn96959.vicp.fun:4009
     api_key_env: PROXY_API_KEY
     model: deepseek-v4-pro-openai
-    persona: end_user              # 与 judge_glm(strict_expert) 形成视角差异
+    persona: end_user              # 与 judge_1(strict_expert) 形成视角差异
+    enable_web_search: true
+    enable_fetch: true
+    enable_calculate: true
+    enable_python: false
+    concurrency: 4
+
+  # —— 裁判3：产品专家（侧重待评 vs 竞品对比，glm-5-turbo；需竞品结果输入，缺则跳过该题）——
+  - name: judge_3
+    display: 产品专家
+    runner: openai_compat
+    base_url: http://1239mxgn96959.vicp.fun:4009
+    api_key_env: PROXY_API_KEY
+    model: glm-5-turbo
+    persona: product_expert
     enable_web_search: true
     enable_fetch: true
     enable_calculate: true
@@ -45,3 +61,4 @@ ensemble:
   bootstrap_ci: true                # 胜率/均分 Bootstrap 置信区间
   n_bootstrap: 200
   flag_low_agreement: 0.6           # 一致率/稳定性低于此值 → 标红人工复核
+  dim_problem_threshold: 3.0        # 维度分<=此值算"问题"（按垂域维度问题分布用，满分5；调大→问题题更多）

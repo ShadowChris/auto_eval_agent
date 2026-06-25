@@ -1,0 +1,33 @@
+name: search
+display: 搜索
+matching_categories: [搜索, 检索, 查找, 找资料, 找网站, 找链接, 信息检索]
+rules: "要求查找网页、资料、链接、出处、资源或检索结果。重点评价结果相关性、来源质量、覆盖与可访问性；若用户要的是垂域事实答案，应优先归入对应垂域。"
+rubrics:
+  - name: 结果相关性
+    description: 返回结果是否直接匹配查询意图。
+    weight: 2.0
+    scale: 5
+    sub_dimensions:
+      - {name: 主题匹配, description: 结果内容是否与查询主题一致}
+      - {name: 意图匹配, description: 是否满足找官网、教程、论文、下载等具体意图}
+  - name: 来源质量
+    description: 结果来源是否权威、可信和可追溯。
+    weight: 1.5
+    scale: 5
+    sub_dimensions:
+      - {name: 权威可信, description: 是否优先官方、原始或高质量来源}
+      - {name: 来源可辨识, description: 是否提供清楚的标题、出处或链接}
+  - name: 覆盖与排序
+    description: 结果集合是否覆盖充分且排序合理。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - {name: 结果覆盖, description: 是否覆盖用户所需的主要方向}
+      - {name: 去重与排序, description: 是否减少重复并把高价值结果置前}
+  - name: 时效与可用性
+    description: 结果是否当前有效、可访问并便于使用。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - {name: 信息时效, description: 是否避免过时页面或失效资源}
+      - {name: 可访问性, description: 链接、资源和说明是否可正常使用}

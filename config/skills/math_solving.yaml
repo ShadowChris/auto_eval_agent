@@ -1,0 +1,34 @@
+name: math_solving
+display: 数学解题
+matching_categories: [数学解题, 数学, 计算, 推理, 证明, 应用题]
+rules: "数学计算、证明、逻辑推导和应用题。先独立验算；简单运算自行复核，复杂或精度敏感计算再调用工具。"
+rubrics:
+  - name: 正确性
+    description: 最终结论与关键计算是否正确。
+    weight: 2.0
+    scale: 5
+    sub_dimensions:
+      - {name: 最终答案正确, description: 数值、结论、单位和精度是否正确}
+      - {name: 中间结果正确, description: 关键中间计算是否准确}
+  - name: 推理严谨性
+    description: 推导是否成立、无跳步或逻辑漏洞。
+    weight: 1.5
+    scale: 5
+    sub_dimensions:
+      - {name: 逻辑连贯, description: 各步骤之间是否有充分依据}
+      - {name: 条件使用, description: 是否正确使用题设条件、定理和约束}
+      - {name: 边界检查, description: 是否考虑定义域、特殊值和边界情况}
+  - name: 方法合理性
+    description: 解法是否适合题目、效率合理。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - {name: 策略选择, description: 是否选择有效且不过度复杂的方法}
+      - {name: 可验证性, description: 过程是否便于复核或复现}
+  - name: 完整与表达
+    description: 是否完整作答且表达清晰规范。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - {name: 要求覆盖, description: 是否回答所有小问}
+      - {name: 书写清晰, description: 公式、符号、步骤和说明是否清楚}
