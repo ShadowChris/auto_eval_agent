@@ -84,10 +84,19 @@ def aggregate_scores(
     scale = dims[0].scale if dims else 5
     low = (agree is not None and agree < threshold) or repeat_std > (0.15 * scale + 0.3)
 
+    # 维度打分理由：多裁判合并（每维度各裁判理由拼接，最多 3 条防爆）
+    all_reason_keys = list(dict.fromkeys(k for s in scores for k in s.rubric_reasons))
+    rubric_reasons: dict[str, str] = {}
+    for k in all_reason_keys:
+        parts = [f"[{s.judge}] {s.rubric_reasons[k]}" for s in scores if k in s.rubric_reasons]
+        if parts:
+            rubric_reasons[k] = " | ".join(parts[:3])
+
     return Verdict(
         item_id=scores[0].item_id,
         model=scores[0].model,
         rubric=rubric_mean,
+        rubric_reasons=rubric_reasons,
         total=total,
         correctness=correctness,
         error_type=error_type,

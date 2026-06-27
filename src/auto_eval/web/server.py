@@ -4,20 +4,19 @@
 """
 from __future__ import annotations
 
-import csv
-import io
 import json
 from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..config import load_config
 from .parse_input import Mode, parse_jsonl, parse_text
+from .history import build_xlsx, delete_snapshot, export_rows, list_snapshots, load_snapshot, rows_to_csv, snapshot_payload, task_to_snapshot
 from .runner import run_eval
 from .tasks import get_task, new_task
 
@@ -119,31 +118,54 @@ async def api_stream(task_id: str):
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
+@app.get("/api/history")
+def api_history(limit: int = 50):
+    return {"items": list_snapshots(limit=limit)}
+
+
+@app.get("/api/history/{task_id}")
+def api_history_detail(task_id: str):
+    task = get_task(task_id)
+    if task:
+        return snapshot_payload(task_to_snapshot(task))
+    data = load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "task not found")
+    return snapshot_payload(data)
+
+
+@app.delete("/api/history/{task_id}")
+def api_history_delete(task_id: str):
+    if not delete_snapshot(task_id):
+        raise HTTPException(404, "task not found")
+    return {"ok": True}
+
+
 @app.get("/api/eval/{task_id}/export")
 def api_export(task_id: str, format: str = "json"):
     task = get_task(task_id)
-    if not task:
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
         raise HTTPException(404, "task not found")
-    if format == "json":
-        return JSONResponse(
-            {"task_id": task.id, "mode": task.mode, "results": task.results, "summary": task.summary}
-        )
-    out = io.StringIO()
-    keys = sorted({k for r in task.results for k in r.keys()})
-    writer = csv.DictWriter(out, fieldnames=keys)
-    writer.writeheader()
-    for r in task.results:
-        row = {
-            k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
-            for k, v in r.items()
-        }
-        writer.writerow(row)
-    return StreamingResponse(
-        iter([out.getvalue().encode("utf-8-sig")]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=eval_{task.id}.csv"},
-    )
 
+    if format == "json":
+        return JSONResponse(snapshot_payload(data))
+
+    if format == "xlsx":
+        content = build_xlsx(data)
+        return Response(
+            content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.xlsx"},
+        )
+
+    sheets = export_rows(data)
+    csv_text = rows_to_csv(sheets.get("逐题结果") or [])
+    return StreamingResponse(
+        iter([csv_text.encode("utf-8-sig")]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.csv"},
+    )
 
 @app.get("/")
 def index():

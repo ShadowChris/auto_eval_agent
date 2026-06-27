@@ -46,8 +46,9 @@ class EvalEngine:
         self.pairs_file = self.run_dir / "pairs.jsonl"
         self.meta_file = self.run_dir / "meta.jsonl"
 
+        _providers = cfg.eval_options.effective_providers()
         self.clients = [
-            JudgeClient(j, cfg.eval_options.search_provider, cfg.eval_options.search_topk)
+            JudgeClient(j, _providers, cfg.eval_options.search_topk)
             for j in cfg.judges
         ]
         self.skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None

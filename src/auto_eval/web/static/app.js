@@ -35,6 +35,8 @@ createApp({
     const problemDimFilter = ref("");
     const resultPage = ref(1);
     const cellTooltip = ref({ visible: false, text: "", style: {} });
+    const historyItems = ref([]);
+    const loadingHistory = ref(false);
     let tooltipHideTimer = null;
     const pageSize = 20;
 
@@ -287,6 +289,7 @@ createApp({
         running.value = false;
         es.close();
         renderCharts();
+        loadHistory();
       });
       es.addEventListener("error", (e) => {
         try {
@@ -300,6 +303,13 @@ createApp({
       });
     }
 
+    function cellTitle(r, c) {
+      // 维度列 hover 显示该维度的打分理由（rubric_reasons）
+      if (c.rubricDim && r.rubric_reasons && r.rubric_reasons[c.rubricDim]) {
+        return r.rubric_reasons[c.rubricDim];
+      }
+      return "";
+    }
     function cell(r, c) {
       const v = r[c.key];
       if (c.rubricDim) return r.rubric && r.rubric[c.rubricDim] != null ? r.rubric[c.rubricDim] : "";
@@ -417,11 +427,73 @@ createApp({
       });
     }
 
+    function formatTime(ts) {
+      if (!ts) return "";
+      const d = new Date(ts * 1000);
+      if (Number.isNaN(d.getTime())) return String(ts);
+      return d.toLocaleString();
+    }
+
+    async function loadHistory() {
+      loadingHistory.value = true;
+      try {
+        const r = await fetch("/api/history?limit=50");
+        const d = await r.json();
+        historyItems.value = d.items || [];
+      } finally {
+        loadingHistory.value = false;
+      }
+    }
+
+    async function delHistory(id) {
+      if (!confirm("确认删除这条历史记录？删除后不可恢复。")) return;
+      const r = await fetch(`/api/history/${id}`, { method: "DELETE" });
+      if (!r.ok) {
+        alert("删除失败");
+        return;
+      }
+      if (taskId.value === id) {
+        taskId.value = "";
+        results.value = [];
+        summary.value = null;
+      }
+      await loadHistory();
+    }
+
+    async function loadHistoryTask(id) {
+      const r = await fetch(`/api/history/${id}`);
+      if (!r.ok) {
+        alert("历史记录加载失败");
+        return;
+      }
+      const d = await r.json();
+      taskId.value = d.task_id || id;
+      mode.value = d.mode || mode.value;
+      items.value = d.items || [];
+      results.value = d.results || [];
+      summary.value = d.summary || null;
+      total.value = items.value.length || results.value.length;
+      progress.value = results.value.length;
+      running.value = false;
+      activeSkill.value = "";
+      resultQuery.value = "";
+      correctnessFilter.value = "";
+      problemDimFilter.value = "";
+      resultPage.value = 1;
+      barChartRefs.value = [];
+      if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
+      renderCharts();
+      nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
+
     function exportCsv() {
       window.open(`/api/eval/${taskId.value}/export?format=csv`);
     }
     function exportJson() {
       window.open(`/api/eval/${taskId.value}/export?format=json`);
+    }
+    function exportXlsx() {
+      window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
     }
 
     onMounted(async () => {
@@ -431,16 +503,18 @@ createApp({
       models.value = d.models;
       selectedJudges.value = d.judges.length ? [d.judges[0].name] : [];
       selectedModel.value = d.models[0] || "";
+      loadHistory();
     });
 
     return {
       modes, mode, text, items, errors, judges, models, selectedJudges, selectedModel,
-      concurrency, running, progress, total, results, summary, taskId,
+      concurrency, running, progress, total, results, summary, taskId, historyItems, loadingHistory,
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       formatHint, placeholder, previewKeys, resultCols,
-      trunc, switchMode, onFile, doParse, submit, cell, columnWidth, exportCsv, exportJson,
+      trunc, switchMode, onFile, doParse, submit, cell, cellTitle, columnWidth, exportCsv, exportJson, exportXlsx,
+      loadHistory, loadHistoryTask, delHistory, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,
     };

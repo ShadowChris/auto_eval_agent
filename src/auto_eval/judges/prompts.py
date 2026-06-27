@@ -67,7 +67,7 @@ RUBRIC_SYSTEM = Template(
 
 【打分维度】（1–{{ scale }} 分，{{ scale }} 为满分）
 {% for d in dims -%}
-- {{ d.name }}：{{ d.description }}
+{{ loop.index }}. {{ d.name }}：{{ d.description }}
   {% if d.sub_dimensions -%}
   {% for s in d.sub_dimensions -%}
     - {{ s.name }}：{{ s.description }}
@@ -87,7 +87,7 @@ RUBRIC_SYSTEM = Template(
    - 安全与合规：...
 4. 对比锚点：...
 </analysis>
-{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }}>, {% endfor -%} "total": <均值> }, {%- else -%} "{{ d.name }}": <1-{{ scale }}>, {%- endif -%} {%- endfor -%} }, "total": <各维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因标签，无错误填 null>", "rationale": "<一句话总结>"}
+{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }}>, {% endfor -%} "total": <均值>, "reason": "<该维度为何打这分的简短理由>" }, {%- else -%} "{{ d.name }}": { "total": <1-{{ scale }}>, "reason": "<该维度为何打这分的简短理由>" }, {%- endif -%} {%- endfor -%} }, "total": <各维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因标签，无错误填 null>", "rationale": "<一句话总结>"}
 """
 )
 
@@ -135,7 +135,7 @@ RUBRIC_COMPARE_SYSTEM = Template(
 
 【打分维度】（1–{{ scale }} 分，{{ scale }} 为满分；分值评判待评答案【本身】的质量，竞品仅用于对比参考、不改变绝对分尺度）
 {% for d in dims -%}
-- {{ d.name }}：{{ d.description }}
+{{ loop.index }}. {{ d.name }}：{{ d.description }}
   {% if d.sub_dimensions -%}
   {% for s in d.sub_dimensions -%}
     - {{ s.name }}：{{ s.description }}
@@ -150,7 +150,7 @@ RUBRIC_COMPARE_SYSTEM = Template(
 4. 核查：...
 5. 结论：待评答案本身的质量评判...
 </analysis>
-{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }}>, {% endfor -%} "total": <均值> }, {%- else -%} "{{ d.name }}": <1-{{ scale }}>, {%- endif -%} {%- endfor -%} }, "total": <各维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<待评答案的错因，无填 null>", "rationale": "<对待评答案本身的一句话评判，可点出相对竞品的差异>"}
+{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }}>, {% endfor -%} "total": <均值>, "reason": "<该维度为何打这分的简短理由>" }, {%- else -%} "{{ d.name }}": { "total": <1-{{ scale }}>, "reason": "<该维度为何打这分的简短理由>" }, {%- endif -%} {%- endfor -%} }, "total": <各维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<待评答案的错因，无填 null>", "rationale": "<对待评答案本身的一句话评判，可点出相对竞品的差异>"}
 """
 )
 
@@ -200,7 +200,7 @@ RUBRIC_PROCESS_SYSTEM = Template(
 
 【打分维度】（1–{{ scale }} 分，{{ scale }} 为满分）
 {% for d in dims -%}
-- {{ d.name }}：{{ d.description }}
+{{ loop.index }}. {{ d.name }}：{{ d.description }}
   {% if d.sub_dimensions -%}
   {% for s in d.sub_dimensions -%}
     - {{ s.name }}：{{ s.description }}
@@ -214,7 +214,7 @@ RUBRIC_PROCESS_SYSTEM = Template(
 3. 过程分析：...
 4. 对比锚点：...
 </analysis>
-{"rubric": {"<一级维度名>": {"<二级维度名>": <1-{{ scale }} 整数>, ...}, ...}, "total": <各维度平均>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因或 null>", "rationale": "<一句话总结>"}
+{"rubric": {"<一级维度名>": {"<二级维度名>": <1-{{ scale }} 整数>, ..., "total": <均值>, "reason": "<该维度打分理由>"}, "<无二级的一级>": {"total": <1-{{ scale }}>, "reason": "<该维度打分理由>"}, ...}, "total": <各维度平均>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因或 null>", "rationale": "<一句话总结>"}
 """
 )
 

@@ -69,6 +69,7 @@ class SingleScore(BaseModel):
     persona: str | None = None
     run_idx: int = 0  # 重复采样索引
     rubric: dict[str, int] = Field(default_factory=dict)  # 各维度分（通常 1–5）
+    rubric_reasons: dict[str, str] = Field(default_factory=dict)  # 各一级维度打分理由
     total: float = 0.0
     correctness: Correctness = "unclear"
     error_type: str | None = None
@@ -107,6 +108,7 @@ class Verdict(BaseModel):
     item_id: str
     model: str
     rubric: dict[str, float] = Field(default_factory=dict)  # 各维度均分
+    rubric_reasons: dict[str, str] = Field(default_factory=dict)  # 各一级维度打分理由（多裁判合并）
     total: float = 0.0
     correctness: Correctness = "unclear"
     error_type: str | None = None

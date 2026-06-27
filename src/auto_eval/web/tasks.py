@@ -7,6 +7,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from .history import load_snapshot, save_task
+
 
 @dataclass
 class Task:
@@ -33,8 +35,33 @@ def new_task(mode: str, items: list[dict], options: dict) -> Task:
     task_id = uuid.uuid4().hex[:12]
     t = Task(id=task_id, mode=mode, items=items, options=options)
     TASKS[task_id] = t
+    save_task(t)
     return t
 
 
 def get_task(task_id: str) -> Task | None:
-    return TASKS.get(task_id)
+    task = TASKS.get(task_id)
+    if task:
+        return task
+    snapshot = load_snapshot(task_id)
+    if not snapshot:
+        return None
+    status = snapshot.get("status") or "done"
+    error = snapshot.get("error")
+    if status in {"pending", "running"}:
+        status = "error"
+        error = error or "服务中断，已保留中断前完成的评估结果"
+    task = Task(
+        id=snapshot.get("task_id") or task_id,
+        mode=snapshot.get("mode") or "single",
+        items=snapshot.get("items") or [],
+        options=snapshot.get("options") or {},
+        status=status,
+        results=snapshot.get("results") or [],
+        summary=snapshot.get("summary") or {},
+        created_at=float(snapshot.get("created_at") or time.time()),
+        done_total=int(snapshot.get("done_total") or len(snapshot.get("results") or [])),
+        error=error,
+    )
+    TASKS[task.id] = task
+    return task

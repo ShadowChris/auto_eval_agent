@@ -81,8 +81,19 @@ class EvalOptions(BaseModel):
     pairwise_bidirectional: bool = True  # A/B 双向比较抗位置偏差
     independent_then_compare: bool = True  # 先独立盲评再成对比较
     pairwise_for_ref: bool = False  # 有参考答案题是否也做成对比较
-    search_provider: str | None = None  # tavily | serpapi | bing
+    search_provider: str | list[str] | None = None  # 单源(str)或多源(list)；与 search_providers 合并去重
+    search_providers: list[str] = Field(default_factory=list)  # 多源聚合：配多个则并行汇总，缺 key 的源自动跳过
     search_topk: int = 3
+
+    def effective_providers(self) -> list[str]:
+        """合并 search_providers + search_provider（后者可为 str 或 list），去重保序。"""
+        out = list(self.search_providers or [])
+        sp = self.search_provider
+        if sp:
+            for p in ([sp] if isinstance(sp, str) else sp):
+                if p not in out:
+                    out.append(p)
+        return out
 
 
 class EnsembleConfig(BaseModel):

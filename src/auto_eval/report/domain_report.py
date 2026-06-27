@@ -100,11 +100,17 @@ def _build_overview(sections, focal) -> list[dict]:
         fov = s["per_model"].get(focal, {})
         right = fov.get("correctness_dist", {}).get("right", 0)
         n = fov.get("n", 0)
+        problem = max(n - right, 0)
         rows.append({
             "display": s["display"],
             "skill": s["skill"],
             "n_items": s["n_items"],
+            "eval_n": n,
+            "focal_right_count": right,
+            "problem_count": problem,
+            "eval_failed_count": max(s["n_items"] - n, 0),
             "focal_right_rate": (right / n) if n else None,
+            "focal_problem_rate": (problem / n) if n else None,
             "focal_mean_total": fov.get("mean_total"),
             "first_cluster": s["clusters"][0]["label"] if s["clusters"] else "—",
             "low_agreement_rate": s["low_agreement_rate"],
@@ -112,7 +118,6 @@ def _build_overview(sections, focal) -> list[dict]:
             "fallback_count": round(s["n_items"] * s["category_source_pct"].get("fallback_default", 0)),
         })
     return rows
-
 
 def _build_section(skill_name, skill_router, results, items_map, skill_of,
                    focal, models, others, scale, clusters_by_skill, threshold) -> dict:
@@ -198,11 +203,11 @@ def _render_c_md(C, focal) -> str:
         )
         L.append("")
     L.append("## 一、总览（一行一垂域，扫一眼定位最弱垂域）")
-    L.append("| 垂域 | 样本量 | focal正确率 | focal平均分 | 首要错因 | 低一致率 |")
-    L.append("|---|---|---|---|---|---|")
+    L.append("| 垂域 | 样本量 | 成功评测 | 出问题数 | focal正确率 | focal平均分 | 首要错因 | 低一致率 |")
+    L.append("|---|---:|---:|---:|---:|---:|---|---:|")
     for r in C["overview"]:
         L.append(
-            f"| {r['display']} | {r['n_items']} | "
+            f"| {r['display']} | {r['n_items']} | {r.get('eval_n', 0)} | {r.get('problem_count', 0)} | "
             f"{_pct(r['focal_right_rate'])} | {_f(r['focal_mean_total'])} | "
             f"{r['first_cluster']} | {_pct(r['low_agreement_rate'])} |"
         )

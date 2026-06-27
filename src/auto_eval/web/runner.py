@@ -17,6 +17,7 @@ from ..judges.ensemble import aggregate_pairs, aggregate_scores
 from ..meta import ground_truth
 from ..runners import build_runner
 from ..schema import EvalItem
+from .history import save_task
 from .tasks import Task
 
 
@@ -35,22 +36,26 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
 async def run_eval(task: Task, cfg: AppConfig) -> None:
     await task.publish("start", {"total": len(task.items), "mode": task.mode})
     task.status = "running"
+    save_task(task)
     try:
         await _run(task, cfg)
         task.summary = _summarize(task, cfg)
         task.status = "done"
+        save_task(task)
         await task.publish("done", {"summary": task.summary, "total": len(task.items)})
     except Exception as e:
         task.status = "error"
         task.error = f"{type(e).__name__}: {e}"
+        save_task(task)
         await task.publish("error", {"message": task.error})
 
 
 async def _run(task: Task, cfg: AppConfig) -> None:
     selected = task.options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
+    _providers = cfg.eval_options.effective_providers()
     clients = [
-        JudgeClient(j, cfg.eval_options.search_provider, cfg.eval_options.search_topk)
+        JudgeClient(j, _providers, cfg.eval_options.search_topk)
         for j in judges_cfg
     ]
     skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
@@ -91,6 +96,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         res["index"] = idx
         task.results.append(res)
         task.done_total += 1
+        save_task(task)
         await task.publish(
             "result",
             {"progress": task.done_total, "total": len(task.items), "result": res},
@@ -205,8 +211,16 @@ def _fill_verdict(out: dict, v) -> None:
     out["correctness"] = v.correctness
     out["total"] = round(v.total, 2)
     out["rubric"] = {k: round(val, 2) for k, val in v.rubric.items()}
+    out["rubric_reasons"] = v.rubric_reasons or {}
     out["error_type"] = v.error_type
-    out["rationale"] = v.rationale
+    # 各维度打分理由拼到"理由"末尾，前端"理由"列与导出可直接看到
+    _rat = v.rationale or ""
+    _reasons = v.rubric_reasons or {}
+    if _reasons:
+        _suffix = " ｜ ".join(f"{k}：{rv}" for k, rv in _reasons.items())
+        out["rationale"] = (_rat + "  ||  " + _suffix) if _rat else _suffix
+    else:
+        out["rationale"] = _rat
     out["tool_trace"] = v.single_scores[0].tool_trace if v.single_scores else []
     out["used_search"] = any(s.used_search for s in v.single_scores)
     out["truncated"] = any(s.truncated for s in v.single_scores)
@@ -226,8 +240,20 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     res = task.results
     ok = [r for r in res if "error" not in r]
-    summary: dict = {"total": len(res), "done": len(ok), "mode": task.mode}
-    if task.mode in ("single", "online"):
+    judged = [r for r in ok if r.get("correctness") is not None]
+    right_count = sum(1 for r in judged if r.get("correctness") == "right")
+    problem_count = sum(1 for r in judged if r.get("correctness") != "right")
+    summary: dict = {
+        "total": len(res),
+        "done": len(ok),
+        "failed": len(res) - len(ok),
+        "mode": task.mode,
+    }
+    if judged:
+        summary["right_count"] = right_count
+        summary["problem_count"] = problem_count
+        summary["accuracy"] = round(right_count / len(judged), 3)
+    if task.mode in ("single", "online", "process"):
         totals = [r.get("total") for r in ok if r.get("total") is not None]
         if totals:
             summary["mean_total"] = round(sum(totals) / len(totals), 2)
@@ -250,7 +276,6 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
         except Exception:
             summary["by_skill"] = []
     return summary
-
 
 def _by_skill(task: Task, cfg: AppConfig) -> list[dict]:
     """把 web 的逐题结果桥接到 domain_report，返回垂域总览 overview（每垂域一行）。

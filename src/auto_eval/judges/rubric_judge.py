@@ -22,20 +22,26 @@ _VALID = {"right", "wrong", "partial", "unclear"}
 
 
 def _flatten_rubric(raw, dim_names=None):
-    """将嵌套（一级→二级）rubric 展平为一级分 dict。兼容旧平坦格式。
-    若 dim_names 提供且裁判输出的 key 集与期望维度名不匹配，则按顺序重映射
-    （裁判通常按 prompt 列出的顺序输出，只是 key 名可能自创）。"""
+    """将嵌套（一级→二级）rubric 展平为一级分 dict，并提取每个一级维度的打分理由。
+    兼容旧格式（直接分 / 无 reason）。返回 (rubric, reasons)。"""
     out = {}
+    reasons: dict[str, str] = {}
     for k, v in (raw or {}).items():
         if isinstance(v, dict):
-            out[k] = round(sum(v.values()) / len(v)) if v else 0
-        elif isinstance(v, (int, float)):
+            if "total" in v and isinstance(v["total"], (int, float)) and not isinstance(v["total"], bool):
+                out[k] = int(v["total"])
+            else:
+                nums = [x for x in v.values() if isinstance(x, (int, float)) and not isinstance(x, bool)]
+                out[k] = round(sum(nums) / len(nums)) if nums else 0
+            if v.get("reason"):
+                reasons[k] = str(v["reason"])
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
             out[k] = int(v)
     if dim_names and out and set(out.keys()) != set(dim_names):
         vals = list(out.values())
         if len(vals) == len(dim_names):
             out = {dim_names[i]: vals[i] for i in range(len(dim_names))}
-    return out
+    return out, reasons
 
 
 class RubricJudge:
@@ -94,7 +100,7 @@ class RubricJudge:
         if data is None:
             raise ValueError("裁判输出无法解析为 JSON")
         rubric_raw = data.get("rubric") or {}
-        rubric = _flatten_rubric(rubric_raw, dim_names=[d.name for d in dims])
+        rubric, rubric_reasons = _flatten_rubric(rubric_raw, dim_names=[d.name for d in dims])
         if data.get("total") is not None:
             total = float(data["total"])
         else:
@@ -112,6 +118,7 @@ class RubricJudge:
             persona=self.client.cfg.persona,
             run_idx=run_idx,
             rubric=rubric,
+            rubric_reasons=rubric_reasons,
             total=total,
             correctness=correctness,
             error_type=error_type,

@@ -14,8 +14,10 @@ import subprocess
 import sys
 import time
 from functools import partial
+from urllib.parse import quote
 
 import httpx
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WEB_SEARCH_TOOL = {
     "type": "function",
@@ -69,10 +71,10 @@ PYTHON_RUN_TOOL = {
     },
 }
 
-_KEY_ENV = {"tavily": "TAVILY_API_KEY", "serpapi": "SERPAPI_API_KEY", "bing": "BING_API_KEY"}
+_KEY_ENV = {"tavily": "TAVILY_API_KEY", "serpapi": "SERPAPI_API_KEY", "bing": "BING_API_KEY", "jina": "JINA_API_KEY"}
 
 
-def _search_tavily(query: str, topk: int, key: str) -> list[str]:
+def _search_tavily(query: str, topk: int, key: str) -> list[dict]:
     r = httpx.post(
         "https://api.tavily.com/search",
         json={"api_key": key, "query": query, "max_results": topk},
@@ -80,10 +82,13 @@ def _search_tavily(query: str, topk: int, key: str) -> list[str]:
     )
     r.raise_for_status()
     data = r.json()
-    return [f"{x.get('title', '')}：{x.get('content', '')}" for x in data.get("results", [])][:topk]
+    return [
+        {"url": x.get("url", ""), "title": x.get("title", ""), "snippet": x.get("content", "")}
+        for x in data.get("results", [])
+    ][:topk]
 
 
-def _search_serpapi(query: str, topk: int, key: str) -> list[str]:
+def _search_serpapi(query: str, topk: int, key: str) -> list[dict]:
     r = httpx.get(
         "https://serpapi.com/search",
         params={"engine": "google", "q": query, "api_key": key},
@@ -91,18 +96,18 @@ def _search_serpapi(query: str, topk: int, key: str) -> list[str]:
     )
     r.raise_for_status()
     data = r.json()
-    out: list[str] = []
+    out: list[dict] = []
     box = data.get("answer_box") or {}
     if box.get("answer"):
-        out.append(f"答案盒：{box['answer']}")
+        out.append({"url": "", "title": "答案盒", "snippet": box["answer"]})
     if box.get("snippet"):
-        out.append(f"摘要：{box['snippet']}")
+        out.append({"url": "", "title": "摘要", "snippet": box["snippet"]})
     for x in (data.get("organic_results") or [])[:topk]:
-        out.append(f"{x.get('title', '')}：{x.get('snippet', '')}")
+        out.append({"url": x.get("link", ""), "title": x.get("title", ""), "snippet": x.get("snippet", "")})
     return out[:topk]
 
 
-def _search_bing(query: str, topk: int, key: str) -> list[str]:
+def _search_bing(query: str, topk: int, key: str) -> list[dict]:
     r = httpx.get(
         "https://api.bing.microsoft.com/v7.0/search",
         headers={"Ocp-Apim-Subscription-Key": key},
@@ -112,34 +117,102 @@ def _search_bing(query: str, topk: int, key: str) -> list[str]:
     r.raise_for_status()
     data = r.json()
     webs = (data.get("webPages") or {}).get("value", [])
-    return [f"{x.get('name', '')}：{x.get('snippet', '')}" for x in webs][:topk]
+    return [
+        {"url": x.get("url", ""), "title": x.get("name", ""), "snippet": x.get("snippet", "")}
+        for x in webs
+    ][:topk]
 
+
+def _search_jina(query: str, topk: int, key: str) -> list[dict]:
+    """Jina s.jina.ai 聚合搜索：无需 key 也能用（匿名有共享限速；有 key 提速）。
+    返回单条聚合结果（markdown，内部已聚合 google/bing 等多源），截断防爆 token。"""
+    headers = {"X-Retain-Images": "none"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    r = httpx.get(f"https://s.jina.ai/{quote(query)}", headers=headers, timeout=25.0)
+    r.raise_for_status()
+    text = (r.text or "").strip()
+    if not text:
+        return []
+    return [{"url": "", "title": "Jina聚合搜索", "snippet": text[:1500]}]
+
+
+_SEARCH_FUNCS = {"tavily": _search_tavily, "serpapi": _search_serpapi, "bing": _search_bing, "jina": _search_jina}
 
 _SEARCH_CACHE: dict[str, tuple[float, list[str]]] = {}
 _SEARCH_TTL = 3600  # 秒，相同 query 在 TTL 内复用结果（去重，省 API 调用）
 
 
-def web_search(query: str, provider: str | None = None, topk: int = 3) -> list[str]:
-    if not provider:
+def _safe_search(fn, query: str, topk: int, key: str) -> list[dict]:
+    """单源搜索，失败返回空（容错：某源挂掉/超时不影响其他源）。"""
+    try:
+        return fn(query, topk, key)
+    except Exception:
         return []
-    ck = f"{provider}:{query}:{topk}"
+
+
+def _dedupe_key(item: dict) -> str:
+    """去重 key：优先 url；无 url 用 标题+正文前60字 归一化。"""
+    url = (item.get("url") or "").strip()
+    if url:
+        return url
+    return ((item.get("title") or "").strip() + (item.get("snippet") or "").strip())[:60].lower()
+
+
+def web_search(query: str, providers=None, topk: int = 3) -> list[str]:
+    """多源聚合搜索：并行调所有 providers，按 url 去重 + 交错排序（保多样性）+ 来源标注 + 截断。
+
+    providers: str | list[str]（tavily/serpapi/bing）；配几个用几个，缺 key 的源自动跳过。
+    """
+    if isinstance(providers, str):
+        providers = [providers]
+    providers = [p for p in (providers or []) if p]
+    if not providers:
+        return []
+    ck = f"{','.join(sorted(providers))}:{query}:{topk}"
     now = time.monotonic()
     if ck in _SEARCH_CACHE and now - _SEARCH_CACHE[ck][0] < _SEARCH_TTL:
         return _SEARCH_CACHE[ck][1]
-    key = os.environ.get(_KEY_ENV.get(provider, ""))
-    res: list[str] = []
-    if key:
-        try:
-            if provider == "tavily":
-                res = _search_tavily(query, topk, key)
-            elif provider == "serpapi":
-                res = _search_serpapi(query, topk, key)
-            elif provider == "bing":
-                res = _search_bing(query, topk, key)
-        except Exception:
-            pass
-    _SEARCH_CACHE[ck] = (now, res)
-    return res
+    # 并行调各源（线程池），每源各自容错；缺 key / 不支持的源自动跳过
+    per_provider: dict[str, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as ex:
+        fut_to_p = {}
+        for p in providers:
+            key = os.environ.get(_KEY_ENV.get(p, ""))
+            fn = _SEARCH_FUNCS.get(p)
+            if not key or not fn:  # 所有源都需要 key（jina 现也已强制鉴权）
+                continue
+            fut_to_p[ex.submit(_safe_search, fn, query, topk, key)] = p
+        for fut in as_completed(fut_to_p):
+            per_provider[fut_to_p[fut]] = fut.result()
+    # 交错轮询 + 去重：保证前几条来自不同源，多样性最好；避免某源霸榜
+    seen: set[str] = set()
+    merged: list[tuple[str, dict]] = []
+    ordered = [p for p in providers if p in per_provider]
+    max_len = max((len(per_provider[p]) for p in ordered), default=0)
+    limit = topk * 2
+    for i in range(max_len):
+        for p in ordered:
+            items = per_provider.get(p, [])
+            if i >= len(items):
+                continue
+            dk = _dedupe_key(items[i])
+            if dk in seen:
+                continue
+            seen.add(dk)
+            merged.append((p, items[i]))
+            if len(merged) >= limit:
+                break
+        if len(merged) >= limit:
+            break
+    # 格式化为字符串（带来源标注 [tavily]/[bing]，便于裁判判断出处权威性）
+    out: list[str] = []
+    for p, item in merged:
+        title = (item.get("title") or "").strip()
+        snippet = (item.get("snippet") or "").strip()
+        out.append(f"[{p}] {title}：{snippet}" if title else f"[{p}] {snippet}")
+    _SEARCH_CACHE[ck] = (now, out)
+    return out
 
 
 def fetch_page(url: str, max_chars: int = 2000) -> str:
@@ -218,17 +291,17 @@ def answer_lookup(query: str) -> str:
 
 def build_tools(
     web_search_enabled: bool,
-    search_provider,
+    search_providers,
     search_topk: int,
     fetch_enabled: bool,
     calculate_enabled: bool = True,
     python_enabled: bool = False,
 ):
-    """返回 (工具定义列表, 名→可调用函数映射)。web_search 已绑定 provider/topk。"""
+    """返回 (工具定义列表, 名→可调用函数映射)。web_search 已绑定 providers/topk（多源聚合）。"""
     defs, fmap = [], {}
     if web_search_enabled:
         defs.append(WEB_SEARCH_TOOL)
-        fmap["web_search"] = partial(web_search, provider=search_provider, topk=search_topk)
+        fmap["web_search"] = partial(web_search, providers=search_providers, topk=search_topk)
     if fetch_enabled:
         defs.append(FETCH_PAGE_TOOL)
         fmap["fetch_page"] = fetch_page

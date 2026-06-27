@@ -52,7 +52,7 @@ class JudgeClient:
     def __init__(
         self,
         cfg: JudgeConfig,
-        search_provider: str | None = None,
+        search_providers=None,
         search_topk: int = 3,
         max_rounds: int = 12,
         trace_path: str | None = None,
@@ -70,7 +70,7 @@ class JudgeClient:
         self.trace_path = trace_path or os.environ.get("AUTO_EVAL_JUDGE_TRACE")
         self.tool_defs, self.tool_map = build_tools(
             web_search_enabled=cfg.enable_web_search,
-            search_provider=search_provider,
+            search_providers=search_providers,
             search_topk=search_topk,
             fetch_enabled=getattr(cfg, "enable_fetch", True),
             calculate_enabled=getattr(cfg, "enable_calculate", True),

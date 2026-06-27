@@ -14,6 +14,29 @@
   </div>
 
   <section>
+    <h2>历史记录
+      <button @click="loadHistory" :disabled="loadingHistory">刷新</button>
+    </h2>
+    <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
+    <table class="grid history-table" v-if="historyItems.length">
+      <thead><tr><th>时间</th><th>模式</th><th>状态</th><th>进度</th><th>预览</th><th>操作</th></tr></thead>
+      <tbody>
+        <tr v-for="h in historyItems" :key="h.task_id">
+          <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
+          <td>{{ h.mode }}</td>
+          <td>{{ h.status }}</td>
+          <td>{{ h.done }}/{{ h.total }}</td>
+          <td>{{ h.preview }}</td>
+          <td>
+            <button @click="loadHistoryTask(h.task_id)">加载</button>
+            <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p v-else class="hint">暂无历史记录。</p>
+  </section>
+  <section>
     <h2>① 批量输入</h2>
     <p class="hint">{{ formatHint }}</p>
     <textarea v-model="text" rows="7" :placeholder="placeholder"></textarea>
@@ -61,9 +84,14 @@
     <h2>③ 结果
       <button @click="exportCsv" :disabled="!taskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId">导出 JSON</button>
+      <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
     </h2>
     <div class="summary" v-if="summary">
-      <span>完成 {{ summary.done }}/{{ summary.total }}</span>
+      <span>样本量 {{ summary.total }}</span>
+      <span>成功评测 {{ summary.done }}</span>
+      <span v-if="summary.failed">失败 {{ summary.failed }}</span>
+      <span v-if="summary.problem_count!=null">出问题 {{ summary.problem_count }}</span>
+      <span v-if="summary.accuracy!=null">准确率 {{ (summary.accuracy*100).toFixed(0) }}%</span>
       <span v-if="summary.mean_total!=null">平均总分 {{ summary.mean_total }} / {{ (summary.norm_mean*100).toFixed(0) }}%</span>
       <span v-if="summary.judge_accuracy!=null">裁判判题准确率 {{ (summary.judge_accuracy*100).toFixed(0) }}% （{{ summary.meta_n }} 题有参考答案）</span>
       <span v-if="summary.a_winrate!=null">A 胜率 {{ (summary.a_winrate*100).toFixed(0) }}%</span>
@@ -75,11 +103,13 @@
         ⚠️ 共 {{ fallbackStat.total }} 题，其中 {{ fallbackStat.fbCount }} 题（{{ (fallbackStat.rate*100).toFixed(0) }}%）未命中明确垂域（落“通用”）→ 建议检查 Skill 匹配表覆盖度或预标 category
       </p>
       <table class="grid">
-        <thead><tr><th>垂域</th><th>样本量</th><th>正确率</th><th>平均分</th><th>首要错因</th><th>低一致率</th></tr></thead>
+        <thead><tr><th>垂域</th><th>样本量</th><th>成功评测</th><th>出问题数</th><th>正确率</th><th>平均分</th><th>首要错因</th><th>低一致率</th></tr></thead>
         <tbody>
           <tr v-for="s in summary.by_skill.overview" :key="s.skill">
             <td>{{ s.display }}</td>
             <td>{{ s.n_items }}</td>
+            <td>{{ s.eval_n ?? s.n_items }}</td>
+            <td>{{ s.problem_count ?? 0 }}</td>
             <td>{{ s.focal_right_rate != null ? (s.focal_right_rate*100).toFixed(0) + '%' : '—' }}</td>
             <td>{{ s.focal_mean_total != null ? s.focal_mean_total.toFixed(2) : '—' }}</td>
             <td>{{ s.first_cluster || '—' }}</td>
@@ -145,7 +175,7 @@
                 <td
                   v-for="c in resultCols"
                   :key="c.key"
-                  @mouseenter="showCellTooltip($event, cell(r, c))"
+                  @mouseenter="showCellTooltip($event, cellTitle(r, c) || cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
                   <div
