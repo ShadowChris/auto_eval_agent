@@ -50,7 +50,7 @@ eval_options:
   pairwise_bidirectional: true      # A/B 双向比较，抗位置偏差
   independent_then_compare: true    # 先独立盲评再成对比较，抗锚定
   pairwise_for_ref: false           # 有参考答案题是否也做成对比较
-  search_provider: [tavily, jina]   # 联网检索：tavily | serpapi | bing | jina
+  search_provider: [tavily]   # 联网检索：tavily | serpapi | bing | jina
   search_topk: 3
   # 轻量垂域分类：每个 case 仅跑一次，独立于裁判
   classify_model: deepseek-v4-pro-openai

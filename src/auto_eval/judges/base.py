@@ -1,4 +1,4 @@
-"""裁判客户端：一个可多轮调用外部工具的评测智能体（agent loop）。
+﻿"""裁判客户端：一个可多轮调用外部工具的评测智能体（agent loop）。
 
 模仿人类反复查证后再评判：裁判在 loop 中自主决定查什么、何时停止，
 可调用 web_search（搜索）/ fetch_page（抓网页）等工具，直到对事实确信后输出最终评判。
@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..config import JudgeConfig
+from ..paths import resolve_project_path
 from .prompts import persona_text
 from .tools import build_tools
 
@@ -73,7 +74,8 @@ class JudgeClient:
         self.persona = persona_text(cfg.persona)
         self.max_rounds = max_rounds
         # 明细日志路径：优先构造参数，其次环境变量；都不给则不记录
-        self.trace_path = trace_path or os.environ.get("AUTO_EVAL_JUDGE_TRACE")
+        _trace_path = trace_path or os.environ.get("AUTO_EVAL_JUDGE_TRACE")
+        self.trace_path = str(resolve_project_path(_trace_path)) if _trace_path else None
         self.tool_defs, self.tool_map = build_tools(
             web_search_enabled=cfg.enable_web_search,
             search_providers=search_providers,

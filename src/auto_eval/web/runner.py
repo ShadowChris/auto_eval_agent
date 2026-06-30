@@ -1,4 +1,4 @@
-"""评估执行：分发三种模式 + 并发 + 推 SSE 事件 + 元评测汇总。
+﻿"""评估执行：分发三种模式 + 并发 + 推 SSE 事件 + 元评测汇总。
 
 复用 auto_eval 核心：RubricJudge / PairwiseJudge / aggregate_* / build_runner / ground_truth。
 """
@@ -12,6 +12,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+from ..paths import RUNS_DIR
 from ..config import AppConfig
 from ..dataset import to_prompt
 from ..judges import (Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, SkillRouter,
@@ -119,7 +120,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 def _write_eval_error(task_id: str, idx: int, item: dict, error: Exception | None) -> None:
     """持久化最终失败，避免内存任务结束后无法定位批跑异常。"""
     try:
-        path = Path("runs") / "eval_errors.jsonl"
+        path = RUNS_DIR / "eval_errors.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "time": datetime.now().isoformat(timespec="seconds"),

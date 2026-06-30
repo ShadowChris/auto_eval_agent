@@ -1,4 +1,4 @@
-"""Web 评测历史持久化与完整导出。
+﻿"""Web 评测历史持久化与完整导出。
 
 这里刻意不用数据库：评测台是本地/轻量服务，JSON 快照足够支撑历史加载；
 XLSX 直接生成 OOXML，避免给项目额外引入 openpyxl / xlsxwriter 依赖。
@@ -15,8 +15,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from ..paths import RUNS_DIR
 
-HISTORY_DIR = Path("runs") / "web_history"
+
+HISTORY_DIR = RUNS_DIR / "web_history"
 
 
 def _task_path(task_id: str) -> Path:
