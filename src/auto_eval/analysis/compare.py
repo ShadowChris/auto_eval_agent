@@ -57,8 +57,14 @@ def dim_gap(verdicts, focal: str, other: str) -> dict:
     for iid in common:
         dim_names.update(fv[iid].rubric.keys())
         dim_names.update(ov[iid].rubric.keys())
+    # 排除双方共识的 N/A 维度
+    na_skip: set[str] = set()
+    for iid in common:
+        na_skip.update(fv[iid].na_dimensions)
+        na_skip.update(ov[iid].na_dimensions)
+    active_dims = dim_names - na_skip
     gap: dict[str, float] = {}
-    for d in dim_names:
+    for d in active_dims:
         fs = float(np.mean([fv[i].rubric.get(d, 0) for i in common])) if common else 0.0
         os_ = float(np.mean([ov[i].rubric.get(d, 0) for i in common])) if common else 0.0
         gap[d] = fs - os_

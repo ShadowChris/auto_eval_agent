@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import traceback
 from datetime import datetime
@@ -13,7 +14,8 @@ from pathlib import Path
 
 from ..config import AppConfig
 from ..dataset import to_prompt
-from ..judges import Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, SkillRouter
+from ..judges import (Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, SkillRouter,
+                        ensure_classified)
 from ..judges.ensemble import aggregate_pairs, aggregate_scores
 from ..meta import ground_truth
 from ..runners import build_runner
@@ -64,6 +66,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     pair_judges = [PairwiseJudge(c) for c in clients]
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     sem = asyncio.Semaphore(int(task.options.get("concurrency", 4)))
+    eval_timeout = float(task.options.get("eval_timeout_s") or task.options.get("eval_timeout") or 300.0)
 
     online_runner = None
     if task.mode == "online":
@@ -76,18 +79,25 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     async def one(idx: int, item_dict: dict):
         async with sem:
             last_error = None
+            res = None
             for attempt in range(2):
                 try:
-                    res = await _eval_one(
-                        task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
-                        online_runner, process_dims, arbitrator
+                    res = await asyncio.wait_for(
+                        _eval_one(
+                            task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
+                            online_runner, process_dims, arbitrator
+                        ),
+                        timeout=eval_timeout,
                     )
+                    break
+                except asyncio.TimeoutError:
+                    last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
                     break
                 except Exception as e:
                     last_error = e
                     if attempt == 0:
                         await asyncio.sleep(1.0)
-            else:
+            if res is None:
                 res = {
                     "index": idx,
                     "query": item_dict.get("query", ""),
@@ -129,6 +139,27 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
     out: dict = {"query": item.question}
+
+    # 每个 case 仅一次轻量垂域分类（在裁判并发之前完成）
+    classify_model = cfg.eval_options.classify_model
+    classify_base_url = cfg.eval_options.classify_base_url or (
+        cfg.judges[0].base_url if cfg.judges else None)
+    _env_key = (os.environ.get(cfg.eval_options.classify_api_key_env or "")
+                 if cfg.eval_options.classify_api_key_env else None)
+    _judge_key = cfg.judges[0].api_key() if cfg.judges else None
+    classify_api_key = _env_key or _judge_key or "EMPTY"  # 绝不为 None
+    if classify_model and classify_base_url:
+        skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
+        try:
+            await asyncio.wait_for(
+                ensure_classified(item, skill_router,
+                                  model=classify_model,
+                                  base_url=classify_base_url,
+                                  api_key=classify_api_key),
+                timeout=20.0,
+            )
+        except Exception:
+            pass  # 分类失败不阻断评测
 
     if mode in ("single", "process"):
         answer = item_dict["answer"]
@@ -230,6 +261,7 @@ def _fill_verdict(out: dict, v) -> None:
     out["low_agreement"] = v.low_agreement
     out["arbitrated"] = v.arbitrated
     out["arbitrator_confidence"] = v.arbitrator_confidence
+    out["na_dimensions"] = v.na_dimensions
 
 
 def _maybe_meta(out: dict, item: EvalItem, answer: str, v) -> None:
@@ -317,6 +349,7 @@ def _by_skill(task: Task, cfg: AppConfig) -> list[dict]:
             item_id=iid,
             model="answer",
             rubric={k: float(x) for k, x in (r.get("rubric") or {}).items()},
+            na_dimensions=[str(x) for x in (r.get("na_dimensions") or [])],
             total=float(r.get("total") or 0.0),
             correctness=r.get("correctness", "unclear"),
             error_type=r.get("error_type"),

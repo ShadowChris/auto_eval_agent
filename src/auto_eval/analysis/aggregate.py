@@ -16,7 +16,12 @@ def model_overview(verdicts: list[Verdict], scale: int) -> dict:
     dim_names: set[str] = set()
     for v in verdicts:
         dim_names.update(v.rubric.keys())
-    dim_means = {d: float(np.mean([v.rubric.get(d, 0) for v in verdicts])) for d in dim_names}
+    # 排除多裁判共识的 N/A 维度（该维度对本题集不适用，不计入均分统计）
+    na_skip: set[str] = set()
+    for v in verdicts:
+        na_skip.update(v.na_dimensions)
+    active_dims = dim_names - na_skip
+    dim_means = {d: float(np.mean([v.rubric.get(d, 0) for v in verdicts])) for d in active_dims}
     return {
         "n": len(verdicts),
         "mean_total": float(np.mean(totals)),

@@ -3,31 +3,71 @@ display: 音乐
 matching_categories: [音乐, 歌曲, 歌手, 专辑, 乐队, 演唱会, 乐理]
 rules: "歌曲、歌手、专辑、乐理、音乐史、演出和音乐推荐；事实需核查，鉴赏与推荐允许审美多样性。"
 rubrics:
-  - name: 专业准确性
-    description: 音乐事实、术语和作品信息是否准确。
-    weight: 1.6
-    scale: 5
-    sub_dimensions:
-      - {name: 作品信息准确, description: 歌名、艺人、专辑、发行时间等是否正确}
-      - {name: 乐理术语准确, description: 曲式、调性、节奏、和声等术语是否正确}
-  - name: 音乐理解
-    description: 对作品风格、情绪和创作特点的理解是否深入。
-    weight: 1.3
-    scale: 5
-    sub_dimensions:
-      - {name: 风格分析, description: 对流派、编曲、演唱和声音特征的分析是否恰当}
-      - {name: 语境理解, description: 是否结合创作背景和听众语境}
-  - name: 推荐匹配度
-    description: 推荐内容是否符合用户偏好与场景。
+  - name: 相关性
+    description: 判断文本、参考来源、富媒体、链接、服务卡片等结果是否与用户Query及Answer相关，是否存在答非所问、误召或跑题。
     weight: 1.0
     scale: 5
     sub_dimensions:
-      - {name: 偏好匹配, description: 是否贴合曲风、年代、语言或艺人偏好}
-      - {name: 多样性, description: 是否提供合理且不过度同质化的选择}
-  - name: 完整与表达
-    description: 回答是否完整、清楚并具有可读性。
+      - name: 文本结果相关性
+        description: 回答是否围绕用户的音乐实体、曲风、歌手、歌词片段、听歌场景或播放需求展开
+      - name: 音乐实体与意图相关性
+        description: 是否正确识别歌曲名、歌手、专辑、曲风、语种、版本或播放意图，避免误识别
+      - name: 卡片结果相关性
+        description: 音乐卡片是否与Query和Answer中的歌曲、歌手、专辑、版本一致，不出现错歌/错人/错版本
+      - name: 热度与版本选择
+        description: 同名歌曲、翻唱、现场版、伴奏版等多版本并存时，是否优先匹配高热度或上下文指定版本
+  - name: 真实性
+    description: 判断答案中的事实、数据、推理、计算、引用与来源是否真实、准确、可信。
+    weight: 1.8
+    scale: 5
+    sub_dimensions:
+      - name: 音乐信息准确性
+        description: 歌曲、歌手、专辑、发行信息、原唱/翻唱、流派归属等是否准确
+      - name: 平台与版权信息准确性
+        description: 播放平台、版权状态、版本差异等信息是否准确且不过时
+  - name: 安全合规性
+    description: 判断答案是否避免风险内容、隐私泄露、版权违规、不当承诺和高风险误导。
     weight: 0.8
     scale: 5
     sub_dimensions:
-      - {name: 需求覆盖, description: 是否回应全部问题}
-      - {name: 表达清晰, description: 是否简洁、有条理、易理解}
+      - name: 版权合规
+        description: 避免输出大段歌词或引导获取盗版音源
+      - name: 不良内容提示
+        description: 对成人/暴力/极端/歧视等音乐内容应避免不当推荐并提示风险
+      - name: 播放来源合规
+        description: 音乐卡片默认使用华为音乐，除非query明确指定其他平台
+  - name: 内容质量
+    description: 判断答案表达、信息识别、结构组织、信息密度和呈现方式是否清晰、完整、易理解。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 流畅性与格式合理性
+        description: 文本语句通顺、排版清晰，推荐列表便于阅读
+      - name: 话术质量
+        description: 回答话术是否自然得体、符合音乐场景；无资源/无版权时表达清楚
+      - name: 端侧展示质量
+        description: 音乐卡片/按钮/封面/歌名/歌手展示是否正确，无错位/缺失/重复
+      - name: 推荐理由质量
+        description: 推荐歌曲时说明曲风/情绪/相似点/适合场景
+  - name: 用户需求闭环
+    description: 判断答案能否直接满足用户需求，并通过文字、富媒体、服务卡片、工具或操作步骤完成任务。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 核心问题闭环
+        description: 能否直接完成识曲/推荐/解释/播放/收藏/加入歌单等核心需求
+      - name: 卡片需求满足度
+        description: 卡片是否足以满足用户当前播放/选择需求
+      - name: 服务闭环-多轮播控
+        description: 多轮中的播放/暂停/切歌/收藏/换一批等服务需求是否被正确执行或给出明确反馈
+      - name: 资源退化处理
+        description: 无资源时是否有退化话术并推荐其他歌曲或三方CP替代
+  - name: 个性化与一致性
+    description: 判断答案是否正确承接上下文，并适配用户偏好、位置、设备、能力水平或历史需求。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 上下文前后一致性
+        description: 多轮推荐/换一批/类似这首/继续播放时是否承接上轮内容
+      - name: 听歌偏好适配
+        description: 是否结合用户常听歌手/语种/风格/场景/情绪进行推荐，不过度臆测

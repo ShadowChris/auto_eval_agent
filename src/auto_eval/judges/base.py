@@ -5,19 +5,25 @@
 
 可选明细日志：设环境变量 AUTO_EVAL_JUDGE_TRACE=<jsonl路径> 后，每次 complete 调用会
 把每轮 LLM 响应、每次工具的完整返回、最终对话历史追加到该文件（默认关，不产生开销）。
+
+流式输出：complete() 支持 stream_callback，每收到 token 时回调，用于前端实时展示裁判
+思考过程。仅负责推送文本，不改变 agent loop 的控制流（tool_call 仍依赖完整响应）。
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from ..config import JudgeConfig
 from .prompts import persona_text
 from .tools import build_tools
+
+logger = logging.getLogger("auto_eval.judge")
 
 
 @dataclass
@@ -62,7 +68,7 @@ class JudgeClient:
         if not cfg.base_url:
             raise ValueError(f"裁判[{cfg.name}] 缺少 base_url")
         self.cfg = cfg
-        self.client = AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key() or "EMPTY")
+        self.client = AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key() or "EMPTY", timeout=60.0)
         self.model = cfg.model or cfg.name
         self.persona = persona_text(cfg.persona)
         self.max_rounds = max_rounds
@@ -78,7 +84,8 @@ class JudgeClient:
         )
         self.has_tools = bool(self.tool_defs)
 
-    async def complete(self, system: str, user: str) -> JudgeReply:
+    async def complete(self, system: str, user: str,
+                       stream_callback: Callable[[str], None] | None = None) -> JudgeReply:
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -99,7 +106,7 @@ class JudgeClient:
             if self.has_tools:
                 kwargs["tools"] = self.tool_defs
                 kwargs["tool_choice"] = "auto"
-            resp = await self._llm_create(kwargs)
+            resp = await self._llm_create(kwargs, stream_callback=stream_callback)
             msg = resp.choices[0].message
             last_content = msg.content or ""
             tool_calls = getattr(msg, "tool_calls", None)
@@ -147,7 +154,7 @@ class JudgeClient:
                         tool_results.append({"name": name, "args": args, "result": result})
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
                     continue
-                result, summary = self._exec_tool(name, args)
+                result, summary = await self._exec_tool_async(name, args)
                 trace.append(summary)
                 if do_trace:
                     tool_results.append({"name": name, "args": args, "result": result})
@@ -169,7 +176,8 @@ class JudgeClient:
                            "直接输出最终的 <analysis>...</analysis> 思考与 JSON 判定。",
             })
             resp = await self._llm_create(
-                {"model": self.model, "messages": messages, "temperature": self.cfg.temperature}
+                {"model": self.model, "messages": messages, "temperature": self.cfg.temperature},
+                stream_callback=stream_callback,
             )
             msg = resp.choices[0].message
             last_content = msg.content or ""
@@ -217,11 +225,15 @@ class JudgeClient:
             # 日志失败不应影响评测主流程
             pass
 
-    async def _llm_create(self, kwargs: dict, max_attempts: int = 5):
-        """对 LLM 调用做重试，应对 429 限流 / 过载 / 连接抖动。"""
+    async def _llm_create(self, kwargs: dict, max_attempts: int = 5,
+                          stream_callback: Callable[[str], None] | None = None):
+        """对 LLM 调用做重试，应对 429 限流 / 过载 / 连接抖动。
+        当 stream_callback 不为 None 时使用流式输出，每收到 content delta 即回调。"""
         last = None
         for i in range(max_attempts):
             try:
+                if stream_callback is not None:
+                    return await self._llm_create_stream(kwargs, stream_callback)
                 return await self.client.chat.completions.create(**kwargs)
             except Exception as e:
                 last = e
@@ -236,6 +248,75 @@ class JudgeClient:
                 raise
         raise last  # type: ignore[misc]
 
+    async def _llm_create_stream(self, kwargs: dict, callback: Callable[[str], None]):
+        """流式调用 LLM，逐 token 回调，同时累积完整响应供 tool_call 解析。"""
+        from openai.types.chat import ChatCompletion, ChatCompletionMessage
+        from openai.types.chat.chat_completion import Choice
+
+        stream_kwargs = {**kwargs, "stream": True}
+        # tool_choice 在部分 provider 的流式模式下需要特殊处理，保留原值
+        stream = await self.client.chat.completions.create(**stream_kwargs)
+        content_parts: list[str] = []
+        tool_call_chunks: dict[int, dict] = {}  # index -> {id, name, arguments}
+        finish_reason = None
+
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content_parts.append(delta.content)
+                try:
+                    callback(delta.content)
+                except Exception:
+                    pass  # 回调异常不应中断评测主流程
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_call_chunks:
+                        tool_call_chunks[idx] = {"id": tc.id or "", "name": "", "arguments": ""}
+                    entry = tool_call_chunks[idx]
+                    if tc.id:
+                        entry["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            entry["name"] += tc.function.name
+                        if tc.function.arguments:
+                            entry["arguments"] += tc.function.arguments
+            if chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
+
+        # 组装 tool_calls
+        from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
+        tool_calls = None
+        if tool_call_chunks:
+            tool_calls = []
+            for idx in sorted(tool_call_chunks.keys()):
+                tc = tool_call_chunks[idx]
+                tool_calls.append(ChatCompletionMessageToolCall(
+                    id=tc["id"],
+                    type="function",
+                    function=Function(name=tc["name"], arguments=tc["arguments"]),
+                ))
+
+        content = "".join(content_parts)
+        message = ChatCompletionMessage(content=content, role="assistant", tool_calls=tool_calls)
+        choice = Choice(finish_reason=finish_reason or "stop", index=0, message=message)
+        return ChatCompletion(
+            id="stream",
+            created=0,
+            model=kwargs.get("model", ""),
+            object="chat.completion",
+            choices=[choice],
+        )
+
+    async def _exec_tool_async(self, name: str, args: dict) -> tuple[str, str]:
+        """在线程中执行同步工具，避免 web_search/fetch_page 阻塞事件循环。"""
+        timeout = float(os.environ.get("AUTO_EVAL_TOOL_TIMEOUT", "12"))
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(self._exec_tool, name, args), timeout=timeout)
+        except asyncio.TimeoutError:
+            return f"(工具超时: {name} 超过 {timeout:.0f} 秒)", f"{name}({args})=超时"
     def _exec_tool(self, name: str, args: dict) -> tuple[str, str]:
         fn = self.tool_map.get(name)
         if not fn:

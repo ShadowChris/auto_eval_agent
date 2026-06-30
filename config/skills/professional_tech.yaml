@@ -1,0 +1,53 @@
+name: professional_tech
+display: 专业技术
+matching_categories: [专业技术, 编程, 代码, 框架, 算法, 开发, 调试, 部署]
+rules: "编程、框架、工具、算法等专业技术问题。代码需可执行，技术信息需准确，不提供恶意代码。"
+rubrics:
+  - name: 相关性
+    description: 判断结果是否与用户Query相关。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - name: 文本结果相关性
+        description: 答案是否围绕技术问题(编程/框架/工具/算法)
+  - name: 真实性
+    description: 判断信息是否真实准确。
+    weight: 2.0
+    scale: 5
+    sub_dimensions:
+      - name: 代码可执行性
+        description: 代码是否可执行无语法错误无过时API
+      - name: 技术信息准确性
+        description: 技术概念/框架版本/API方式是否准确
+  - name: 安全合规性
+    description: 答案是否避免风险内容。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 安全合规
+        description: 不提供恶意代码/渗透攻击/盗版途径
+  - name: 内容质量
+    description: 答案是否清晰易理解。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - name: 可读性与格式规范性
+        description: 代码格式化(代码块/语法高亮)解释清晰
+      - name: 解法多样性
+        description: 是否有多种解法/方案及适用场景说明
+      - name: 专业性结构化
+        description: 是否体现专业技术领域的专业性
+  - name: 用户需求闭环
+    description: 答案能否直接满足用户需求。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 问题解决闭环
+        description: 答案是否真正解决开发/调试/部署问题
+  - name: 个性化与一致性
+    description: 答案是否正确承接上下文。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 上下文前后一致性
+        description: 多轮技术讨论是否承接上轮问题/代码

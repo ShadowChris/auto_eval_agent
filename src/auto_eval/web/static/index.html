@@ -71,6 +71,11 @@
       <input type="number" min="1" max="16" v-model.number="concurrency" style="width:70px">
       <span class="hint">（裁判 agent loop 含联网查证，过高易触发限流）</span>
     </div>
+    <div class="row">
+      <span class="lbl">单题超时：</span>
+      <input type="number" min="30" max="3600" step="30" v-model.number="evalTimeout" style="width:90px">
+      <span class="hint">秒；复杂题/多裁判建议 300–900，防止真正卡死。</span>
+    </div>
   </section>
 
   <section>
@@ -178,7 +183,7 @@
                 >
                   <div
                     class="cell-clamp"
-                    :class="{'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent'].includes(c.key)}"
+                    :class="{'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
                   >{{ cell(r, c) }}</div>
                 </td>
               </tr>
@@ -206,6 +211,6 @@
   </section>
 </div>
 
-<script type="module" src="/static/app.js"></script>
+<script type="module" src="/static/app.js?v=20260629_timeout"></script>
 </body>
 </html>

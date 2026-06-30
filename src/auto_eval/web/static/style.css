@@ -107,6 +107,7 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
   white-space: pre-wrap;
 }
 .cell-center { text-align: center; -webkit-line-clamp: 1; line-clamp: 1; max-height: 20px; white-space: nowrap; }
+.cell-na { color: #9ca3af; font-style: italic; }
 .cell-tooltip {
   position: fixed;
   z-index: 9999;

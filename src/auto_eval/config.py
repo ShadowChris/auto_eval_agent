@@ -84,6 +84,9 @@ class EvalOptions(BaseModel):
     search_provider: str | list[str] | None = None  # 单源(str)或多源(list)；与 search_providers 合并去重
     search_providers: list[str] = Field(default_factory=list)  # 多源聚合：配多个则并行汇总，缺 key 的源自动跳过
     search_topk: int = 3
+    classify_model: str | None = None  # 轻量垂域分类专用模型（不填则用裁判自己的 model）
+    classify_base_url: str | None = None  # 分类专用 base_url（不填则复用第一个裁判的）
+    classify_api_key_env: str | None = None  # 分类专用 api_key 环境变量名（不填则复用第一个裁判的）
 
     def effective_providers(self) -> list[str]:
         """合并 search_providers + search_provider（后者可为 str 或 list），去重保序。"""

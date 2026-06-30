@@ -70,6 +70,7 @@ class SingleScore(BaseModel):
     run_idx: int = 0  # 重复采样索引
     rubric: dict[str, int] = Field(default_factory=dict)  # 各维度分（通常 1–5）
     rubric_reasons: dict[str, str] = Field(default_factory=dict)  # 各一级维度打分理由
+    na_dimensions: list[str] = Field(default_factory=list)  # 被裁判标记为 N/A（不适用）的一级维度名
     total: float = 0.0
     correctness: Correctness = "unclear"
     error_type: str | None = None
@@ -109,6 +110,7 @@ class Verdict(BaseModel):
     model: str
     rubric: dict[str, float] = Field(default_factory=dict)  # 各维度均分
     rubric_reasons: dict[str, str] = Field(default_factory=dict)  # 各一级维度打分理由（多裁判合并）
+    na_dimensions: list[str] = Field(default_factory=list)  # 多裁判共识的 N/A 维度（所有裁判均标 N/A）
     total: float = 0.0
     correctness: Correctness = "unclear"
     error_type: str | None = None

@@ -68,7 +68,7 @@ RUBRIC_SYSTEM = Template(
 4. 对比锚点：把被评答案与第 2 步的理想画像对比，明确它缺了什么、错在哪。
 5. 综合判定：给出各维度分数、总判定与错误归因。
 
-【打分维度】（1–{{ scale }} 分，{{ scale }} 为满分）
+【打分维度】（1–{{ scale }} 分，{{ scale }} 为满分；不适用的维度用 null 表示不适用）
 {% for d in dims -%}
 {{ loop.index }}. {{ d.name }}：{{ d.description }}
   {% if d.sub_dimensions -%}
@@ -77,7 +77,21 @@ RUBRIC_SYSTEM = Template(
   {% endfor -%}
   {% endif -%}
 {% endfor %}
-【输出格式】先输出 <analysis>...</analysis> 思考过程，再输出一行 JSON。rubric 的一级 key 必须严格使用上面【打分维度】列出的名称（不准自创），有二级的用嵌套对象，无二级的直接给分数。格式如下：
+
+【N/A（不适用）规则 —— 极其重要，请逐维度判断】
+- 当某个维度/子维度与本题或被评答案【客观上无关】时，用 null 代替分数，不要打分。
+- **区分 N/A 与低分**：低分是该维度相关但答案做得差；N/A 是该维度和本题/本答案不沾边，本来就不该要求它。
+- 一级维度整体标 null 的典型情况：
+  · 安全性 → 答案只涉及纯事实/纯技术讨论、无任何安全合规风险时，标 null。
+  · 有用性 → 极少数纯理论/纯定义题且答案无可操作性要求时，可视情况标 null；但大多数题应保留。
+- 子维度标 null 的典型情况：
+  · 配图配视频相关性 → 答案不含图片/视频时标 null。
+  · 引导链接相关性 → 答案无外链/推荐链接时标 null。
+  · 参考来源相关性 → 答案未引用任何来源时标 null。
+  · 信息时效性 → 题目不涉及时效（如历史事实、数学定理）时标 null。
+- **不要滥用 N/A**：拿不准时宁可正常打分，null 仅限于明显无关的维度。如果答案在某维度应该做到但没做到，那是低分，不是 N/A。
+
+【输出格式】先输出 <analysis>...</analysis> 思考过程（需在思考中说明哪些维度标 N/A 及理由），再输出一行 JSON。rubric 的一级 key 必须严格使用上面【打分维度】列出的名称（不准自创）。不适用的维度/子维度填 null，适用维度按正常 1-{{ scale }} 打分。格式如下：
 <analysis>
 1. 意图：...
 2. 理想画像：...
@@ -88,9 +102,10 @@ RUBRIC_SYSTEM = Template(
    - 结构与表达：...
    - 实际价值：...
    - 安全与合规：...
-4. 对比锚点：...
+4. N/A 判断：哪些维度不适用及理由...
+5. 对比锚点：...
 </analysis>
-{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }}>, {% endfor -%} "total": <均值>, "reason": "<该维度为何打这分的简短理由>" }, {%- else -%} "{{ d.name }}": { "total": <1-{{ scale }}>, "reason": "<该维度为何打这分的简短理由>" }, {%- endif -%} {%- endfor -%} }, "total": <各维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因标签，无错误填 null>", "rationale": "<一句话总结>"}
+{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }} 或 null>, {% endfor -%} "total": <非null子维度的均值>, "reason": "<该维度为何打这分的简短理由>" }, {%- else -%} "{{ d.name }}": { "total": <1-{{ scale }} 或 null>, "reason": "<该维度为何打这分的简短理由>" }, {%- endif -%} {%- endfor -%} }, "total": <各适用维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因标签，无错误填 null>", "rationale": "<一句话总结>"}
 """
 )
 
@@ -137,7 +152,7 @@ RUBRIC_COMPARE_SYSTEM = Template(
 4. 核查：对待评（及与竞品冲突）的关键事实断言主动 web_search 核查，据实判断待评本身对错。
 5. 综合判定：给【待评答案本身】各维度分（反映其绝对质量，与是否有竞品无关）+ 总判定 + 错误归因。
 
-【打分维度】（1–{{ scale }} 分，{{ scale }} 为满分；分值评判待评答案【本身】的质量，竞品仅用于对比参考、不改变绝对分尺度）
+【打分维度】（1–{{ scale }} 分，{{ scale }} 为满分；不适用的维度用 null 表示不适用；分值评判待评答案【本身】的质量，竞品仅用于对比参考、不改变绝对分尺度）
 {% for d in dims -%}
 {{ loop.index }}. {{ d.name }}：{{ d.description }}
   {% if d.sub_dimensions -%}
@@ -146,7 +161,15 @@ RUBRIC_COMPARE_SYSTEM = Template(
   {% endfor -%}
   {% endif -%}
 {% endfor %}
-【输出格式】先输出 <analysis>...</analysis>（含借竞品对比的思考），再输出一行 JSON。rubric 的一级 key 必须严格使用上面【打分维度】列出的名称，有二级的用嵌套对象，无二级的直接给分数。格式如下：
+
+【N/A（不适用）规则 —— 与标准盲评一致，请逐维度判断】
+- 当某个维度/子维度与本题或被评答案【客观上无关】时，用 null 代替分数。
+- **区分 N/A 与低分**：低分是该维度相关但答案做得差；N/A 是该维度和本题/本答案不沾边，本来就不该要求它。
+- 一级维度整体标 null：答案内容不涉及安全/合规风险时安全性标 null；纯理论/定义题且无可操作性要求时有用性可视情况标 null。
+- 子维度标 null：配图配视频相关性→无图/视频；引导链接相关性→无外链；参考来源相关性→未引用来源；信息时效性→不涉及时效时。
+- **不要滥用 N/A**：拿不准时宁可打分，null 仅限于明显无关的维度。
+
+【输出格式】先输出 <analysis>...</analysis>（含借竞品对比的思考，需说明 N/A 判断），再输出一行 JSON。rubric 的一级 key 必须严格使用上面【打分维度】列出的名称。不适用的维度/子维度填 null，适用维度按正常 1-{{ scale }} 打分。格式如下：
 <analysis>
 1. 意图：...
 2. 理想画像 / 待评要点：...
@@ -154,7 +177,7 @@ RUBRIC_COMPARE_SYSTEM = Template(
 4. 核查：...
 5. 结论：待评答案本身的质量评判...
 </analysis>
-{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }}>, {% endfor -%} "total": <均值>, "reason": "<该维度为何打这分的简短理由>" }, {%- else -%} "{{ d.name }}": { "total": <1-{{ scale }}>, "reason": "<该维度为何打这分的简短理由>" }, {%- endif -%} {%- endfor -%} }, "total": <各维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<待评答案的错因，无填 null>", "rationale": "<对待评答案本身的一句话评判，可点出相对竞品的差异>"}
+{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }} 或 null>, {% endfor -%} "total": <非null子维度的均值>, "reason": "<该维度为何打这分的简短理由>" }, {%- else -%} "{{ d.name }}": { "total": <1-{{ scale }} 或 null>, "reason": "<该维度为何打这分的简短理由>" }, {%- endif -%} {%- endfor -%} }, "total": <各适用维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<待评答案的错因，无填 null>", "rationale": "<对待评答案本身的一句话评判，可点出相对竞品的差异>"}
 """
 )
 
@@ -202,7 +225,7 @@ RUBRIC_PROCESS_SYSTEM = Template(
 4. 对比锚点：被测轨迹 vs 理想过程画像，差在哪。
 5. 综合判定：各维度分 + 总判定 + 归因。
 
-【打分维度】（1–{{ scale }} 分，{{ scale }} 为满分）
+【打分维度】（1–{{ scale }} 分，{{ scale }} 为满分；不适用的维度用 null 表示不适用）
 {% for d in dims -%}
 {{ loop.index }}. {{ d.name }}：{{ d.description }}
   {% if d.sub_dimensions -%}
@@ -211,14 +234,19 @@ RUBRIC_PROCESS_SYSTEM = Template(
   {% endfor -%}
   {% endif -%}
 {% endfor %}
-【输出格式】先输出 <analysis>...</analysis>，再输出一行 JSON：
+
+【N/A（不适用）规则】
+- 当某个维度与本题或被评过程【客观上无关】时，用 null 代替分数。
+- 过程盲评的 N/A 判断原则与结果盲评一致。不要滥用：拿不准时宁可打分。
+
+【输出格式】先输出 <analysis>...</analysis>（需说明 N/A 判断），再输出一行 JSON。不适用的维度/子维度填 null：
 <analysis>
 1. 意图：...
 2. 理想过程画像：...
 3. 过程分析：...
 4. 对比锚点：...
 </analysis>
-{"rubric": {"<一级维度名>": {"<二级维度名>": <1-{{ scale }} 整数>, ..., "total": <均值>, "reason": "<该维度打分理由>"}, "<无二级的一级>": {"total": <1-{{ scale }}>, "reason": "<该维度打分理由>"}, ...}, "total": <各维度平均>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因或 null>", "rationale": "<一句话总结>"}
+{"rubric": {"<一级维度名>": {"<二级维度名>": <1-{{ scale }} 整数 或 null>, ..., "total": <非null子维度的均值>, "reason": "<该维度打分理由>"}, "<无二级的一级>": {"total": <1-{{ scale }} 或 null>, "reason": "<该维度打分理由>"}, ...}, "total": <各适用维度平均>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因或 null>", "rationale": "<一句话总结>"}
 """
 )
 
@@ -282,13 +310,13 @@ ARBITRATOR_SYSTEM = Template(
 - 置信度反映你对最终判定的把握：1=非常确定，0.5=勉强，<0.5 应考虑改判 unclear。
 - 接受等价表达与合理推导。
 
-【输出格式】先 <analysis> 分析各裁判分歧与你的核查，再输出一行 JSON：
+【输出格式】先 <analysis> 分析各裁判分歧与你的核查，再输出一行 JSON。不适用的维度填 null（与各裁判的 N/A 规则一致）：
 <analysis>
 - 各裁判观点与分歧焦点：
 - 你的核查：
 - 裁定：
 </analysis>
-{"correctness": "right|wrong|partial|unclear", "rubric": {"准确性": <1-5>, "完整性": <>, "相关性": <>, "有用性": <>, "安全性": <>}, "total": <各维度平均>, "confidence": <0-1>, "rationale": "<最终理由>"}
+{"correctness": "right|wrong|partial|unclear", "rubric": {"准确性": <1-5 或 null>, "完整性": <1-5 或 null>, "相关性": <1-5 或 null>, "有用性": <1-5 或 null>, "安全性": <1-5 或 null>}, "total": <各适用维度平均>, "confidence": <0-1>, "rationale": "<最终理由>"}
 """
 )
 

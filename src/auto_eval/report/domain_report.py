@@ -67,8 +67,13 @@ def _dim_problem_dist(focal_verdicts, threshold, n_items, scale) -> dict[str, di
     all_dims: set[str] = set()
     for v in focal_verdicts:
         all_dims.update(v.rubric.keys())
+    # 排除共识 N/A 维度（该维度对本题集不适用）
+    na_skip: set[str] = set()
+    for v in focal_verdicts:
+        na_skip.update(v.na_dimensions)
+    active_dims = all_dims - na_skip
     out: dict[str, dict] = {}
-    for dim in sorted(all_dims):
+    for dim in sorted(active_dims):
         ids = [v.item_id for v in focal_verdicts if v.rubric.get(dim, scale) <= threshold]
         out[dim] = {
             "rate": (len(ids) / n_items) if n_items else 0.0,

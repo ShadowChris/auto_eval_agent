@@ -3,7 +3,7 @@ from .arbitrator import Arbitrator
 from .base import JudgeClient, JudgeReply
 from .ensemble import aggregate_pairs, aggregate_scores
 from .pairwise_judge import PairwiseJudge
-from .rubric_judge import RubricJudge
+from .rubric_judge import RubricJudge, ensure_classified
 from .skill_router import SkillRouter
 
 __all__ = [

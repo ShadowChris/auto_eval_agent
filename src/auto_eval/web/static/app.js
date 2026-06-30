@@ -20,6 +20,7 @@ createApp({
     const selectedJudges = ref([]);
     const selectedModel = ref("");
     const concurrency = ref(4);
+    const evalTimeout = ref(300);
     const running = ref(false);
     const progress = ref(0);
     const total = ref(0);
@@ -101,6 +102,10 @@ createApp({
       const dims = [];
       skillResults.value.forEach((r) => {
         Object.keys(r.rubric || {}).forEach((d) => {
+          if (!dims.includes(d)) dims.push(d);
+        });
+        // 也收集 N/A 维度，确保列始终存在（不同 case 可能 N/A 不同维度）
+        (r.na_dimensions || []).forEach((d) => {
           if (!dims.includes(d)) dims.push(d);
         });
       });
@@ -265,6 +270,7 @@ createApp({
           judges: selectedJudges.value,
           model: selectedModel.value,
           concurrency: concurrency.value,
+          eval_timeout_s: evalTimeout.value,
         },
       };
       const r = await fetch("/api/eval", {
@@ -305,8 +311,15 @@ createApp({
       });
     }
 
+    function isNA(r, dim) {
+      return r.na_dimensions && r.na_dimensions.includes(dim);
+    }
     function cellTitle(r, c) {
-      // 维度列 hover 显示该维度的打分理由（rubric_reasons）
+      // 维度列 hover 显示该维度的打分理由（rubric_reasons）；N/A 维度显示"不适用"
+      if (c.rubricDim && isNA(r, c.rubricDim)) {
+        return "[不适用] " + (r.rubric_reasons && r.rubric_reasons[c.rubricDim]
+          ? r.rubric_reasons[c.rubricDim] : "该维度与本题/本答案无关");
+      }
       if (c.rubricDim && r.rubric_reasons && r.rubric_reasons[c.rubricDim]) {
         return r.rubric_reasons[c.rubricDim];
       }
@@ -314,7 +327,10 @@ createApp({
     }
     function cell(r, c) {
       const v = r[c.key];
-      if (c.rubricDim) return r.rubric && r.rubric[c.rubricDim] != null ? r.rubric[c.rubricDim] : "";
+      if (c.rubricDim) {
+        if (isNA(r, c.rubricDim)) return "N/A";
+        return r.rubric && r.rubric[c.rubricDim] != null ? r.rubric[c.rubricDim] : "";
+      }
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
       if (c.key === "agree") {
         if (v === undefined) return "";
@@ -511,12 +527,12 @@ createApp({
 
     return {
       modes, mode, text, items, errors, judges, models, selectedJudges, selectedModel,
-      concurrency, running, progress, total, results, summary, taskId, historyItems, loadingHistory,
+      concurrency, evalTimeout, running, progress, total, results, summary, taskId, historyItems, loadingHistory,
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       formatHint, placeholder, previewKeys, resultCols,
-      trunc, switchMode, onFile, doParse, submit, cell, cellTitle, columnWidth, exportCsv, exportJson, exportXlsx,
+      trunc, switchMode, onFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx,
       loadHistory, loadHistoryTask, delHistory, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,

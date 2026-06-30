@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from .batch.ratelimit import RateLimiter
 from .config import AppConfig
-from .judges import Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, SkillRouter, aggregate_pairs, aggregate_scores
+from .judges import (Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, SkillRouter,
+                        aggregate_pairs, aggregate_scores, ensure_classified)
 from .meta import per_item
 from .schema import EvalItem, MetaResult, ModelOutput, PairResult, SinglePair, SingleScore, Verdict
 
@@ -53,6 +55,18 @@ class EvalEngine:
         ]
         self.skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
         self.rubric_judges = [RubricJudge(c, cfg.rubrics, self.skill_router) for c in self.clients]
+        # 轻量分类客户端配置：优先 eval_options，回落第一个裁判的 base_url / api_key
+        self._classify_model = cfg.eval_options.classify_model
+        self._classify_base_url = cfg.eval_options.classify_base_url or (
+            cfg.judges[0].base_url if cfg.judges else None)
+        _first_judge = cfg.judges[0] if cfg.judges else None
+        _env_key = (
+            os.environ.get(cfg.eval_options.classify_api_key_env or "")
+            if cfg.eval_options.classify_api_key_env
+            else None
+        )
+        _judge_key = _first_judge.api_key() if _first_judge else None
+        self._classify_api_key = _env_key or _judge_key or "EMPTY"  # 绝不为 None
         self.pairwise_judges = [PairwiseJudge(c) for c in self.clients]
         self.limiters = {j.name: RateLimiter(j.concurrency) for j in cfg.judges}
         self.global_sem = asyncio.Semaphore(global_concurrency)
@@ -72,6 +86,18 @@ class EvalEngine:
                 lim.release()
 
     async def _rubric_one(self, item: EvalItem, model: str, answer: str) -> Verdict | None:
+        # 每个 case 仅一次轻量垂域分类（独立模型，裁判共享结果；双重超时保护）
+        if self._classify_model and self._classify_base_url:
+            try:
+                await asyncio.wait_for(
+                    ensure_classified(item, self.skill_router,
+                                      model=self._classify_model,
+                                      base_url=self._classify_base_url,
+                                      api_key=self._classify_api_key or "EMPTY"),
+                    timeout=20.0,
+                )
+            except Exception:
+                pass  # 分类失败不阻断评测
         subs = []
         for j_idx, rj in enumerate(self.rubric_judges):
             lim = self.limiters[self.cfg.judges[j_idx].name]

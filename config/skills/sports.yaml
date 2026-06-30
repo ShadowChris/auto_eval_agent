@@ -3,31 +3,57 @@ display: 体育
 matching_categories: [体育, 足球, 篮球, 网球, 乒乓球, 赛事, 运动员, 比赛]
 rules: "赛事、赛程、比分、运动员、规则、数据和技战术。时效性与数据准确性优先，当前赛况必须核查。"
 rubrics:
-  - name: 事实与数据
-    description: 比分、赛程、排名、纪录和人员信息是否准确。
-    weight: 2.0
-    scale: 5
-    sub_dimensions:
-      - {name: 数据准确, description: 比分、统计、排名和纪录是否正确}
-      - {name: 人员赛事准确, description: 队伍、运动员、赛事归属是否正确}
-  - name: 时效性
-    description: 是否使用当前有效的赛况和赛程信息。
-    weight: 1.5
-    scale: 5
-    sub_dimensions:
-      - {name: 时间范围正确, description: 是否对应用户询问的赛季、轮次和日期}
-      - {name: 更新及时, description: 是否避免使用已过期赛况}
-  - name: 规则与分析
-    description: 规则解释和技战术分析是否专业合理。
+  - name: 相关性
+    description: 判断结果是否与用户Query相关。
     weight: 1.0
     scale: 5
     sub_dimensions:
-      - {name: 规则准确, description: 比赛规则、赛制和判罚解释是否正确}
-      - {name: 分析有据, description: 战术和表现判断是否有数据或比赛事实支撑}
-  - name: 完整与表达
-    description: 是否完整回应并清楚呈现体育信息。
+      - name: 文本结果相关性
+        description: 结果是否围绕赛事/球队/球员/联赛/比分/赛程展开
+      - name: 赛程卡相关性
+        description: 赛程卡是否与Query指定的联赛/球队/比赛类型一致
+      - name: 预测相关性
+        description: 预测是否围绕指定比赛/球队展开，依据合理
+  - name: 真实性
+    description: 判断数据是否真实准确。
+    weight: 2.0
+    scale: 5
+    sub_dimensions:
+      - name: 赛程数据准确性
+        description: 赛程卡的比赛时间/比分/队伍/排名/积分是否准确且及时更新
+      - name: 积分榜数据准确性
+        description: 排名/积分/胜平负数据是否准确无错乱
+      - name: 赛事信息真实性
+        description: 赛事基本信息(时间/地点/队伍)是否准确
+  - name: 安全合规性
+    description: 答案是否避免风险内容。
     weight: 0.8
     scale: 5
     sub_dimensions:
-      - {name: 需求覆盖, description: 是否回答全部赛事相关问题}
-      - {name: 信息清晰, description: 时间、队伍和数据是否易于理解}
+      - name: 博彩风险提示
+        description: 赛果预测是否有合理边界，不引导非法博彩
+  - name: 内容质量
+    description: 答案是否清晰易理解。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - name: 可读性与格式规范性
+        description: 赛程/积分榜/预测文本是否格式化清晰
+  - name: 用户需求闭环
+    description: 答案能否直接满足用户需求。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 赛程卡需求满足度
+        description: 是否展示由远到近3场比赛或定向单场；点击是否跳转详情
+      - name: 订阅提醒闭环
+        description: 用户订阅赛事是否在日历建立推送并按时提醒
+      - name: 预测闭环
+        description: 预测是否给出合理推断分析促进后续查询
+  - name: 个性化与一致性
+    description: 答案是否正确承接上下文。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 上下文前后一致性
+        description: 多轮追问球队/联赛是否承接上轮

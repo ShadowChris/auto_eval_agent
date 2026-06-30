@@ -1,34 +1,65 @@
 name: lbs_travel
-display: LBS（旅行规划）
-matching_categories: [LBS, 旅行规划, 旅游, 行程, 路线, 导航, 酒店, 景点, 餐厅]
-rules: "基于地点的旅行、路线、交通、景点、住宿和餐饮规划。必须考虑距离、营业时间、交通衔接、预算和用户约束。"
+display: LBS
+matching_categories: [LBS, 旅行规划, 旅游, 行程, 路线, 导航, 酒店, 景点, 餐厅, 美食, 限行, POI]
+rules: "基于地点的美食、景点、POI、限行、路线、交通规划。必须考虑距离、营业时间、交通衔接、预算和用户约束。"
 rubrics:
-  - name: 地理与信息准确性
-    description: 地点、距离、交通、开放时间和费用是否准确。
-    weight: 1.7
-    scale: 5
-    sub_dimensions:
-      - {name: 地点距离准确, description: 地理位置、距离和方向是否合理}
-      - {name: 营业交通准确, description: 开放时间、班次、交通方式和价格是否可靠}
-  - name: 路线可行性
-    description: 行程顺序、时间安排和交通衔接是否可执行。
-    weight: 1.7
-    scale: 5
-    sub_dimensions:
-      - {name: 动线合理, description: 景点顺序是否减少折返和无效移动}
-      - {name: 时间可行, description: 游览、通勤、排队和休息时间是否现实}
-      - {name: 衔接稳健, description: 是否预留换乘和突发情况余量}
-  - name: 个性化匹配
-    description: 是否符合预算、人员、偏好和出行条件。
-    weight: 1.2
-    scale: 5
-    sub_dimensions:
-      - {name: 需求匹配, description: 是否考虑亲子、老人、兴趣和节奏偏好}
-      - {name: 预算匹配, description: 住宿、交通和餐饮是否符合预算}
-  - name: 完整与实用
-    description: 是否提供足够的落地信息和备选方案。
+  - name: 相关性
+    description: 判断结果是否与用户Query相关。
     weight: 1.0
     scale: 5
     sub_dimensions:
-      - {name: 关键要素覆盖, description: 是否覆盖吃住行游等核心要素}
-      - {name: 备选与提示, description: 是否给出天气、闭馆、拥堵等备选方案}
+      - name: 文本结果相关性
+        description: 推荐的美食/景点/POI是否与Query和地理位置相关
+      - name: 位置匹配准确性
+        description: 结果是否匹配用户当前/指定地理位置
+      - name: 美食结果相关性
+        description: 餐厅推荐是否与口味/菜系需求相关
+      - name: 景点结果相关性
+        description: 景点推荐是否匹配类型/位置/偏好
+  - name: 真实性
+    description: 判断信息是否真实准确。
+    weight: 1.8
+    scale: 5
+    sub_dimensions:
+      - name: POI信息准确性
+        description: 地址/电话/营业时间/评分/价格是否准确
+      - name: 限行信息真实性
+        description: 限行政策日期/区域/车型数据是否真实及时
+  - name: 安全合规性
+    description: 答案是否避免风险内容。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 隐私合规
+        description: 涉及用户位置信息是否合规使用
+  - name: 内容质量
+    description: 答案是否清晰易理解。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 可读性与格式规范性
+        description: POI列表格式清晰，信息完整(名/评分/地址/距离)
+      - name: 丰富度
+        description: 结果数量是否充足(通常5条)，信息维度丰富
+      - name: 排序合理性
+        description: 排序是否合理(距离/评分/热度优先)
+  - name: 用户需求闭环
+    description: 答案能否直接满足用户需求。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 核心问题闭环
+        description: 是否直接满足找美食/景点/POI需求；导航/订座/电话可执行
+      - name: 服务闭环-导航电话订座
+        description: 是否可直接拉起导航/拨打电话/订座
+      - name: 详情页数据有效性
+        description: 详情页是否可加载无死链/空白页/数据失效
+  - name: 个性化与一致性
+    description: 答案是否正确承接上下文。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 上下文前后一致性
+        description: 多轮追问同一地点是否承接上轮
+      - name: 位置适配
+        description: 推荐默认使用用户当前位置或指定位置

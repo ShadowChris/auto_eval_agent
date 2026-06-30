@@ -3,31 +3,59 @@ display: 文档
 matching_categories: [文档, PDF, Word, 表格, 报告, 合同, 论文, 摘要, 信息抽取]
 rules: "对给定文档、PDF、表格、报告或合同进行摘要、抽取、比较、改写和问答。回答必须忠实于文档，不得补造未出现的信息。"
 rubrics:
-  - name: 忠实性
-    description: 是否严格依据文档内容，无虚构和曲解。
-    weight: 2.0
-    scale: 5
-    sub_dimensions:
-      - {name: 原文一致, description: 结论是否能在文档中找到依据}
-      - {name: 无幻觉补充, description: 是否避免添加文档未提供的信息}
-  - name: 信息完整性
-    description: 是否覆盖任务要求的关键段落、字段和结论。
-    weight: 1.4
-    scale: 5
-    sub_dimensions:
-      - {name: 要点覆盖, description: 摘要或回答是否覆盖核心信息}
-      - {name: 字段无遗漏, description: 抽取任务是否遗漏重要字段和条目}
-  - name: 结构与格式
-    description: 是否保留必要的层级、表格关系和格式约束。
-    weight: 1.1
-    scale: 5
-    sub_dimensions:
-      - {name: 层级清晰, description: 标题、章节和逻辑结构是否清楚}
-      - {name: 格式保真, description: 数字、表格、引用和编号是否正确保留}
-  - name: 任务适配
-    description: 输出形式是否符合摘要、抽取、比较或改写要求。
+  - name: 相关性
+    description: 判断结果是否与用户Query相关。
     weight: 1.0
     scale: 5
     sub_dimensions:
-      - {name: 指令遵循, description: 是否按指定范围、格式和粒度输出}
-      - {name: 可读可用, description: 结果是否便于后续阅读、核对或处理}
+      - name: 原文相关性
+        description: 摘要/解析是否忠实于原文不添加原文没有的内容
+      - name: 指令遵从性
+        description: 是否遵从用户对格式/字数/结构/内容的指令
+      - name: 语种保持
+        description: 同一语种中问中答英问英答
+  - name: 真实性
+    description: 判断信息是否真实准确。
+    weight: 2.0
+    scale: 5
+    sub_dimensions:
+      - name: 事实性准确性
+        description: 摘要/解析正确反映原文事实无张冠李戴
+      - name: 原文引用准确性
+        description: 引用原文给出引用标签且可定位
+  - name: 安全合规性
+    description: 答案是否避免风险内容。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 版权合规
+        description: 不输出大段原文不侵犯版权
+  - name: 内容质量
+    description: 答案是否清晰易理解。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - name: 结构化
+        description: 是否采用总-分-总结构分段分点加粗
+      - name: 信息密度
+        description: 摘要长度与原文比例合理
+      - name: 图表图文并茂
+        description: 是否恰当使用表格/图表辅助信息呈现
+      - name: 深入性
+        description: 是否对核心要点深入剖析提供原理/数据/术语解释
+  - name: 用户需求闭环
+    description: 答案能否直接满足用户需求。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 文件解析闭环
+        description: 是否能成功解析上传的文件并生成结果
+      - name: 指令性需求闭环
+        description: 指定格式(表格/脑图/PPT)是否按要求完成
+  - name: 个性化与一致性
+    description: 答案是否正确承接上下文。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 上下文前后一致性
+        description: 多轮是否承接上轮文档/摘要/问题

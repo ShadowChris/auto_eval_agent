@@ -1,0 +1,53 @@
+name: meta_service
+display: 元服务
+matching_categories: [元服务, 快应用, 服务, App, 小程序]
+rules: "元服务、快应用、App服务跳转和调用。需正确识别服务实体和类型，确保跳转可用。"
+rubrics:
+  - name: 相关性
+    description: 判断结果是否与用户Query相关。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - name: 文本结果相关性
+        description: 元服务召回是否与用户服务需求紧密相关
+      - name: 实体召回准确性
+        description: 元服务实体名称是否正确完整无截断
+      - name: 服务类型匹配
+        description: 召回类型(App/快应用/网页)是否匹配需求
+  - name: 真实性
+    description: 判断信息是否真实有效。
+    weight: 1.8
+    scale: 5
+    sub_dimensions:
+      - name: 服务可用性
+        description: 跳转后实体/服务是否正确，页面可正常使用
+  - name: 安全合规性
+    description: 答案是否避免风险内容。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 服务合规
+        description: 元服务不涉及非法/诈骗/违规服务
+  - name: 内容质量
+    description: 答案是否清晰易理解。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 展示规范性
+        description: 元服务标识/图标正确，位置合理无重复
+  - name: 用户需求闭环
+    description: 答案能否直接满足用户需求。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 跳转闭环
+        description: 点击元服务能否正常跳转至所需服务页
+      - name: 服务可达性
+        description: 用户无对应App时是否提示下载
+  - name: 个性化与一致性
+    description: 答案是否正确承接上下文。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 上下文前后一致性
+        description: 多轮中元服务召回是否承接上轮上下文

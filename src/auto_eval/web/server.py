@@ -25,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 CONFIG_DIR = BASE_DIR / "config"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-load_dotenv(BASE_DIR / ".env")  # 注入 .env 的 key（KIMI_API_KEY/TAVILY_API_KEY 等）到环境变量
+load_dotenv(BASE_DIR / ".env", override=True)  # 注入 .env 的 key；以 .env 为准覆盖旧 shell 环境变量
 
 app = FastAPI(title="auto_eval 评估台")
 _state: dict = {}
@@ -88,9 +88,14 @@ async def api_eval(req: EvalReq):
     task = new_task(req.mode, req.items, req.options)
     import asyncio
 
-    asyncio.create_task(run_eval(task, cfg()))
-    return {"task_id": task.id}
+    async def _start_later():
+        # 先把 task_id 响应给前端，再启动可能较重的评估任务；
+        # 避免后台裁判/工具调用抢占事件循环，导致 /api/eval 本身迟迟不返回。
+        await asyncio.sleep(0.05)
+        await run_eval(task, cfg())
 
+    asyncio.create_task(_start_later())
+    return {"task_id": task.id}
 
 @app.get("/api/eval/{task_id}/stream")
 async def api_stream(task_id: str):
@@ -178,4 +183,4 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8501)
+    uvicorn.run(app, host="0.0.0.0", port=8502)

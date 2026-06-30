@@ -3,31 +3,65 @@ display: 影视
 matching_categories: [影视, 电影, 电视剧, 综艺, 动漫, 导演, 演员]
 rules: "电影、剧集、综艺、动漫及主创信息。区分客观事实与主观评价；涉及剧情时注意用户是否要求避免剧透。"
 rubrics:
-  - name: 信息准确性
-    description: 作品、主创、年份、奖项和平台等信息是否准确。
-    weight: 1.6
-    scale: 5
-    sub_dimensions:
-      - {name: 基础信息准确, description: 片名、演员、导演、年份等是否正确}
-      - {name: 剧情信息准确, description: 剧情、人物关系和设定是否无误}
-  - name: 内容理解
-    description: 对主题、叙事、人物和视听语言的分析是否合理。
-    weight: 1.3
-    scale: 5
-    sub_dimensions:
-      - {name: 主题与叙事, description: 对主题表达和叙事结构的理解是否深入}
-      - {name: 视听与表演, description: 对导演、摄影、剪辑、表演等分析是否恰当}
-  - name: 推荐匹配度
-    description: 推荐是否符合类型、情绪、受众和观看场景。
+  - name: 相关性
+    description: 判断文本、参考来源、富媒体、链接、服务卡片等结果是否与用户Query及Answer相关，是否存在答非所问、误召或跑题。
     weight: 1.0
     scale: 5
     sub_dimensions:
-      - {name: 偏好匹配, description: 是否符合用户类型和内容偏好}
-      - {name: 推荐理由, description: 理由是否具体且能支持选择}
-  - name: 剧透与表达
-    description: 剧透控制、内容组织和表达是否得当。
+      - name: 文本结果相关性
+        description: 回答是否围绕用户询问的影视作品/人物/剧情/评价等话题展开
+      - name: 影视实体与意图相关性
+        description: 是否正确识别影视作品名/角色名/演员名/类型，区分播放/查询/评价意图
+      - name: 卡片结果相关性
+        description: 卡片是否与Query和Answer中的实体一致，不出现错片/错人/错季
+      - name: 热度与版本选择
+        description: 多版本并存时是否优先匹配高热度或上下文指定版本
+      - name: 付费免费意图匹配
+        description: 根据query的免费/付费意图给出对应资源
+  - name: 真实性
+    description: 判断答案中的事实、数据、推理、计算、引用与来源是否真实、准确、可信。
+    weight: 1.8
+    scale: 5
+    sub_dimensions:
+      - name: 内容真实性
+        description: 影视信息（年份/主演/剧情/导演/评分/集数等）是否准确
+  - name: 安全合规性
+    description: 判断答案是否避免风险内容、隐私泄露、版权违规、不当承诺和高风险误导。
     weight: 0.8
     scale: 5
     sub_dimensions:
-      - {name: 剧透控制, description: 未经允许是否避免关键剧透}
-      - {name: 表达清晰, description: 是否有条理、易读且不过度冗长}
+      - name: 版权合规
+        description: 涉及影视资源播放/下载时是否遵守版权要求
+      - name: 内容审核
+        description: 对敏感题材影视内容是否合理过滤或预警
+  - name: 内容质量
+    description: 判断答案表达、信息识别、结构组织、信息密度和呈现方式是否清晰、完整、易理解。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 可读性与格式规范性
+        description: 答案是否语言流畅、分段分点清晰、markdown加粗配图规范
+      - name: 丰富度
+        description: 卡片是否包含简介/Tag/配图/评分/主演等信息
+      - name: 排序合理性
+        description: 泛需求列表排序是否合理（热度高/评分高在前）
+  - name: 用户需求闭环
+    description: 判断答案能否直接满足用户需求。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 核心问题闭环
+        description: 是否直接回答影视信息/评价/推荐需求；播放意图是否跳转播放
+      - name: 卡片需求满足度
+        description: 卡片是否满足实体/SPO/泛需求各场景
+      - name: 服务闭环-播放
+        description: 播放类Query能否直接拉起指定平台及目标剧集/集数
+      - name: 知识挂卡闭环
+        description: 知识类回答挂接的影视卡片是否相关可用
+  - name: 个性化与一致性
+    description: 判断答案是否正确承接上下文。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 上下文前后一致性
+        description: 多轮追问是否承接上轮影视作品/剧集/卡片

@@ -1,0 +1,57 @@
+name: phone_tips
+display: 玩机技巧
+matching_categories: [玩机技巧, 手机技巧, 设置, 功能, 操作, 故障, 权益]
+rules: "华为设备功能、操作、故障排查和权益问题。需识别用户设备型号和系统版本给出适配方案。"
+rubrics:
+  - name: 相关性
+    description: 判断结果是否与用户Query相关。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - name: 文本结果相关性
+        description: 答案是否围绕华为设备功能/操作/故障/权益问题
+      - name: 机型与系统适配
+        description: 是否识别用户设备型号和系统版本给出适配方案
+  - name: 真实性
+    description: 判断信息是否真实准确。
+    weight: 1.8
+    scale: 5
+    sub_dimensions:
+      - name: 操作步骤真实性
+        description: 操作步骤是否真实有效可按步骤执行
+  - name: 安全合规性
+    description: 答案是否避免风险内容。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 设备安全
+        description: ROOT/解锁/绕过安全策略是否合规处理
+      - name: 口径话术合规
+        description: 未发布/不存在功能或敏感信息是否使用官方口径
+  - name: 内容质量
+    description: 答案是否清晰易理解。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 可读性与格式规范性
+        description: 操作步骤清晰有序路径标记正确
+      - name: 话术效果
+        description: 话术是否正确/泛化合理/覆盖所有问法
+      - name: 端侧展示质量
+        description: 图标/图片/视频/superlink/设置卡展示是否正确
+  - name: 用户需求闭环
+    description: 答案能否直接满足用户需求。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: Superlink闭环
+        description: 功能名称/设置路径是否可点击跳转至设置页
+      - name: 设置卡故障卡闭环
+        description: 操作教程是否召回设置卡；故障是否召回检测卡
+  - name: 个性化与一致性
+    description: 答案是否正确承接上下文。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 机型个性化适配
+        description: 是否根据实际设备型号和系统版本给出答案

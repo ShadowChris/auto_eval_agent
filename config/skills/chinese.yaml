@@ -1,0 +1,51 @@
+name: chinese
+display: 语文
+matching_categories: [语文, 字词, 成语, 诗词, 文言文, 拼音, 释义]
+rules: "字词、成语、诗词、文言文等语文知识。需准确提供拼音、释义、出处、典故等信息。"
+rubrics:
+  - name: 相关性
+    description: 判断结果是否与用户Query相关。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - name: 文本结果相关性
+        description: 答案是否围绕字词/成语/诗词/文言文等问题
+      - name: 实体与意图识别
+        description: 是否准确识别字/词/成语/诗词/文言文及意图
+  - name: 真实性
+    description: 判断信息是否真实准确。
+    weight: 1.8
+    scale: 5
+    sub_dimensions:
+      - name: 语文知识准确性
+        description: 拼音/释义/出处/典故/作者信息是否准确
+  - name: 安全合规性
+    description: 答案是否避免风险内容。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 内容合规
+        description: 古典文献引用是否遵守版权规范
+  - name: 内容质量
+    description: 答案是否清晰易理解。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 可读性与格式规范性
+        description: 释义/解析条理清晰，拼音标注规范
+      - name: 参考来源权威性
+        description: 字词/诗词参考来源是否权威可靠
+  - name: 用户需求闭环
+    description: 答案能否直接满足用户需求。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 核心问题闭环
+        description: 是否直接回答释义/用法/典故需求
+  - name: 个性化与一致性
+    description: 答案是否正确承接上下文。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 上下文前后一致性
+        description: 多轮是否承接上轮诗词/字词/成语

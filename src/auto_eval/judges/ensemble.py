@@ -57,14 +57,19 @@ def aggregate_scores(
     trim = cfg.rubric == "trim_mean"
     # 用裁判实际输出的维度名做聚合（兼容 Skill 专属维度及通用维度），而非硬编码预定义列表
     all_keys = list(dict.fromkeys(k for s in scores for k in s.rubric))
+    # 汇总所有裁判的 N/A 维度，取交集（所有裁判都标 N/A 才算该维度对本题不适用）
+    all_na_sets = [set(s.na_dimensions) for s in scores]
+    na_consensus = list(set.intersection(*all_na_sets)) if all_na_sets else []
+    # 有效的维度：排除共识 N/A
+    active_keys = [k for k in all_keys if k not in na_consensus]
     dim_weight = {d.name: d.weight for d in dims}  # 通用维度 weight；未知 key 默认 1.0
     rubric_mean: dict[str, float] = {}
     for k in all_keys:
         vs = [s.rubric[k] for s in scores if k in s.rubric]
         rubric_mean[k] = (_trim_mean(vs) if trim else _mean(vs)) if vs else 0.0
-    # 总分：按各维度 weight 加权（高权重维度影响更大）
-    wsum = sum(dim_weight.get(k, 1.0) for k in all_keys) or 1.0
-    total = sum(rubric_mean[k] * dim_weight.get(k, 1.0) for k in all_keys) / wsum
+    # 总分：按各维度 weight 加权（仅计入有效维度；高权重维度影响更大）
+    wsum = sum(dim_weight.get(k, 1.0) for k in active_keys) or 1.0
+    total = sum(rubric_mean[k] * dim_weight.get(k, 1.0) for k in active_keys) / wsum if active_keys else 0.0
 
     correctness = _majority([s.correctness for s in scores]) or "unclear"
     ets = [s.error_type for s in scores if s.error_type]
@@ -97,6 +102,7 @@ def aggregate_scores(
         model=scores[0].model,
         rubric=rubric_mean,
         rubric_reasons=rubric_reasons,
+        na_dimensions=na_consensus,
         total=total,
         correctness=correctness,
         error_type=error_type,

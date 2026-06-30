@@ -1,0 +1,55 @@
+name: weather
+display: 天气
+matching_categories: [天气, 气温, 降雨, 预报, 气象]
+rules: "天气查询、预报、气象信息。需精确匹配地理位置和时间范围，数据需及时更新。"
+rubrics:
+  - name: 相关性
+    description: 判断结果是否与用户Query相关。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - name: 文本结果相关性
+        description: 答案是否围绕时间/地点/天气类型展开
+      - name: 天气卡类型匹配
+        description: 天级/小时级天气卡是否出对类型
+      - name: 地理位置匹配
+        description: 天气是否对应精确地理位置(区/街道)
+  - name: 真实性
+    description: 判断信息是否真实准确。
+    weight: 2.0
+    scale: 5
+    sub_dimensions:
+      - name: 天气数据准确性
+        description: 温度/降水概率/风速数据是否与实际一致
+      - name: 特殊天气现象真实性
+        description: 彩虹/晚霞/日出日落预测是否有合理气象依据
+  - name: 安全合规性
+    description: 答案是否避免风险内容。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 极端天气预警
+        description: 台风/暴雨/暴雪预警信息是否准确及时
+  - name: 内容质量
+    description: 答案是否清晰易理解。
+    weight: 1.0
+    scale: 5
+    sub_dimensions:
+      - name: 天气卡展示质量
+        description: 卡片日期/图标/天数是否正确；多意图回答完整
+  - name: 用户需求闭环
+    description: 答案能否直接满足用户需求。
+    weight: 1.2
+    scale: 5
+    sub_dimensions:
+      - name: 天气卡需求满足度
+        description: 该出卡时出卡且相关；长周期查询有足够数据
+      - name: 特殊场景闭环
+        description: 穿衣/运动/洗车等活动建议是否有足够依据
+  - name: 个性化与一致性
+    description: 答案是否正确承接上下文。
+    weight: 0.8
+    scale: 5
+    sub_dimensions:
+      - name: 上下文前后一致性
+        description: 多轮追问天气是否承接上轮地点/时间

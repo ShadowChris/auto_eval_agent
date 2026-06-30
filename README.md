@@ -48,9 +48,9 @@ cp .env.example .env                 # 填入 PROXY_API_KEY / TAVILY_API_KEY 等
 **启动**——在独立 PowerShell 终端运行，**保持窗口开着**：
 
 ```powershell
-cd d:\workspace\quick_test
-$env:PYTHONIOENCODING="utf-8"
-& "D:\ProgramData\anaconda3\python.exe" -m auto_eval.web.server
+cd auto_eval_agent
+$env:PYTHONPATH="D:\workspace\quick_test\auto_eval_agent\src"
+python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502
 ```
 
 看到 `Uvicorn running on http://0.0.0.0:8501` 后，浏览器打开 **http://localhost:8501** 。
@@ -59,9 +59,9 @@ $env:PYTHONIOENCODING="utf-8"
 
 **终止**：在该终端按 `Ctrl+C`。
 
-> 端口被占（进程没清干净）时强制清理 8501：
+> 端口被占（进程没清干净）时强制清理 8502：
 > ```powershell
-> Get-NetTCPConnection -LocalPort 8501 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+> Get-NetTCPConnection -LocalPort 8502 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 > ```
 
 ### 方式 B：CLI（无界面，命令行一条龙）
