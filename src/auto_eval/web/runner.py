@@ -91,7 +91,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                     res = await asyncio.wait_for(
                         _eval_one(
                             task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
-                            online_runner, process_dims, arbitrator
+                            online_runner, process_dims, arbitrator, task=task
                         ),
                         timeout=eval_timeout,
                     )
@@ -141,7 +141,7 @@ def _write_eval_error(task_id: str, idx: int, item: dict, error: Exception | Non
         pass
 
 
-async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, online_runner, process_dims=None, arbitrator=None) -> dict:
+async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, online_runner, process_dims=None, arbitrator=None, task=None) -> dict:
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
     out: dict = {"query": item.question}
@@ -183,8 +183,13 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
             # 产品专家缺竞品 → 跳过该裁判（不参与本题聚合）
             if r.client.cfg.persona == "product_expert" and not competitor:
                 return None
+            def on_token(token: str):
+                # 发送 SSE 事件到前端（task 由 _eval_one 参数传入）
+                if task is not None:
+                    asyncio.create_task(task.publish("token", {"token": token}))
+
             return await r.score(item, "answer", answer, eval_mode=eval_mode,
-                                 process_dims=process_dims, competitor=competitor)
+                                    process_dims=process_dims, competitor=competitor, stream_callback=on_token)
 
         raw = await asyncio.gather(*[_score(r) for r in rubrics])
         scores = [s for s in raw if s is not None]

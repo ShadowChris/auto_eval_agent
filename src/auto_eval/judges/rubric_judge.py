@@ -308,25 +308,43 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
         "对比例子：\n" + "\n".join(fewshot_lines) + "\n\n"
         "在心中完成意图判断后，只输出标签本身，不输出解释、标点或 JSON。"
     )
-    try:
-        logger.info("classify start: id=%s query=%.120s", item.id, item.question)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": f"查询：{item.question}\n\n标签："},
-            ],
-            temperature=0,
-            max_tokens=50,
-            timeout=15.0,  # 轻量分类，15 秒足够
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        result = _normalize_label(text, labels, fallback)
-        if result:
-            logger.info("classify ok: id=%s raw=%r -> skill=%s", item.id, text, result)
-        else:
-            logger.info("classify fallback: id=%s raw=%r -> default", item.id, text)
-        return result
-    except Exception:
-        logger.exception("classify failed: id=%s", item.id)
-        return None
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            logger.info("classify start: id=%s query=%.120s", item.id, item.question)
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"查询：{item.question}\n\n标签："},
+                ],
+                temperature=0,
+                max_tokens=200,
+                timeout=15.0,  # 轻量分类，15 秒足够
+            )
+            # 防护：API 可能返回空 choices（并发/限流等场景）
+            if not resp or not resp.choices:
+                logger.warning("classify empty response: id=%s attempt=%d", item.id, attempt + 1)
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(min(20.0, 2 ** attempt))  # 指数退避，上限 20s
+                    continue
+                return None
+            text = (resp.choices[0].message.content or "").strip()
+            result = _normalize_label(text, labels, fallback)
+            if result:
+                logger.info("classify ok: id=%s raw=%r -> skill=%s", item.id, text, result)
+            else:
+                logger.info("classify fallback: id=%s raw=%r -> default", item.id, text)
+            return result
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            retriable = any(
+                k in msg
+                for k in ("RateLimit", "Overload", "429", "Timeout", "Connection", "ServiceUnavailable")
+            )
+            if retriable and attempt < max_attempts - 1:
+                logger.warning("classify retriable error: id=%s attempt=%d %s", item.id, attempt + 1, msg)
+                await asyncio.sleep(min(20.0, 2 ** attempt))
+                continue
+            logger.exception("classify failed: id=%s", item.id)
+            return None
