@@ -1,6 +1,7 @@
 """Rubric 盲打分裁判：意图理解 + 理想锚定 + 多角度分析的深度盲评（可联网）。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime
