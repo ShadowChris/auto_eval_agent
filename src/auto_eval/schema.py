@@ -30,6 +30,7 @@ class EvalItem(BaseModel):
     difficulty: Difficulty = "medium"
     tags: list[str] = Field(default_factory=list)
     trace: str | None = None  # 被测 agent 的推理/工具轨迹（仅过程盲评使用）
+    media: list[str] = Field(default_factory=list)  # 操作类评测：录屏/图片本地路径（裁判抽帧后以 image_url 多图盲评）
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def categories(self) -> list[str]:

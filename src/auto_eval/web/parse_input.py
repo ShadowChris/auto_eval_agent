@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 from typing import Literal
 
-Mode = Literal["single", "compare", "online", "process"]
+Mode = Literal["single", "compare", "online", "process", "operation"]
 
 
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 ||| 分隔的粘贴文本。返回 (items, errors)。"""
+    if mode == "operation":
+        return [], ["操作类评测请在页面上逐题上传视频，不支持文本粘贴解析"]
     items: list[dict] = []
     errors: list[str] = []
     for ln, raw in enumerate(text.splitlines(), 1):
@@ -57,6 +59,8 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
 
 def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 jsonl 文本。字段：question 必填；按 mode 取 answer/answer_a/answer_b/reference。"""
+    if mode == "operation":
+        return [], ["操作类评测请在页面上逐题上传视频，不支持 jsonl 粘贴"]
     items: list[dict] = []
     errors: list[str] = []
     for ln, raw in enumerate(content.splitlines(), 1):

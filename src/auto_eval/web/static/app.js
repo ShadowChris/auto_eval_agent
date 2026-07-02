@@ -8,12 +8,14 @@ createApp({
       { key: "compare", label: "两回答对比" },
       { key: "online", label: "接模型在线评估" },
       { key: "process", label: "过程盲评(含轨迹)" },
+      { key: "operation", label: "操作类(录屏)" },
     ];
     const mode = ref("single");
     const text = ref("");
     const fileText = ref("");
     const isJsonl = ref(false);
     const items = ref([]);
+    const opItems = ref([{ query: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", uploading: false, uploadError: "" }]);
     const errors = ref([]);
     const judges = ref([]);
     const models = ref([]);
@@ -48,6 +50,7 @@ createApp({
           compare: "每行一题：query ||| answerA ||| answerB [||| reference]",
           online: "每行一题：query [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query ||| answer ||| trace [||| reference]   （trace=被测 agent 的推理/工具轨迹；评过程质量）",
+          operation: "逐题填写操作意图(query)并上传手机操作录屏；后端自动场景抽帧，裁判看关键帧判断操作是否完成。可填 agent 自述做交叉验证。",
         }[mode.value])
     );
     const placeholder = computed(
@@ -57,6 +60,7 @@ createApp({
           compare: "写一首关于春天的诗 ||| 春风又绿江南岸 ||| 春眠不觉晓\n推荐一部科幻电影 ||| 星际穿越 ||| 流浪地球",
           online: "2024 年诺贝尔文学奖获得者是谁？\n计算 17 × 24 等于多少？",
           process: "北京到上海多少公里？ ||| 约 1200 公里 ||| 1.调用地图API 2.距离=1318km 3.约1200km\n某函数是否正确？ ||| 正确 ||| def f(n): return 1 if n<=1 else n*f(n-1)",
+          operation: "",
         }[mode.value])
     );
 
@@ -122,6 +126,17 @@ createApp({
           { key: "bidirectional_consistent", label: "双向一致" },
           { key: "rationale", label: "理由" },
         { key: "latency_s", label: "耗时" },
+        ];
+      if (mode.value === "operation")
+        return [
+          { key: "item_id", label: "题号" },
+          { key: "query", label: "操作意图" },
+          { key: "correctness", label: "完成判定" },
+          { key: "total", label: "总分" },
+          ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
+          { key: "arbitrated", label: "仲裁" },
+          { key: "rationale", label: "步骤与证据" },
+          { key: "latency_s", label: "耗时" },
         ];
       const dims = rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d }));
       return [
@@ -230,6 +245,45 @@ createApp({
       r.readAsText(f, "utf-8");
     }
 
+    // —— 操作类评测：逐题卡片（query + 视频上传 + 可选 agent 自述）——
+    function newOpItem() {
+      return { query: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", uploading: false, uploadError: "" };
+    }
+    function addOpItem() { opItems.value.push(newOpItem()); }
+    function removeOpItem(i) { if (opItems.value.length > 1) opItems.value.splice(i, 1); }
+    async function uploadVideo(i, file) {
+      const it = opItems.value[i];
+      if (!file) return;
+      if (file.size > 20 * 1024 * 1024) { it.uploadError = "视频超过 20MB 限制"; return; }
+      it.uploading = true; it.uploadError = "";
+      const fd = new FormData(); fd.append("file", file);
+      try {
+        const r = await fetch("/api/upload/video", { method: "POST", body: fd });
+        if (!r.ok) { it.uploadError = "上传失败 " + r.status; return; }
+        const d = await r.json();
+        it.videoName = file.name;
+        it.videoPath = d.video_path;
+        it.frames = d.frames || [];
+        it.frameCount = d.frame_count || 0;
+      } catch (e) {
+        it.uploadError = "上传出错：" + e;
+      } finally {
+        it.uploading = false;
+      }
+    }
+    function onOpVideo(e, i) { uploadVideo(i, e.target.files[0]); e.target.value = ""; }
+    function onOpDrop(e, i) {
+      e.preventDefault();
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) uploadVideo(i, f);
+    }
+
+    const canSubmit = computed(() => {
+      if (mode.value === "operation")
+        return opItems.value.some((it) => it.query.trim() && (it.frames || []).length);
+      return !!text.value;
+    });
+
     async function doParse() {
       const body = { mode: mode.value };
       if (isJsonl.value && fileText.value) body.jsonl = fileText.value;
@@ -246,11 +300,27 @@ createApp({
     }
 
     async function submit() {
-      // 自动解析最新输入（用户可跳过手动"解析预览"）
-      await doParse();
-      if (!items.value.length) {
-        alert("解析后没有可评估的题。请检查格式：每行『问题 ||| 回答』。");
-        return;
+      if (mode.value === "operation") {
+        const valid = opItems.value.filter((it) => it.query.trim() && (it.frames || []).length);
+        if (!valid.length) {
+          alert("请为每题填写操作意图(query)并上传视频(需完成抽帧)后再评估。");
+          return;
+        }
+        items.value = valid.map((it, idx) => ({
+          id: `op${idx + 1}`,
+          query: it.query.trim(),
+          answer: (it.answer || "").trim(),
+          media: [it.videoPath],
+          frames: it.frames,
+        }));
+        errors.value = [];
+      } else {
+        // 自动解析最新输入（用户可跳过手动"解析预览"）
+        await doParse();
+        if (!items.value.length) {
+          alert("解析后没有可评估的题。请检查格式：每行『问题 ||| 回答』。");
+          return;
+        }
       }
       results.value = [];
       summary.value = null;
@@ -342,7 +412,11 @@ createApp({
       if (c.key === "arbitrated") return v ? `⚖️是(${r.arbitrator_confidence ?? "-"})` : "";
       if (c.key === "bidirectional_consistent") return v ? "是" : "否(位置偏差)";
       if (c.key === "winner") return v === "a" ? "A" : v === "b" ? "B" : "平";
-      if (c.key === "correctness") return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
+      if (c.key === "correctness") {
+        if (mode.value === "operation")
+          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 部分", unclear: "?" }[v] || v) || "";
+        return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
+      }
       if (v == null) return "";
       return v;
     }
@@ -531,8 +605,8 @@ createApp({
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
-      formatHint, placeholder, previewKeys, resultCols,
-      trunc, switchMode, onFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx,
+      formatHint, placeholder, previewKeys, resultCols, opItems, canSubmit,
+      trunc, switchMode, onFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,

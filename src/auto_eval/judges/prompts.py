@@ -125,6 +125,47 @@ RUBRIC_USER = Template(
 )
 
 
+# ---- 操作类盲评（录屏关键帧 → 判断操作是否完成意图；eval_mode="operation"）----
+# 维度从 config/skills/operation.yaml 读取（动态渲染），不再硬编码。输出 JSON 结构复用
+# parse_json_loose / _flatten_rubric / SingleScore；维度为一级直接数值（无子维度）。
+OPERATION_SYSTEM = Template(
+    """{{ persona }}
+
+你正在【盲评】一段手机操作录屏——判断录屏中的操作是否真正完成了用户的操作意图（query）。
+你看不到任何参考答案。用户消息里附带了按时间顺序从录屏抽出的关键帧图片。
+
+【评测维度】（1–{{ scale }} 分，直接给整数分）
+{% for d in dims -%}
+{{ loop.index }}. {{ d.name }}：{{ d.description }}
+{% endfor %}
+{% if agent_claim %}
+
+【agent 自述】agent 自称完成了以下内容。请把它与画面证据交叉验证，警惕「只说不做 / 声称完成但画面无凭证」：
+{{ agent_claim }}
+{% endif %}
+
+【correctness 映射】操作完整正确完成→right；完全没做或南辕北辙→wrong；部分完成/有小瑕疵→partial；画面不清晰无法判断→unclear。
+
+【输出格式】先输出 <analysis>...</analysis>（含从关键帧还原的 step_trace 步骤序列 + evidence 证据），再输出一行 JSON。rubric 的 key 必须严格用上面维度名，每个维度的值直接是该维度分数（1–{{ scale }} 的整数，不要嵌套、不要写 reason）：
+<analysis>
+1. 还原步骤(step_trace)：从关键帧看，操作者依次做了……
+2. 证据(evidence)：哪些关键帧支持完成 / 哪些暴露未完成……
+3. 自述 vs 证据一致性：……
+</analysis>
+{"rubric": { {% for d in dims %}"{{ d.name }}": <1-{{ scale }} 整数>{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <各维度均值>, "correctness": "right|wrong|partial|unclear", "error_type": "<未完成的原因标签，如 仅口头指导未执行/步骤错误/最终态缺失/画面不清；无错误填 null>", "rationale": "<结论 + step_trace + evidence + 各维度简评>"}
+"""
+)
+
+OPERATION_USER = Template(
+    """当前日期：{{ current_date }}。
+
+操作意图（query）：
+{{ question }}
+
+请观察上方按时间顺序排列的关键帧，盲评这段录屏中的操作是否完成了上述意图。"""
+)
+
+
 # ---- 对比盲评（产品专家：竞品作对比参考，最终评判待评答案本身）----
 RUBRIC_COMPARE_SYSTEM = Template(
     """{{ persona }}

@@ -7,12 +7,17 @@ from datetime import datetime
 
 from openai import AsyncOpenAI
 
+from pathlib import Path
+
 from ..config import RubricDim
+from ..media import encode_frame
 from ..schema import EvalItem, SingleScore
 
 logger = logging.getLogger("auto_eval.classify")
 from .base import JudgeClient
 from .prompts import (
+    OPERATION_SYSTEM,
+    OPERATION_USER,
     RUBRIC_COMPARE_SYSTEM,
     RUBRIC_COMPARE_USER,
     RUBRIC_PROCESS_SYSTEM,
@@ -116,7 +121,22 @@ class RubricJudge:
             item.metadata.setdefault("category_source", "dataset")
         skill_dims, skill_rules, _ = (self.skill_router.match(item) if self.skill_router else (None, "", []))
         is_product_compare = (self.client.cfg.persona == "product_expert") and bool(competitor)
-        if eval_mode == "process" and process_dims and item.trace:
+        user_images: list[str] | None = None  # 操作类评测：关键帧 data_url 列表，其余模式为 None
+        user_image_refs: list[str] | None = None  # 关键帧本地路径（仅写入 trace 供回溯，不展示前端）
+        if eval_mode == "operation":
+            op_skill = self.skill_router.domain.get("operation") if self.skill_router else None
+            dims = (op_skill.rubrics if op_skill and op_skill.rubrics else None) or self.dims
+            system = OPERATION_SYSTEM.render(
+                persona=self.client.persona,
+                agent_claim=(answer or "").strip(),
+                dims=dims,
+                scale=dims[0].scale if dims else 5,
+            )
+            user = OPERATION_USER.render(question=item.question, current_date=today)
+            frames = item.metadata.get("frames") or []
+            user_images = [encode_frame(Path(p)) for p in frames] if frames else None
+            user_image_refs = frames if frames else None
+        elif eval_mode == "process" and process_dims and item.trace:
             dims = process_dims  # 过程盲评维度不变（不受垂域 skill 影响）
             system = RUBRIC_PROCESS_SYSTEM.render(
                 persona=self.client.persona, scale=dims[0].scale if dims else 5, dims=dims, skill_rules=skill_rules
@@ -142,7 +162,8 @@ class RubricJudge:
                 question=item.question, context=item.context, model_name=model_name, answer=answer, current_date=today
             )
         t0 = time.perf_counter()
-        reply = await self.client.complete(system, user, stream_callback=stream_callback)
+        reply = await self.client.complete(system, user, stream_callback=stream_callback,
+                                           user_images=user_images, user_image_refs=user_image_refs)
         latency = int((time.perf_counter() - t0) * 1000)
 
         analysis = parse_analysis(reply.content)

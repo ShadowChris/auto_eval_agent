@@ -1,0 +1,21 @@
+name: operation
+display: 操作类
+matching_categories: []
+rules: "操作类评测：看录屏关键帧判断操作是否完成意图。务必区分「真的执行」与「只给口头指导/教程而未执行」。"
+rubrics:
+  - name: 操作完成度
+    description: 录屏中的操作是否真正执行并完成 query 意图。区分「真的做了」与「只给口头指导/教程而未执行」——后者判低分。
+    weight: 1.5
+    scale: 5
+  - name: 步骤正确性
+    description: 操作路径是否正确、有无错误或多余步骤、是否卡住或反复尝试。
+    weight: 1.0
+    scale: 5
+  - name: 最终态正确
+    description: 操作结束的最终界面是否处于期望的结果态（目标条目已创建/已存在、目标设置已生效）。
+    weight: 1.2
+    scale: 5
+  - name: 效率与稳健性
+    description: 操作是否高效、能否在异常或弹窗下正确处理。
+    weight: 1.0
+    scale: 5

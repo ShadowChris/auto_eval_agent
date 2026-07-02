@@ -4,6 +4,10 @@
 # 运行产物
 runs/
 
+# 评测数据与临时产物（不入版本控制；data/ 里已跟踪的 dataset.jsonl 仍保留）
+data/
+test_tmp/
+
 # Python
 __pycache__/
 *.pyc

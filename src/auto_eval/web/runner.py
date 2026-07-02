@@ -26,6 +26,9 @@ from .tasks import Task
 
 
 def _to_evalitem(item: dict, idx: int) -> EvalItem:
+    meta = dict(item.get("metadata") or {})
+    if item.get("frames"):
+        meta["frames"] = item["frames"]  # operation：抽好的关键帧路径，裁判读取后 encode 成 image_url
     return EvalItem(
         id=item.get("id", f"q{idx}"),
         question=item["query"],
@@ -34,6 +37,8 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
         reference=item.get("reference"),
         category=item.get("category", "default"),
         trace=item.get("trace"),
+        media=item.get("media") or [],
+        metadata=meta,
     )
 
 
@@ -198,6 +203,34 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
         _fill_verdict(out, v)
         _maybe_meta(out, item, answer, v)
 
+    elif mode == "operation":
+        answer = item_dict.get("answer", "") or ""  # agent 自述（可选，用于「自述×证据」交叉）
+        if answer:
+            out["answer"] = answer
+        out["has_video"] = bool(item_dict.get("media") or item_dict.get("frames"))
+
+        async def _score_op(r):
+            return await r.score(item, "answer", answer, eval_mode="operation")
+
+        raw = await asyncio.gather(*[_score_op(r) for r in rubrics])
+        scores = [s for s in raw if s is not None]
+        op_skill = cfg.domain_skills.get("operation")
+        op_dims = op_skill.rubrics if op_skill and op_skill.rubrics else cfg.rubrics
+        v = aggregate_scores(scores, op_dims, cfg.ensemble, cfg.ensemble.flag_low_agreement)
+        # 多裁判分歧 → 主席仲裁（纯文本，不带帧；兜底）
+        if v and v.low_agreement and len(scores) >= 2 and arbitrator:
+            try:
+                arb = await arbitrator.arbitrate(item, answer, list(scores))
+                v.correctness, v.total, v.rubric = arb["correctness"], arb["total"], arb["rubric"]
+                v.arbitrated = True
+                v.arbitrator_confidence = arb["confidence"]
+                v.arbitrator_rationale = arb["rationale"]
+                v.rationale = f"[主席仲裁·置信度{arb['confidence']}] {arb['rationale']}"
+            except Exception:
+                pass
+        _fill_verdict(out, v)
+        _maybe_meta(out, item, answer, v)
+
     elif mode == "compare":
         aa, ab = item_dict["answer_a"], item_dict["answer_b"]
         out["answer_a"], out["answer_b"] = aa, ab
@@ -289,7 +322,7 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
         summary["right_count"] = right_count
         summary["problem_count"] = problem_count
         summary["accuracy"] = round(right_count / len(judged), 3)
-    if task.mode in ("single", "online", "process"):
+    if task.mode in ("single", "online", "process", "operation"):
         totals = [r.get("total") for r in ok if r.get("total") is not None]
         if totals:
             summary["mean_total"] = round(sum(totals) / len(totals), 2)

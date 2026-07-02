@@ -55,6 +55,31 @@ def _safe_json(s: str | None):
         return s
 
 
+def _redact_image_urls(messages: list[dict], refs: list[str] | None) -> list[dict]:
+    """把 messages 里 image_url 的 base64 data url 替换成帧路径引用，避免 trace 文件膨胀。
+
+    操作类评测每帧 base64 约 30KB，N 帧会让 judge_calls.jsonl 单行膨胀到 MB 级。
+    refs 与 complete 的 user_images 一一对应（通常是关键帧本地路径）；
+    无 refs 对应时标记 data url 已省略。仅影响 trace 落盘，不影响发给模型的消息。
+    """
+    out: list[dict] = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            new_content, img_idx = [], 0
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    ref = refs[img_idx] if refs and img_idx < len(refs) else "(base64 省略)"
+                    new_content.append({"type": "image_url", "image_url": {"url": f"[frame → {ref}]"}})
+                    img_idx += 1
+                else:
+                    new_content.append(part)
+            out.append({**m, "content": new_content})
+        else:
+            out.append(m)
+    return out
+
+
 class JudgeClient:
     def __init__(
         self,
@@ -87,10 +112,19 @@ class JudgeClient:
         self.has_tools = bool(self.tool_defs)
 
     async def complete(self, system: str, user: str,
-                       stream_callback: Callable[[str], None] | None = None) -> JudgeReply:
+                       stream_callback: Callable[[str], None] | None = None,
+                       user_images: list[str] | None = None,
+                       user_image_refs: list[str] | None = None) -> JudgeReply:
+        # 多模态：操作类评测传入关键帧 data_url 时，user content 变成 [text, image_url...] 列表。
+        # agent-loop 内追加的 assistant/tool/强制判定消息仍为字符串，不受影响。
+        user_content: Any = user
+        if user_images:
+            user_content = [{"type": "text", "text": user}] + [
+                {"type": "image_url", "image_url": {"url": u}} for u in user_images
+            ]
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": user_content},
         ]
         trace: list[str] = []
         queries: list[str] = []
@@ -192,7 +226,7 @@ class JudgeClient:
 
         if do_trace:
             self._write_trace({
-                "ts": time.time(),
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                 "judge": self.cfg.name,
                 "model": self.model,
                 "system": system,
@@ -203,7 +237,9 @@ class JudgeClient:
                 "truncated": truncated,
                 "llm_rounds": llm_rounds,
                 "tool_results": tool_results,
-                "messages": messages,  # 最终完整对话历史
+                # trace 不存 base64（每帧 ~30KB×N 会让 jsonl 膨胀），image_url 换成帧路径引用
+                "image_refs": user_image_refs,
+                "messages": _redact_image_urls(messages, user_image_refs),
             })
 
         return JudgeReply(

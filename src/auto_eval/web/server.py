@@ -5,16 +5,19 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..config import load_config
+from ..media import extract_scene_keyframes, probe_duration
+from ..paths import RUNS_DIR
 from .parse_input import Mode, parse_jsonl, parse_text
 from .history import build_xlsx, delete_snapshot, export_rows, list_snapshots, load_snapshot, rows_to_csv, snapshot_payload, task_to_snapshot
 from .runner import run_eval
@@ -97,6 +100,30 @@ async def api_eval(req: EvalReq):
     asyncio.create_task(_start_later())
     return {"task_id": task.id}
 
+@app.post("/api/upload/video")
+async def api_upload_video(file: UploadFile = File(...)):
+    """操作类评测：上传录屏 → 存盘 → 场景抽帧 → 返回帧路径列表（供 /api/eval 的 item 引用）。"""
+    data = await file.read()
+    if len(data) > 20 * 1024 * 1024:
+        raise HTTPException(413, "视频过大，限制 ≤20MB")
+    video_dir = RUNS_DIR / "videos"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    video_id = uuid.uuid4().hex[:12]
+    suffix = Path(file.filename or "v.mp4").suffix.lower() or ".mp4"
+    video_path = video_dir / f"{video_id}{suffix}"
+    video_path.write_bytes(data)
+    frame_dir = video_dir / f"{video_id}_frames"
+    frames = extract_scene_keyframes(video_path, frame_dir)
+    duration = probe_duration(video_path)
+    return {
+        "video_id": video_id,
+        "video_path": str(video_path),
+        "frames": [str(f) for f in frames],
+        "frame_count": len(frames),
+        "duration": round(duration, 2),
+    }
+
+
 @app.get("/api/eval/{task_id}/stream")
 async def api_stream(task_id: str):
     task = get_task(task_id)
@@ -157,14 +184,14 @@ def api_export(task_id: str, format: str = "json"):
         return JSONResponse(snapshot_payload(data))
 
     if format == "xlsx":
-        content = build_xlsx(data)
+        content = build_xlsx(data, cfg())
         return Response(
             content,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.xlsx"},
         )
 
-    sheets = export_rows(data)
+    sheets = export_rows(data, cfg())
     csv_text = rows_to_csv(sheets.get("逐题结果") or [])
     return StreamingResponse(
         iter([csv_text.encode("utf-8-sig")]),
