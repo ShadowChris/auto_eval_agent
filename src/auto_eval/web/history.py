@@ -122,11 +122,12 @@ def snapshot_payload(data: dict) -> dict:
     }
 
 
-def export_rows(snapshot: dict) -> dict[str, list[dict]]:
+def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]:
     """把一次评测拆成多个 Sheet 的行数据。
 
-    逐题结果按垂域分 sheet（同垂域维度一致，可展开列做筛选/分析）；
-    另保留一个"逐题结果"概览 sheet（维度塞单列，避免跨垂域维度并集导致列爆炸；CSV 导出走它）。
+    逐题结果按维度展开成独立列（维度_X / 理由_X），CSV 与 XLSX 概览 sheet 均走此格式；
+    非 compare 模式下仍按垂域分 sheet，便于同垂域内做筛选/分析。
+    传入 cfg 时，会按 skill 配置保留完整的维度列，N/A 的维度也会导出并在单元格填"N/A"。
     """
     results = snapshot.get("results") or []
     summary = snapshot.get("summary") or {}
@@ -137,17 +138,39 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
 
     rows: dict[str, list[dict]] = {"运行信息": [_run_info(snapshot)]}
     if mode == "compare":
-        rows["逐题结果"] = _result_rows(results)
+        rows["逐题结果"] = _result_rows(results, _all_dim_names(results, cfg))
     else:
-        rows["逐题结果"] = _result_rows_compact(results)
-        for name, skill_rows in _per_skill_sheets(results):
-            rows[name] = skill_rows
+        rows["逐题结果"] = _result_rows_compact(results, _all_dim_names(results, cfg))
+        for name, skill_rows, dim_names in _per_skill_sheets(results, cfg):
+            rows[name] = _result_rows(skill_rows, dim_names)
     rows["垂域总览"] = overview
     rows["维度问题占比"] = _dim_problem_rows(sections)
     rows["图表数据"] = _chart_rows(summary)
     if summary:
         rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_skill"})]
     return rows
+
+
+def _skill_dim_names(skill_name: str, cfg: Any | None) -> list[str] | None:
+    """根据垂域 skill 名返回该 skill 配置的一级维度名；cfg 未传时返回 None。"""
+    if cfg is None:
+        return None
+    skill = cfg.domain_skills.get(skill_name) if getattr(cfg, "domain_skills", None) else None
+    if skill and getattr(skill, "rubrics", None):
+        return [d.name for d in skill.rubrics]
+    if getattr(cfg, "rubrics", None):
+        return [d.name for d in cfg.rubrics]
+    return None
+
+
+def _all_dim_names(results: list[dict], cfg: Any | None) -> list[str] | None:
+    """取所有结果涉及 skill 的维度名并集；cfg 未传时返回 None。"""
+    if cfg is None or not results:
+        return None
+    names = set()
+    for r in results:
+        names.update(_skill_dim_names(r.get("category") or "default", cfg) or [])
+    return sorted(names) if names else None
 
 
 def _run_info(snapshot: dict) -> dict:
@@ -172,36 +195,44 @@ def _format_ts(value) -> str:
     return str(value or "")
 
 
-def _result_rows(results: list[dict]) -> list[dict]:
-    """维度展开成列（适用于同垂域维度一致的场景，如各垂域分 sheet）；
-    每个维度同时输出 分(维度_X) 和 打分理由(理由_X) 两列。"""
+def _result_rows(results: list[dict], dim_names: list[str] | None = None) -> list[dict]:
+    """把维度展开成列；dim_names 为 None 时按每行实际 rubric 生成列。
+
+    dim_names 传入后，所有行都会保留这些维度列（便于 Excel 统一表头）。
+    维度若在该行 na_dimensions 中则填 "N/A"，否则没有分数的填空字符串。
+    每个维度同时输出 分(维度_X) 和 打分理由(理由_X) 两列。
+    """
     rows = []
     for r in results:
         row = dict(r)
         rubric = row.pop("rubric", {}) or {}
         reasons = row.pop("rubric_reasons", {}) or {}
-        for dim, score in rubric.items():
-            row[f"维度_{dim}"] = score
-            row[f"理由_{dim}"] = reasons.get(dim, "")
+        na_dims = set(r.get("na_dimensions") or [])
+        if dim_names is None:
+            for dim, score in rubric.items():
+                row[f"维度_{dim}"] = score
+                row[f"理由_{dim}"] = reasons.get(dim, "")
+        else:
+            for dim in dim_names:
+                if dim in na_dims:
+                    row[f"维度_{dim}"] = "N/A"
+                    row[f"理由_{dim}"] = ""
+                else:
+                    row[f"维度_{dim}"] = rubric.get(dim, "")
+                    row[f"理由_{dim}"] = reasons.get(dim, "")
         rows.append(row)
     return rows
 
 
-def _result_rows_compact(results: list[dict]) -> list[dict]:
-    """逐题概览：维度分与理由各塞单列（避免跨垂域维度并集导致列爆炸）。"""
-    rows = []
-    for r in results:
-        row = dict(r)
-        rubric = row.pop("rubric", {}) or {}
-        reasons = row.pop("rubric_reasons", {}) or {}
-        row["各维度分"] = "  ".join(f"{k}:{v}" for k, v in rubric.items()) if rubric else ""
-        row["各维度理由"] = "  ".join(f"{k}:{reasons[k]}" for k in rubric if k in reasons) if rubric else ""
-        rows.append(row)
-    return rows
+def _result_rows_compact(results: list[dict], dim_names: list[str] | None = None) -> list[dict]:
+    """逐题概览：维度同样展开成独立列，便于 Excel/CSV 中按维度筛选、统计。"""
+    return _result_rows(results, dim_names)
 
 
-def _per_skill_sheets(results: list[dict]) -> list[tuple[str, list[dict]]]:
-    """按垂域分组返回 [(sheet名, 行数据)]；同垂域维度一致可展开列，评估失败的题单独成 sheet。"""
+def _per_skill_sheets(results: list[dict], cfg: Any | None = None) -> list[tuple[str, list[dict], list[str] | None]]:
+    """按垂域分组返回 [(sheet名, 行数据, 该 sheet 的维度列表)]；
+    同垂域维度一致可展开列，评估失败的题单独成 sheet 并使用所有失败题涉及维度的并集。
+    """
     groups: dict[str, dict] = {}
     failed: list[dict] = []
     for r in results:
@@ -212,10 +243,11 @@ def _per_skill_sheets(results: list[dict]) -> list[tuple[str, list[dict]]]:
         disp = r.get("category_display") or cat
         groups.setdefault(cat, {"display": disp, "rows": []})["rows"].append(r)
     out = []
-    for _cat, g in sorted(groups.items(), key=lambda kv: -len(kv[1]["rows"])):
-        out.append((_sheet_name(f"逐题-{g['display']}"), _result_rows(g["rows"])))
+    for cat, g in sorted(groups.items(), key=lambda kv: -len(kv[1]["rows"])):
+        dim_names = _skill_dim_names(cat, cfg)
+        out.append((_sheet_name(f"逐题-{g['display']}"), g["rows"], dim_names))
     if failed:
-        out.append(("评估失败", _result_rows(failed)))
+        out.append(("评估失败", failed, _all_dim_names(failed, cfg)))
     return out
 
 
@@ -286,13 +318,13 @@ def rows_to_csv(rows: list[dict]) -> str:
     return out.getvalue()
 
 
-def build_xlsx(snapshot: dict) -> bytes:
+def build_xlsx(snapshot: dict, cfg: Any | None = None) -> bytes:
     """生成 xlsx（纯数据 sheet，不含图表）。
 
     手写 OOXML chart 易被 Excel 判"需修复"且样式差，故不再导出图表——
     图表请看 web 端 ECharts；如需在 Excel 画图，用"图表数据"sheet 自行插入。
     """
-    sheets = {name: rows for name, rows in export_rows(snapshot).items() if rows}
+    sheets = {name: rows for name, rows in export_rows(snapshot, cfg).items() if rows}
     if not sheets:
         sheets = {"逐题结果": []}
 
@@ -554,8 +586,6 @@ def _col(idx: int) -> str:
 def _width(header: str) -> int:
     if header in {"query", "answer", "generated_answer", "rationale", "理由", "options"}:
         return 42
-    if header in {"各维度分", "各维度理由"}:
-        return 36
     if header.startswith("理由_"):
         return 30
     if header.startswith("维度_"):
