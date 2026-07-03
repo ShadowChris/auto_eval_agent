@@ -109,6 +109,8 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                     "query": item_dict.get("query", ""),
                     "error": f"{type(last_error).__name__}: {last_error}",
                 }
+                if item_dict.get("context"):
+                    res["context"] = item_dict["context"]
                 _write_eval_error(task.id, idx, item_dict, last_error)
         res["index"] = idx
         task.results.append(res)
@@ -132,6 +134,7 @@ def _write_eval_error(task_id: str, idx: int, item: dict, error: Exception | Non
             "task_id": task_id,
             "index": idx,
             "query": item.get("query", ""),
+            "context": item.get("context", ""),
             "error": f"{type(error).__name__}: {error}" if error else "unknown",
             "traceback": "".join(traceback.format_exception(error)) if error else "",
         }
@@ -145,6 +148,8 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
     out: dict = {"query": item.question}
+    if item.context:
+        out["context"] = item.context
 
     # 每个 case 仅一次轻量垂域分类（在裁判并发之前完成）
     classify_model = cfg.eval_options.classify_model
@@ -377,6 +382,7 @@ def _by_skill(task: Task, cfg: AppConfig) -> list[dict]:
         it = EvalItem(
             id=iid,
             question=item_dict.get("query", ""),
+            context=r.get("context") or item_dict.get("context"),
             category=r.get("category") or item_dict.get("category", "default"),
             has_ref=bool(item_dict.get("reference")),
             reference=item_dict.get("reference"),

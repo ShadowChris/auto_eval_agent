@@ -74,7 +74,15 @@ def cluster_weaknesses(
 
     out: dict[str, list[dict]] = collections.defaultdict(list)
     for (sk, label), ids in buckets.items():
-        questions = [(items_map[i].question if items_map.get(i) else "") for i in ids]
+        questions = [
+            " ".join(
+                x for x in (
+                    items_map[i].question,
+                    items_map[i].context or "",
+                ) if x
+            ) if items_map.get(i) else ""
+            for i in ids
+        ]
         kws: list[str] = []
         for q in questions:
             kws += _bigrams(q)

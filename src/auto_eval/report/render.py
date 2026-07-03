@@ -193,6 +193,8 @@ def _render_a_md(A: dict) -> str:
         avg = sum(wr.values()) / len(wr) if wr else 0
         L.append(f"- **{c['item_id']}** [{'/'.join(c['category'])}] 平均胜率 {_pct(avg)}")
         L.append(f"  - 题：{c['question']}")
+        if c.get("context"):
+            L.append(f"  - 背景：{c['context']}")
         L.append(f"  - focal 答：{c['focal_answer']}")
         if c.get("focal_tool_trace"):
             L.append(f"  - 裁判查证轨迹：{' | '.join(c['focal_tool_trace'])}")
@@ -202,6 +204,8 @@ def _render_a_md(A: dict) -> str:
         wr = c["per_competitor_winrate"]
         avg = sum(wr.values()) / len(wr) if wr else 0
         L.append(f"- **{c['item_id']}** [{'/'.join(c['category'])}] 平均胜率 {_pct(avg)}：{c['question']}")
+        if c.get("context"):
+            L.append(f"  - 背景：{c['context']}")
     L.append("")
 
     L.append("## 裁判查证轨迹示例（agent loop 的联网/工具调用）")
