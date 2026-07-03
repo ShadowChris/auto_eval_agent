@@ -34,6 +34,7 @@ def focal_vs_competitors(
         return {
             "item_id": iid,
             "question": (item.question[:200] if item else ""),
+            "context": (item.context[:500] if item and item.context else ""),
             "category": (item.categories() if item else []),
             "difficulty": (item.difficulty if item else ""),
             "focal_answer": _ans_text(ans_index, focal, iid),

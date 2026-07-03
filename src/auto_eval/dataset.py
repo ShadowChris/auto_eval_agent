@@ -46,8 +46,10 @@ def to_prompt(item: EvalItem) -> str:
     """
     parts: list[str] = []
     if item.context:
+        parts.append("可信背景条件（由评测样本提供，请作为回答前提）：")
         parts.append(item.context.strip())
-        parts.append("")  # 空行分隔
+        parts.append("")
+        parts.append("用户问题：")
     parts.append(item.question.strip())
     return "\n".join(parts).strip()
 

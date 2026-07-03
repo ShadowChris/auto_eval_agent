@@ -98,6 +98,7 @@ def build_case_rows(
             "difficulty": item.difficulty,
             "has_ref": item.has_ref,
             "question": (item.question[:200] or ""),
+            "context": (item.context[:500] if item.context else ""),
             "per_model": per_model,
             "pair_winrate_vs": pair_wr,
             "meta": meta_info,
@@ -111,7 +112,7 @@ def cases_to_csv(rows: list[dict], models: list[str], focal: str) -> str:
     """诊断卡扁平化成 CSV 字符串。维度细分留在 JSON，CSV 只保留关键列。"""
     others = [m for m in models if m != focal]
     header = ["item_id", "skill", "skill_display", "category", "category_source",
-              "difficulty", "has_ref", "question"]
+              "difficulty", "has_ref", "question", "context"]
     for m in models:
         header += [f"{m}_correctness", f"{m}_total", f"{m}_error_type", f"{m}_low_agreement"]
     for o in others:
@@ -124,7 +125,7 @@ def cases_to_csv(rows: list[dict], models: list[str], focal: str) -> str:
     for r in rows:
         pm = r["per_model"]
         row = [r["item_id"], r["skill"], r["skill_display"], "/".join(r["category"]),
-               r["category_source"], r["difficulty"], r["has_ref"], r["question"]]
+               r["category_source"], r["difficulty"], r["has_ref"], r["question"], r["context"]]
         for m in models:
             v = pm.get(m)
             if v:

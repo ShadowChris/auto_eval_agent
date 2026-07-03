@@ -15,7 +15,7 @@ createApp({
     const fileText = ref("");
     const isJsonl = ref(false);
     const items = ref([]);
-    const opItems = ref([{ query: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", uploading: false, uploadError: "" }]);
+    const opItems = ref([{ query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", uploading: false, uploadError: "" }]);
     const errors = ref([]);
     const judges = ref([]);
     const models = ref([]);
@@ -46,27 +46,27 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          single: "每行一题：query ||| answer [||| competitor] [||| reference]   （competitor=竞品结果，产品专家用、可选；reference=参考答案、可选，填了跑元评测）",
-          compare: "每行一题：query ||| answerA ||| answerB [||| reference]",
-          online: "每行一题：query [||| reference]   （后端现场调模型生成回答，再盲评）",
-          process: "每行一题：query ||| answer ||| trace [||| reference]   （trace=被测 agent 的推理/工具轨迹；评过程质量）",
-          operation: "逐题填写操作意图(query)并上传手机操作录屏；后端自动场景抽帧，裁判看关键帧判断操作是否完成。可填 agent 自述做交叉验证。",
+          single: "每行一题：query [||| @context: 背景] ||| answer [||| competitor] [||| reference]   （context 可选且视为可信前提）",
+          compare: "每行一题：query [||| @context: 背景] ||| answerA ||| answerB [||| reference]",
+          online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
+          process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
+          operation: "逐题填写操作意图(query)、可选可信背景(context)并上传手机操作录屏；后端自动抽帧评测。",
         }[mode.value])
     );
     const placeholder = computed(
       () =>
         ({
-          single: "光合作用是什么？ ||| 植物利用光合成有机物 ||| 竞品：植物吸收光能合成有机物放出氧气 ||| 绿色植物利用光能将二氧化碳和水合成有机物并释放氧气\n中国最长的河流？ ||| 长江",
-          compare: "写一首关于春天的诗 ||| 春风又绿江南岸 ||| 春眠不觉晓\n推荐一部科幻电影 ||| 星际穿越 ||| 流浪地球",
-          online: "2024 年诺贝尔文学奖获得者是谁？\n计算 17 × 24 等于多少？",
-          process: "北京到上海多少公里？ ||| 约 1200 公里 ||| 1.调用地图API 2.距离=1318km 3.约1200km\n某函数是否正确？ ||| 正确 ||| def f(n): return 1 if n<=1 else n*f(n-1)",
+          single: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场 ||| 推荐南京大牌档\n中国最长的河流？ ||| 长江",
+          compare: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场 ||| 回答A ||| 回答B\n推荐一部科幻电影 ||| 星际穿越 ||| 流浪地球",
+          online: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场\n计算 17 × 24 等于多少？",
+          process: "规划回家路线 ||| @context: 当前位于上海人民广场，目的地徐家汇 ||| 最终回答 ||| 推理轨迹\n某函数是否正确？ ||| 正确 ||| def f(n): return 1 if n<=1 else n*f(n-1)",
           operation: "",
         }[mode.value])
     );
 
     const previewKeys = computed(() => {
       if (!items.value.length) return [];
-      const keys = ["query"];
+      const keys = ["query", "context"];
       if (mode.value === "single") keys.push("answer", "reference");
       else if (mode.value === "compare") keys.push("answer_a", "answer_b", "reference");
       else if (mode.value === "process") keys.push("answer", "trace", "reference");
@@ -117,9 +117,13 @@ createApp({
     });
 
     const resultCols = computed(() => {
+      const contextCols = results.value.some((r) => r.context != null && r.context !== "")
+        ? [{ key: "context", label: "背景" }]
+        : [];
       if (mode.value === "compare")
         return [
           { key: "query", label: "题目" },
+          ...contextCols,
           { key: "answer_a", label: "回答 A" },
           { key: "answer_b", label: "回答 B" },
           { key: "winner", label: "胜者" },
@@ -131,6 +135,7 @@ createApp({
         return [
           { key: "item_id", label: "题号" },
           { key: "query", label: "操作意图" },
+          ...contextCols,
           { key: "correctness", label: "完成判定" },
           { key: "total", label: "总分" },
           ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
@@ -142,6 +147,7 @@ createApp({
       return [
         { key: "item_id", label: "题号" },
         { key: "query", label: "题目" },
+        ...contextCols,
         { key: mode.value === "online" ? "generated_answer" : "answer", label: mode.value === "online" ? "生成回答" : "回答" },
         { key: "correctness", label: "判定" },
         { key: "total", label: "总分" },
@@ -157,7 +163,7 @@ createApp({
 
     function columnWidth(c) {
       if (c.rubricDim) return 96;
-      if (["query"].includes(c.key)) return 230;
+      if (["query", "context"].includes(c.key)) return 230;
       if (["answer", "generated_answer", "answer_a", "answer_b"].includes(c.key)) return 300;
       if (c.key === "rationale") return 340;
       if (c.key === "item_id") return 90;
@@ -176,7 +182,7 @@ createApp({
         if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.answer || ""} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -245,9 +251,9 @@ createApp({
       r.readAsText(f, "utf-8");
     }
 
-    // —— 操作类评测：逐题卡片（query + 视频上传 + 可选 agent 自述）——
+    // —— 操作类评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
     function newOpItem() {
-      return { query: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", uploading: false, uploadError: "" };
+      return { query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", uploading: false, uploadError: "" };
     }
     function addOpItem() { opItems.value.push(newOpItem()); }
     function removeOpItem(i) { if (opItems.value.length > 1) opItems.value.splice(i, 1); }
@@ -309,6 +315,7 @@ createApp({
         items.value = valid.map((it, idx) => ({
           id: `op${idx + 1}`,
           query: it.query.trim(),
+          context: (it.context || "").trim(),
           answer: (it.answer || "").trim(),
           media: [it.videoPath],
           frames: it.frames,

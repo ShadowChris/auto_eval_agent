@@ -58,6 +58,7 @@
           <button v-if="opItems.length>1" @click="removeOpItem(i)" class="btn-danger op-del">删除</button>
         </div>
         <textarea v-model="it.query" rows="2" placeholder="操作意图(query)，如：设一个明天早上7点的闹钟"></textarea>
+        <textarea v-model="it.context" rows="2" placeholder="(可选) 可信背景(context)，如：当前时间为晚上10点；设备时区为北京时间"></textarea>
         <div class="op-upload">
           <label class="op-upload-btn">
             <input type="file" accept="video/*" @change="onOpVideo($event, i)" hidden>
@@ -183,7 +184,7 @@
         </button>
       </div>
       <div class="result-filters">
-        <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、回答或理由">
+        <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <select v-if="mode!=='compare'" v-model="correctnessFilter" @change="resetResultPage">
           <option value="">全部判定</option>
           <option value="right">正确</option>
@@ -248,6 +249,6 @@
   </section>
 </div>
 
-<script type="module" src="/static/app.js?v=20260702_op2"></script>
+<script type="module" src="/static/app.js?v=20260703_context"></script>
 </body>
 </html>

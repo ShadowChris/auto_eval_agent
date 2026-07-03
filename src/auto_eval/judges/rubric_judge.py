@@ -133,7 +133,9 @@ class RubricJudge:
                 dims=dims,
                 scale=dims[0].scale if dims else 5,
             )
-            user = OPERATION_USER.render(question=item.question, current_date=today)
+            user = OPERATION_USER.render(
+                question=item.question, context=item.context, current_date=today
+            )
             frames = item.metadata.get("frames") or []
             user_images = [encode_frame(Path(p)) for p in frames] if frames else None
             user_image_refs = frames if frames else None
@@ -293,6 +295,7 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
     disp_news = name_to_disp.get("news", "新闻")
     disp_doc = name_to_disp.get("document", "文档")
     disp_lbs = name_to_disp.get("lbs_travel", "LBS（旅行规划）")
+    disp_math = name_to_disp.get("math_solving", "数学解题")
     system = (
         "你是查询意图分类器。请理解用户真正希望得到的结果，而不是只匹配关键词。\n"
         f"只能从以下标签中选择一个：{shown} / {fallback}。\n\n"
@@ -305,7 +308,8 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
         f"4. {disp_search}只用于用户明确要求找网页、链接、资料、出处或资源；直接回答某垂域事实仍归对应垂域。\n"
         f"5. {disp_doc}用于基于给定文件内容的摘要、抽取、比较、改写或问答。\n"
         f"6. {disp_lbs}用于路线、行程、地点、酒店、景点、餐饮和导航规划。\n"
-        "7. 同时包含多个意图时，以用户最终希望你交付的核心结果分类。\n\n"
+        f"7. 星期、日期、节假日等日历事实默认归{fallback}；只有明确要求日期计算、间隔计算、日历推导或展示计算过程时才归{disp_math}。\n"
+        "8. 同时包含多个意图时，以用户最终希望你交付的核心结果分类。\n\n"
         "对比例子：\n" + "\n".join(fewshot_lines) + "\n\n"
         "在心中完成意图判断后，只输出标签本身，不输出解释、标点或 JSON。"
     )
@@ -313,11 +317,17 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
     for attempt in range(max_attempts):
         try:
             logger.info("classify start: id=%s query=%.120s", item.id, item.question)
+            query_text = f"查询：{item.question}"
+            if item.context:
+                query_text += (
+                    "\n可信背景条件（由评测样本提供，请作为意图判断前提）："
+                    f"\n{item.context}"
+                )
             resp = await client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system},
-                    {"role": "user", "content": f"查询：{item.question}\n\n标签："},
+                    {"role": "user", "content": f"{query_text}\n\n标签："},
                 ],
                 temperature=0,
                 max_tokens=200,
