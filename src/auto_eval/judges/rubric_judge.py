@@ -27,6 +27,7 @@ from .prompts import (
     RUBRIC_USER,
     parse_analysis,
     parse_json_loose,
+    resolve_prompt_context,
 )
 
 _VALID = {"right", "wrong", "partial", "unclear"}
@@ -100,16 +101,23 @@ async def ensure_classified(item: EvalItem, skill_router, *,
 
 
 class RubricJudge:
-    def __init__(self, client: JudgeClient, dims: list[RubricDim], skill_router=None):
+    def __init__(
+        self,
+        client: JudgeClient,
+        dims: list[RubricDim],
+        skill_router=None,
+        evaluation_time: datetime | None = None,
+    ):
         self.client = client
         self.dims = dims
         self.scale = dims[0].scale if dims else 5
         self.skill_router = skill_router
+        self.evaluation_time = evaluation_time
 
     async def score(self, item: EvalItem, model_name: str, answer: str, run_idx: int = 0,
                     eval_mode: str = "result", process_dims=None, competitor: str | None = None,
                     stream_callback=None) -> SingleScore:
-        today = datetime.now().strftime("%Y年%m月%d日")
+        prompt_context = resolve_prompt_context(item.context, self.evaluation_time)
         # 自动垂域分类：若未预标 → 兜底用当前裁判 model 分类（正常流程已在 ensure_classified 完成）
         if not item.category or item.category == "default":
             label = await _classify(item, self.client.client, self.client.model, self.skill_router)
@@ -134,7 +142,7 @@ class RubricJudge:
                 scale=dims[0].scale if dims else 5,
             )
             user = OPERATION_USER.render(
-                question=item.question, context=item.context, current_date=today
+                question=item.question, context=prompt_context
             )
             frames = item.metadata.get("frames") or []
             user_images = [encode_frame(Path(p)) for p in frames] if frames else None
@@ -145,7 +153,7 @@ class RubricJudge:
                 persona=self.client.persona, scale=dims[0].scale if dims else 5, dims=dims, skill_rules=skill_rules
             )
             user = RUBRIC_PROCESS_USER.render(
-                question=item.question, context=item.context, answer=answer, trace=item.trace, current_date=today
+                question=item.question, context=prompt_context, answer=answer, trace=item.trace
             )
         elif is_product_compare:
             dims = skill_dims or self.dims  # 产品专家：待评 vs 竞品 对比盲评
@@ -153,8 +161,8 @@ class RubricJudge:
                 persona=self.client.persona, scale=self.scale, dims=dims, skill_rules=skill_rules
             )
             user = RUBRIC_COMPARE_USER.render(
-                question=item.question, context=item.context, model_name=model_name, answer=answer,
-                competitor=competitor, current_date=today
+                question=item.question, context=prompt_context, model_name=model_name, answer=answer,
+                competitor=competitor
             )
         else:
             dims = skill_dims or self.dims  # 垂域 skill 维度优先
@@ -162,7 +170,7 @@ class RubricJudge:
                 persona=self.client.persona, scale=self.scale, dims=dims, skill_rules=skill_rules
             )
             user = RUBRIC_USER.render(
-                question=item.question, context=item.context, model_name=model_name, answer=answer, current_date=today
+                question=item.question, context=prompt_context, model_name=model_name, answer=answer
             )
         t0 = time.perf_counter()
         reply = await self.client.complete(system, user, stream_callback=stream_callback,

@@ -62,14 +62,18 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
 async def _run(task: Task, cfg: AppConfig) -> None:
     selected = task.options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
+    evaluation_time = datetime.fromtimestamp(task.created_at).astimezone()
     _providers = cfg.eval_options.effective_providers()
     clients = [
         JudgeClient(j, _providers, cfg.eval_options.search_topk)
         for j in judges_cfg
     ]
     skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
-    rubrics = [RubricJudge(c, cfg.rubrics, skill_router) for c in clients]
-    pair_judges = [PairwiseJudge(c) for c in clients]
+    rubrics = [
+        RubricJudge(c, cfg.rubrics, skill_router, evaluation_time=evaluation_time)
+        for c in clients
+    ]
+    pair_judges = [PairwiseJudge(c, evaluation_time=evaluation_time) for c in clients]
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     sem = asyncio.Semaphore(int(task.options.get("concurrency", 4)))
     eval_timeout = float(task.options.get("eval_timeout_s") or task.options.get("eval_timeout") or 300.0)
@@ -80,7 +84,11 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         mc = next((m for m in cfg.models if m.name == model_name), cfg.models[0])
         online_runner = build_runner(mc)
     process_dims = cfg.process_rubrics
-    arbitrator = Arbitrator(clients[0]) if len(judges_cfg) >= 2 else None
+    arbitrator = (
+        Arbitrator(clients[0], evaluation_time=evaluation_time)
+        if len(judges_cfg) >= 2
+        else None
+    )
 
     async def one(idx: int, item_dict: dict):
         async with sem:

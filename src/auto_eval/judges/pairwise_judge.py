@@ -1,16 +1,19 @@
 """成对盲比较裁判：匿名 A/B、位置随机化、支持双向。"""
 from __future__ import annotations
 
+from datetime import datetime
+
 from ..schema import EvalItem, SinglePair
 from .base import JudgeClient
-from .prompts import PAIRWISE_SYSTEM, PAIRWISE_USER, parse_json_loose
+from .prompts import PAIRWISE_SYSTEM, PAIRWISE_USER, parse_json_loose, resolve_prompt_context
 
 _SWAP = {"a": "b", "b": "a", "tie": "tie"}
 
 
 class PairwiseJudge:
-    def __init__(self, client: JudgeClient):
+    def __init__(self, client: JudgeClient, evaluation_time: datetime | None = None):
         self.client = client
+        self.evaluation_time = evaluation_time
 
     async def compare_once(
         self,
@@ -30,7 +33,7 @@ class PairwiseJudge:
 
         user = PAIRWISE_USER.render(
             question=item.question,
-            context=item.context,
+            context=resolve_prompt_context(item.context, self.evaluation_time),
             answer_a=left_text,
             answer_b=right_text,
         )
