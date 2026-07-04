@@ -6,7 +6,7 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-from openai import AsyncOpenAI
+from auto_eval.llm_stream import build_openai_client, stream_chat_completion
 from auto_eval.media import video_to_frame_urls
 
 import argparse
@@ -27,8 +27,15 @@ PROMPT = "这是手机操作录屏。请按步骤详细描述用户/agent 依次
 async def call(client, messages, label):
     t0 = time.perf_counter()
     try:
-        resp = await client.chat.completions.create(
-            model=MODEL, messages=messages, temperature=1, max_tokens=4096,
+        resp = await stream_chat_completion(
+            client,
+            {
+                "model": MODEL,
+                "messages": messages,
+                "temperature": 1,
+                "max_tokens": 4096,
+            },
+            total_timeout_s=300,
         )
     except Exception as e:
         print(f"\n===== [{label}] 失败 =====")
@@ -37,17 +44,25 @@ async def call(client, messages, label):
     dt = time.perf_counter() - t0
     msg = resp.choices[0].message
     content = (getattr(msg, "content", None) or "").strip()
-    rc = (getattr(msg, "reasoning_content", None) or "")
     u = resp.usage
     print(f"\n===== [{label}] =====")
-    print(f"耗时: {dt:.1f}s | prompt_tokens={u.prompt_tokens} completion={u.completion_tokens} "
-          f"reasoning={getattr(u.completion_tokens_details,'reasoning_tokens',0)} | finish={resp.choices[0].finish_reason}")
+    print(
+        f"耗时: {dt:.1f}s | prompt_tokens={getattr(u, 'prompt_tokens', 0)} "
+        f"completion={getattr(u, 'completion_tokens', 0)} "
+        f"reasoning={getattr(getattr(u, 'completion_tokens_details', None), 'reasoning_tokens', 0)} "
+        f"| finish={resp.choices[0].finish_reason}"
+    )
     print("--- 输出 ---")
     print(content[:1400] or "(content 为空)")
 
 
 async def main():
-    client = AsyncOpenAI(base_url=BASE, api_key=KEY, timeout=300)
+    client = build_openai_client(
+        base_url=BASE,
+        api_key=KEY,
+        connect_timeout_s=10,
+        read_timeout_s=300,
+    )
     print(f"视频: {VIDEO.name} ({VIDEO.stat().st_size//1024} KB)")
 
     # 方案 A：video_url 直传（base64）
@@ -67,6 +82,7 @@ async def main():
     parts = [{"type": "image_url", "image_url": {"url": u}} for u in frames]
     parts.append({"type": "text", "text": "以上是同一段手机操作录屏按时间顺序抽出的关键帧。" + PROMPT})
     await call(client, [{"role": "user", "content": parts}], "B: 关键帧 image_url")
+    await client.close()
 
 
 asyncio.run(main())

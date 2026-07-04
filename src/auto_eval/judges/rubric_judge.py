@@ -1,16 +1,14 @@
 """Rubric 盲打分裁判：意图理解 + 理想锚定 + 多角度分析的深度盲评（可联网）。"""
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from datetime import datetime
 
-from openai import AsyncOpenAI
-
 from pathlib import Path
 
 from ..config import RubricDim
+from ..llm_stream import build_openai_client, stream_chat_completion
 from ..media import encode_frame
 from ..schema import EvalItem, SingleScore
 
@@ -87,8 +85,14 @@ async def ensure_classified(item: EvalItem, skill_router, *,
     """
     if item.category and item.category != "default":
         return  # 已分类（dataset 预标 或 已跑过）
+    client = None
     try:
-        client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        client = build_openai_client(
+            base_url=base_url,
+            api_key=api_key,
+            connect_timeout_s=min(10.0, timeout),
+            read_timeout_s=timeout,
+        )
         result = await _classify(item, client, model, skill_router)
         if result:
             item.category = result
@@ -98,6 +102,9 @@ async def ensure_classified(item: EvalItem, skill_router, *,
     except Exception:
         logger.exception("classify failed, falling back to default: id=%s", item.id)
         item.metadata.setdefault("category_source", "fallback_default")
+    finally:
+        if client is not None:
+            await client.close()
 
 
 class RubricJudge:
@@ -119,7 +126,7 @@ class RubricJudge:
                     stream_callback=None) -> SingleScore:
         prompt_context = resolve_prompt_context(item.context, self.evaluation_time)
         # 自动垂域分类：若未预标 → 兜底用当前裁判 model 分类（正常流程已在 ensure_classified 完成）
-        if not item.category or item.category == "default":
+        if (not item.category or item.category == "default") and self.skill_router:
             label = await _classify(item, self.client.client, self.client.model, self.skill_router)
             if label:
                 item.category = label
@@ -173,8 +180,16 @@ class RubricJudge:
                 question=item.question, context=prompt_context, model_name=model_name, answer=answer
             )
         t0 = time.perf_counter()
-        reply = await self.client.complete(system, user, stream_callback=stream_callback,
-                                           user_images=user_images, user_image_refs=user_image_refs)
+        if stream_callback is None and user_images is None and user_image_refs is None:
+            reply = await self.client.complete(system, user)
+        else:
+            reply = await self.client.complete(
+                system,
+                user,
+                stream_callback=stream_callback,
+                user_images=user_images,
+                user_image_refs=user_image_refs,
+            )
         latency = int((time.perf_counter() - t0) * 1000)
 
         analysis = parse_analysis(reply.content)
@@ -321,49 +336,35 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
         "对比例子：\n" + "\n".join(fewshot_lines) + "\n\n"
         "在心中完成意图判断后，只输出标签本身，不输出解释、标点或 JSON。"
     )
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        try:
-            logger.info("classify start: id=%s query=%.120s", item.id, item.question)
-            query_text = f"查询：{item.question}"
-            if item.context:
-                query_text += (
-                    "\n可信背景条件（由评测样本提供，请作为意图判断前提）："
-                    f"\n{item.context}"
-                )
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=[
+    try:
+        logger.info("classify start: id=%s query=%.120s", item.id, item.question)
+        query_text = f"查询：{item.question}"
+        if item.context:
+            query_text += (
+                "\n可信背景条件（由评测样本提供，请作为意图判断前提）："
+                f"\n{item.context}"
+            )
+        resp = await stream_chat_completion(
+            client,
+            {
+                "model": model,
+                "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": f"{query_text}\n\n标签："},
                 ],
-                temperature=0,
-                max_tokens=200,
-                timeout=15.0,  # 轻量分类，15 秒足够
-            )
-            # 防护：API 可能返回空 choices（并发/限流等场景）
-            if not resp or not resp.choices:
-                logger.warning("classify empty response: id=%s attempt=%d", item.id, attempt + 1)
-                if attempt < max_attempts - 1:
-                    await asyncio.sleep(min(20.0, 2 ** attempt))  # 指数退避，上限 20s
-                    continue
-                return None
-            text = (resp.choices[0].message.content or "").strip()
-            result = _normalize_label(text, labels, fallback)
-            if result:
-                logger.info("classify ok: id=%s raw=%r -> skill=%s", item.id, text, result)
-            else:
-                logger.info("classify fallback: id=%s raw=%r -> default", item.id, text)
-            return result
-        except Exception as e:
-            msg = f"{type(e).__name__}: {e}"
-            retriable = any(
-                k in msg
-                for k in ("RateLimit", "Overload", "429", "Timeout", "Connection", "ServiceUnavailable")
-            )
-            if retriable and attempt < max_attempts - 1:
-                logger.warning("classify retriable error: id=%s attempt=%d %s", item.id, attempt + 1, msg)
-                await asyncio.sleep(min(20.0, 2 ** attempt))
-                continue
-            logger.exception("classify failed: id=%s", item.id)
-            return None
+                "temperature": 0,
+                "max_tokens": 200,
+            },
+            total_timeout_s=15.0,
+            max_attempts=3,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        result = _normalize_label(text, labels, fallback)
+        if result:
+            logger.info("classify ok: id=%s raw=%r -> skill=%s", item.id, text, result)
+        else:
+            logger.info("classify fallback: id=%s raw=%r -> default", item.id, text)
+        return result
+    except Exception:
+        logger.exception("classify failed: id=%s", item.id)
+        return None

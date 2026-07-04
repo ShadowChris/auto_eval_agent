@@ -20,6 +20,13 @@ class ModelConfig(BaseModel):
     max_tokens: int | None = None
     rpm: int | None = None  # 每分钟请求数上限
     tpm: int | None = None  # 每分钟 token 数上限
+    connect_timeout_s: float = 10.0
+    read_timeout_s: float = 90.0
+    total_timeout_s: float = 180.0
+    max_attempts: int = 4
+    retry_base_s: float = 1.0
+    retry_max_s: float = 20.0
+    stream_include_usage: bool = True
     # openai_compat
     base_url: str | None = None
     api_key_env: str | None = None  # 环境变量名
@@ -57,6 +64,13 @@ class JudgeConfig(BaseModel):
     enable_python: bool = False  # 允许裁判执行代码核查编程题（注意安全，默认关）
     temperature: float = 0.0
     concurrency: int = 4
+    connect_timeout_s: float = 10.0
+    read_timeout_s: float = 90.0
+    total_timeout_s: float = 180.0
+    max_attempts: int = 5
+    retry_base_s: float = 1.0
+    retry_max_s: float = 20.0
+    stream_include_usage: bool = True
 
     def api_key(self) -> str | None:
         return os.environ.get(self.api_key_env) if self.api_key_env else None

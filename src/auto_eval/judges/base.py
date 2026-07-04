@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..config import JudgeConfig
+from ..llm_stream import build_openai_client, stream_chat_completion
 from ..paths import resolve_project_path
 from .prompts import persona_text
 from .tools import build_tools
@@ -89,12 +90,15 @@ class JudgeClient:
         max_rounds: int = 12,
         trace_path: str | None = None,
     ):
-        from openai import AsyncOpenAI
-
         if not cfg.base_url:
             raise ValueError(f"裁判[{cfg.name}] 缺少 base_url")
         self.cfg = cfg
-        self.client = AsyncOpenAI(base_url=cfg.base_url, api_key=cfg.api_key() or "EMPTY", timeout=60.0)
+        self.client = build_openai_client(
+            base_url=cfg.base_url,
+            api_key=cfg.api_key() or "EMPTY",
+            connect_timeout_s=cfg.connect_timeout_s,
+            read_timeout_s=cfg.read_timeout_s,
+        )
         self.model = cfg.model or cfg.name
         self.persona = persona_text(cfg.persona)
         self.max_rounds = max_rounds
@@ -263,89 +267,31 @@ class JudgeClient:
             # 日志失败不应影响评测主流程
             pass
 
-    async def _llm_create(self, kwargs: dict, max_attempts: int = 5,
+    async def _llm_create(self, kwargs: dict, max_attempts: int | None = None,
                           stream_callback: Callable[[str], None] | None = None):
-        """对 LLM 调用做重试，应对 429 限流 / 过载 / 连接抖动。
-        当 stream_callback 不为 None 时使用流式输出，每收到 content delta 即回调。"""
-        last = None
-        for i in range(max_attempts):
-            try:
-                if stream_callback is not None:
-                    return await self._llm_create_stream(kwargs, stream_callback)
-                return await self.client.chat.completions.create(**kwargs)
-            except Exception as e:
-                last = e
-                msg = f"{type(e).__name__}: {e}"
-                retriable = any(
-                    k in msg
-                    for k in ("RateLimit", "Overload", "429", "Timeout", "Connection", "ServiceUnavailable")
-                )
-                if retriable and i < max_attempts - 1:
-                    await asyncio.sleep(min(20.0, 2 ** i))
-                    continue
-                raise
-        raise last  # type: ignore[misc]
+        """始终使用流式接口；callback 只负责可选的前端分片通知。"""
+        return await self._llm_create_stream(
+            kwargs,
+            callback=stream_callback,
+            max_attempts=max_attempts,
+        )
 
-    async def _llm_create_stream(self, kwargs: dict, callback: Callable[[str], None]):
+    async def _llm_create_stream(
+        self,
+        kwargs: dict,
+        callback: Callable[[str], None] | None = None,
+        max_attempts: int | None = None,
+    ):
         """流式调用 LLM，逐 token 回调，同时累积完整响应供 tool_call 解析。"""
-        from openai.types.chat import ChatCompletion, ChatCompletionMessage
-        from openai.types.chat.chat_completion import Choice
-
-        stream_kwargs = {**kwargs, "stream": True}
-        # tool_choice 在部分 provider 的流式模式下需要特殊处理，保留原值
-        stream = await self.client.chat.completions.create(**stream_kwargs)
-        content_parts: list[str] = []
-        tool_call_chunks: dict[int, dict] = {}  # index -> {id, name, arguments}
-        finish_reason = None
-
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta.content:
-                content_parts.append(delta.content)
-                try:
-                    callback(delta.content)
-                except Exception:
-                    pass  # 回调异常不应中断评测主流程
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    if idx not in tool_call_chunks:
-                        tool_call_chunks[idx] = {"id": tc.id or "", "name": "", "arguments": ""}
-                    entry = tool_call_chunks[idx]
-                    if tc.id:
-                        entry["id"] = tc.id
-                    if tc.function:
-                        if tc.function.name:
-                            entry["name"] += tc.function.name
-                        if tc.function.arguments:
-                            entry["arguments"] += tc.function.arguments
-            if chunk.choices[0].finish_reason:
-                finish_reason = chunk.choices[0].finish_reason
-
-        # 组装 tool_calls
-        from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
-        tool_calls = None
-        if tool_call_chunks:
-            tool_calls = []
-            for idx in sorted(tool_call_chunks.keys()):
-                tc = tool_call_chunks[idx]
-                tool_calls.append(ChatCompletionMessageToolCall(
-                    id=tc["id"],
-                    type="function",
-                    function=Function(name=tc["name"], arguments=tc["arguments"]),
-                ))
-
-        content = "".join(content_parts)
-        message = ChatCompletionMessage(content=content, role="assistant", tool_calls=tool_calls)
-        choice = Choice(finish_reason=finish_reason or "stop", index=0, message=message)
-        return ChatCompletion(
-            id="stream",
-            created=0,
-            model=kwargs.get("model", ""),
-            object="chat.completion",
-            choices=[choice],
+        return await stream_chat_completion(
+            self.client,
+            kwargs,
+            callback=callback,
+            include_usage=self.cfg.stream_include_usage,
+            total_timeout_s=self.cfg.total_timeout_s,
+            max_attempts=max_attempts or self.cfg.max_attempts,
+            retry_base_s=self.cfg.retry_base_s,
+            retry_max_s=self.cfg.retry_max_s,
         )
 
     async def _exec_tool_async(self, name: str, args: dict) -> tuple[str, str]:

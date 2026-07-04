@@ -61,7 +61,12 @@ class Orchestrator:
         await limiter.acquire()
         try:
             try:
-                out = await retry_call(lambda: runner.generate_strict(prompt, item_id=item.id))
+                if runner.handles_retries:
+                    out = await runner.generate_strict(prompt, item_id=item.id)
+                else:
+                    out = await retry_call(
+                        lambda: runner.generate_strict(prompt, item_id=item.id)
+                    )
                 return out
             except Exception as e:
                 # 重试耗尽仍失败：记录 error，留待后续（可补跑或统计失败率）

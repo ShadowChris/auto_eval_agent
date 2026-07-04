@@ -2,16 +2,29 @@
 from __future__ import annotations
 
 import asyncio
+import random
 
-try:
-    import httpx
+import httpx
 
-    _HTTP = (httpx.HTTPError, httpx.TimeoutException)
-except Exception:  # pragma: no cover - httpx 一定在依赖里
-    _HTTP = ()
+from ..llm_stream import is_retriable_llm_error
 
-# 可重试：网络/超时/连接类。4xx（除 429）通常不可重试，会抛 HTTPStatusError——视情况。
-RETRIABLE = _HTTP + (TimeoutError, ConnectionError, OSError)
+
+def _is_retriable(exc: BaseException) -> bool:
+    if is_retriable_llm_error(exc):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {408, 409, 429, 500, 502, 503, 504}
+    return isinstance(
+        exc,
+        (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+            TimeoutError,
+            ConnectionError,
+            OSError,
+        ),
+    )
 
 
 async def retry_call(coro_factory, *, max_attempts: int = 4, base_wait: float = 1.0, max_wait: float = 30.0):
@@ -20,9 +33,14 @@ async def retry_call(coro_factory, *, max_attempts: int = 4, base_wait: float = 
     for i in range(max_attempts):
         try:
             return await coro_factory()
-        except RETRIABLE as e:
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not _is_retriable(e):
+                raise
             last_exc = e
             if i == max_attempts - 1:
                 break
-            await asyncio.sleep(min(max_wait, base_wait * (2**i)))
+            cap = min(max_wait, base_wait * (2**i))
+            await asyncio.sleep(random.uniform(0.0, cap))
     raise last_exc  # type: ignore[misc]
