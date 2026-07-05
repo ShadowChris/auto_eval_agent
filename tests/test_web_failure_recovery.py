@@ -1,9 +1,12 @@
+import json
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 
-from auto_eval.config import JudgeConfig
+from auto_eval.config import JudgeConfig, load_config
+from auto_eval.judges.base import JudgeOutputParseError
 from auto_eval.web import history, runner
 from auto_eval.web.server import EvalReq, _validate_eval_request
 from auto_eval.web.tasks import Task
@@ -149,6 +152,60 @@ def test_progress_keeps_started_at_after_evaluation_begins():
         {"item_index": 0, "status": "done", "message": "评测完成"},
     )
     assert completed["started_at"] == 1_788_517_600_000
+
+
+def test_eval_error_keeps_original_and_repaired_model_outputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "RUNS_DIR", tmp_path)
+    error = JudgeOutputParseError(
+        "裁判输出定向修复后仍无法解析为 JSON",
+        raw_output='{"rubric":{"准确性":5}',
+        repair_output='{"rubric":{"准确性":5}} trailing',
+        judge="judge_2",
+        model="fake-model",
+    )
+
+    runner._write_eval_error(
+        "task-1",
+        1,
+        {"query": "q", "context": "c"},
+        error,
+        request_id="2607052331_218ba6_q1",
+    )
+
+    record = json.loads((tmp_path / "eval_errors.jsonl").read_text(encoding="utf-8"))
+    assert record["request_id"] == "2607052331_218ba6_q1"
+    assert record["stage"] == "judge_json_parse"
+    assert record["original_model_output"] == error.raw_output
+    assert record["repair_model_output"] == error.repair_output
+    assert record["original_output_length"] == len(error.raw_output)
+    assert record["repair_output_length"] == len(error.repair_output)
+
+
+@pytest.mark.asyncio
+async def test_non_retriable_parse_error_does_not_restart_whole_item(monkeypatch):
+    cfg = load_config(Path("config"))
+    task = Task(
+        id="parse-error-no-restart",
+        mode="single",
+        items=[{"query": "q", "answer": "a"}],
+        options={"judges": [cfg.judges[0].name], "concurrency": 1},
+    )
+    calls = 0
+
+    async def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise ValueError("裁判输出定向修复后仍无法解析为 JSON")
+
+    monkeypatch.setattr(runner, "_eval_one", fail_once)
+    monkeypatch.setattr(runner, "_persist_task", lambda task: True)
+    monkeypatch.setattr(runner, "_write_eval_error", lambda *args, **kwargs: None)
+
+    await runner._run(task, cfg)
+
+    assert calls == 1
+    assert len(task.results) == 1
+    assert "ValueError" in task.results[0]["error"]
 
 
 @pytest.mark.asyncio

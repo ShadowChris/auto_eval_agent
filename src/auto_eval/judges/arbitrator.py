@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from ..schema import EvalItem, SingleScore
-from .base import JudgeClient
+from .base import JudgeClient, JudgeOutputParseError
 from .prompts import (
     ARBITRATOR_SYSTEM,
     ARBITRATOR_USER,
@@ -46,7 +46,20 @@ class Arbitrator:
         reply = await self.client.complete(system, user)
         data = parse_json_loose(reply.content)
         if data is None:
-            raise ValueError("仲裁输出无法解析为 JSON")
+            repaired = await self.client.repair_json(
+                reply.content,
+                label="仲裁输出",
+                round_no=reply.rounds + 1,
+            )
+            data = parse_json_loose(repaired)
+            if data is None:
+                raise JudgeOutputParseError(
+                    "仲裁输出定向修复后仍无法解析为 JSON",
+                    raw_output=reply.content,
+                    repair_output=repaired,
+                    judge=self.client.cfg.name,
+                    model=self.client.model,
+                )
         correctness = data.get("correctness", "unclear")
         if correctness not in _VALID:
             correctness = "unclear"

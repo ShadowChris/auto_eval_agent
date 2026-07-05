@@ -14,7 +14,7 @@ from ..observability import bind_chain_context, log_event
 from ..schema import EvalItem, SingleScore
 
 logger = logging.getLogger("auto_eval.classify")
-from .base import JudgeClient
+from .base import JudgeClient, JudgeOutputParseError
 from .prompts import (
     OPERATION_SYSTEM,
     OPERATION_USER,
@@ -200,7 +200,20 @@ class RubricJudge:
         analysis = parse_analysis(reply.content)
         data = parse_json_loose(reply.content)
         if data is None:
-            raise ValueError("裁判输出无法解析为 JSON")
+            repaired = await self.client.repair_json(
+                reply.content,
+                label="裁判输出",
+                round_no=reply.rounds + 1,
+            )
+            data = parse_json_loose(repaired)
+            if data is None:
+                raise JudgeOutputParseError(
+                    "裁判输出定向修复后仍无法解析为 JSON",
+                    raw_output=reply.content,
+                    repair_output=repaired,
+                    judge=self.client.cfg.name,
+                    model=self.client.model,
+                )
         rubric_raw = data.get("rubric") or {}
         rubric, rubric_reasons, na_dimensions = _flatten_rubric(rubric_raw, dim_names=[d.name for d in dims])
         if data.get("total") is not None:

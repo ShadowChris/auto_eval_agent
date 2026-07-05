@@ -19,6 +19,7 @@ from ..dataset import to_prompt
 from ..judges import (Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, SkillRouter,
                         ensure_classified)
 from ..judges.ensemble import aggregate_pairs, aggregate_scores
+from ..llm_stream import is_retriable_llm_error
 from ..meta import ground_truth
 from ..observability import (
     bind_chain_context,
@@ -202,14 +203,22 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                         break
                     except Exception as e:
                         last_error = e
+                        retryable = is_retriable_llm_error(e)
+                        will_retry = attempt == 0 and retryable
                         log_event(
                             "单题评测",
-                            "失败，准备重试" if attempt == 0 else "最终失败",
-                            level=logging.WARNING if attempt == 0 else logging.ERROR,
-                            details={"请求次数": f"{attempt + 1}/2", **error_details(e)},
+                            "失败，准备重试" if will_retry else "最终失败",
+                            level=logging.WARNING if will_retry else logging.ERROR,
+                            details={
+                                "请求次数": f"{attempt + 1}/2",
+                                "可重试": retryable,
+                                **error_details(e),
+                            },
                         )
-                        if attempt == 0:
+                        if will_retry:
                             await asyncio.sleep(1.0)
+                            continue
+                        break
                 if res is None:
                     res = {
                         "index": idx,
@@ -218,7 +227,13 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                     }
                     if item_dict.get("context"):
                         res["context"] = item_dict["context"]
-                    _write_eval_error(task.id, idx, item_dict, last_error)
+                    _write_eval_error(
+                        task.id,
+                        idx,
+                        item_dict,
+                        last_error,
+                        request_id=request_id,
+                    )
             res["index"] = idx
             task.results.append(res)
             task.done_total += 1
@@ -247,7 +262,14 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     await asyncio.gather(*[one(i, it) for i, it in enumerate(task.items)])
 
 
-def _write_eval_error(task_id: str, idx: int, item: dict, error: Exception | None) -> None:
+def _write_eval_error(
+    task_id: str,
+    idx: int,
+    item: dict,
+    error: Exception | None,
+    *,
+    request_id: str = "",
+) -> None:
     """持久化最终失败，避免内存任务结束后无法定位批跑异常。"""
     try:
         path = RUNS_DIR / "eval_errors.jsonl"
@@ -255,12 +277,25 @@ def _write_eval_error(task_id: str, idx: int, item: dict, error: Exception | Non
         record = {
             "time": datetime.now().isoformat(timespec="seconds"),
             "task_id": task_id,
+            "request_id": request_id,
             "index": idx,
             "query": item.get("query", ""),
             "context": item.get("context", ""),
             "error": f"{type(error).__name__}: {error}" if error else "unknown",
             "traceback": "".join(traceback.format_exception(error)) if error else "",
         }
+        raw_output = getattr(error, "raw_output", None)
+        repair_output = getattr(error, "repair_output", None)
+        if raw_output is not None or repair_output is not None:
+            record.update({
+                "stage": "judge_json_parse",
+                "judge": getattr(error, "judge", None),
+                "model": getattr(error, "model", None),
+                "original_model_output": raw_output,
+                "repair_model_output": repair_output,
+                "original_output_length": len(raw_output or ""),
+                "repair_output_length": len(repair_output or ""),
+            })
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
