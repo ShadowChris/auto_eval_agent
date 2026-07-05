@@ -5,17 +5,23 @@ from auto_eval.judges.skill_router import SkillRouter
 
 
 EXPECTED = {
-    "math_solving": "数学解题",
-    "music": "音乐",
-    "film_tv": "影视",
-    "sports": "体育",
-    "news": "新闻",
-    "lbs_travel": "LBS（旅行规划）",
     "automotive": "汽车",
-    "digital_3c": "数码3C",
-    "search": "搜索",
-    "document": "文档",
+    "chinese": "语文",
     "default": "通用",
+    "digital_3c": "电子数码",
+    "document": "文档",
+    "film_tv": "影视",
+    "lbs_travel": "LBS",
+    "math_solving": "数学解题",
+    "meta_service": "元服务",
+    "music": "音乐",
+    "news": "新闻",
+    "operation": "操作类",
+    "phone_tips": "玩机技巧",
+    "professional_tech": "专业技术",
+    "search": "搜索",
+    "sports": "体育",
+    "weather": "天气",
 }
 
 
@@ -34,9 +40,10 @@ def test_every_domain_has_weighted_rubrics_and_subdimensions():
     for name, skill in router.domain.items():
         assert skill.rubrics, name
         assert all(dim.weight > 0 for dim in skill.rubrics)
-        if name != "default":
+        # default 和 operation 使用一级直接评分维度，其余垂域要求配置二级维度。
+        if name not in {"default", "operation"}:
             assert all(dim.sub_dimensions for dim in skill.rubrics), name
 
 
 def test_display_name_uses_skill_config():
-    assert _router().display_of("digital_3c") == "数码3C"
+    assert _router().display_of("digital_3c") == "电子数码"

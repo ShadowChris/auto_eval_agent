@@ -39,6 +39,24 @@ class JudgeReply:
     truncated: bool = False  # 是否因达到 max_rounds 被截断（已用强制判定兜底）
 
 
+class JudgeOutputParseError(ValueError):
+    """裁判调用成功，但最终结构化输出在定向修复后仍无法解析。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_output: str,
+        repair_output: str,
+        judge: str,
+        model: str,
+    ):
+        super().__init__(message)
+        self.raw_output = raw_output
+        self.repair_output = repair_output
+        self.judge = judge
+        self.model = model
+
 def _usage_dict(usage) -> dict | None:
     if usage is None:
         return None
@@ -115,6 +133,59 @@ class JudgeClient:
             python_enabled=getattr(cfg, "enable_python", False),
         )
         self.has_tools = bool(self.tool_defs)
+
+    async def repair_json(
+        self,
+        malformed_output: str,
+        *,
+        label: str = "裁判输出",
+        round_no: int = 0,
+    ) -> str:
+        """只修复最终 JSON 语法，不重新执行分类、检索或整条 Agent Loop。"""
+        judge_label = f"{self.cfg.display or self.cfg.name}({self.cfg.name})"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是 JSON 格式修复器。只修复输入中的 JSON 语法和括号结构，"
+                    "必须保留原有字段、分数、判定和理由语义，不得重新评审、不得增删事实。"
+                    "只输出一个合法 JSON 对象，不要输出 Markdown、分析或解释。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"需要修复的{label}如下：\n\n{malformed_output}",
+            },
+        ]
+        with bind_chain_context(
+            module="模型裁判",
+            judge=judge_label,
+            round=max(1, round_no),
+        ):
+            log_event(
+                "模型裁判",
+                "JSON格式修复开始",
+                level=logging.WARNING,
+                details={"原始输出字符": len(malformed_output)},
+                progress=82,
+                progress_message=f"{judge_label} · 修复JSON格式",
+            )
+            response = await self._llm_create(
+                {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0,
+                }
+            )
+            content = response.choices[0].message.content or ""
+            log_event(
+                "模型裁判",
+                "JSON格式修复完成",
+                details={"修复输出字符": len(content)},
+                progress=85,
+                progress_message=f"{judge_label} · JSON格式修复完成",
+            )
+        return content
 
     async def complete(self, system: str, user: str,
                        stream_callback: Callable[[str], None] | None = None,

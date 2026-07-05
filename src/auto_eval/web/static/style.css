@@ -44,22 +44,24 @@ button.btn-danger:hover:not(:disabled) { background: #fef2f2; }
   margin: 10px 0 0; padding: 8px 10px; border: 1px solid #fecaca;
   border-radius: 7px; color: #b91c1c; background: #fef2f2; font-size: 13px;
 }
-.progress-table { table-layout: fixed; }
-.progress-table th:nth-child(1) { width: 58px; }
-.progress-table th:nth-child(2) { width: 280px; }
-.progress-table th:nth-child(4) { width: 76px; }
-.progress-table th:nth-child(5) { width: 168px; }
+.progress-table { width: 1122px !important; min-width: 1122px; table-layout: fixed; }
+.progress-col-index { width: 58px; }
+.progress-col-query { width: 300px; }
+.progress-col-status { width: 520px; }
+.progress-col-elapsed { width: 76px; }
+.progress-col-request { width: 168px; }
 .progress-index { color: #374151; text-align: center !important; }
 .progress-index strong, .progress-index small { display: block; }
 .progress-index small { margin-top: 2px; color: #9ca3af; font-size: 10px; font-weight: normal; }
 .progress-query {
-  overflow: hidden; color: #374151; line-height: 18px;
+  min-width: 0; max-width: 300px; overflow: hidden; color: #374151; line-height: 18px;
 }
 .progress-query-text {
-  overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  overflow-wrap: anywhere; word-break: break-word;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
 }
-.progress-status-cell { min-width: 0; }
+.progress-status-cell { width: 520px; min-width: 0; max-width: 520px; overflow: hidden; }
 .progress-status-line { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
 .status-badge {
   display: inline-flex; align-items: center; flex: 0 0 auto; gap: 5px;
@@ -86,14 +88,12 @@ button.btn-danger:hover:not(:disabled) { background: #fef2f2; }
   border: 1px solid #e5e7eb; border-radius: 6px; background: #f8fafc;
 }
 .progress-log-line {
-  display: grid; grid-template-columns: 56px minmax(72px, 0.8fr) minmax(90px, 1.2fr);
+  display: grid; grid-template-columns: 56px max-content minmax(180px, 1fr);
   gap: 6px; min-width: 0; color: #374151; font: 11px/17px Consolas, "Microsoft YaHei", monospace;
 }
 .progress-log-line time { color: #9ca3af; white-space: nowrap; }
-.progress-log-meta, .progress-log-message {
-  min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-}
-.progress-log-meta { color: #64748b; }
+.progress-log-meta { color: #64748b; white-space: nowrap; }
+.progress-log-message { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .progress-log-line.log-warning .progress-log-message { color: #b45309; }
 .progress-log-line.log-error .progress-log-message { color: #b91c1c; font-weight: 600; }
 .progress-message {
@@ -120,6 +120,13 @@ table.grid th, table.grid td {
 table.grid.progress-table td { height: 58px; vertical-align: middle; }
 table.grid th { background: #f3f4f6; color: #374151; }
 table.grid tbody tr:nth-child(even) { background: #fafbfc; }
+.table-scroll { width: 100%; overflow-x: auto; }
+.auto-table { width: max-content !important; min-width: 100%; table-layout: auto; }
+.auto-table th, .auto-table td { min-width: 72px; max-width: 420px; }
+.auto-table th:first-child, .auto-table td:first-child { min-width: 48px; }
+.history-table th:first-child, .history-table td:first-child { min-width: 170px; white-space: nowrap; }
+.history-table th:nth-child(5), .history-table td:nth-child(5) { min-width: 260px; }
+.preview-table td { white-space: normal; overflow-wrap: anywhere; }
 table.results td { max-width: 320px; word-break: break-all; }
 tr.trace td { background: #eff6ff !important; color: #1e40af; font-size: 12px; }
 .summary { display: flex; gap: 20px; flex-wrap: wrap; font-size: 14px; padding: 10px 0; color: #374151; }
@@ -162,7 +169,29 @@ pre { background: #fef2f2; padding: 10px; border-radius: 6px; font-size: 12px; w
 .result-table-wrap td { min-width: 0; height: 54px; overflow: hidden; }
 .result-table-wrap th:nth-child(1), .result-table-wrap td:nth-child(1) { position: sticky; left: 0; z-index: 2; background: #fff; }
 .result-table-wrap th:nth-child(2), .result-table-wrap td:nth-child(2) { position: sticky; left: 48px; z-index: 2; background: #fff; }
-.pagination { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 10px; font-size: 13px; }
+.progress-table-wrap .progress-table th,
+.progress-table-wrap .progress-table td {
+  position: static;
+}
+.pagination {
+  display: flex; justify-content: center; align-items: center; gap: 6px;
+  margin-top: 12px; font-size: 13px; flex-wrap: wrap;
+}
+.pagination > button { min-width: 34px; padding: 5px 9px; }
+.pagination .page-number { border-color: transparent; background: transparent; }
+.pagination .page-number:hover:not(:disabled) { border-color: #bfdbfe; background: #eff6ff; }
+.pagination .page-number.active {
+  border-color: #2563eb; background: #2563eb; color: #fff; font-weight: 600;
+}
+.page-ellipsis { min-width: 20px; text-align: center; color: #94a3b8; }
+.page-jump {
+  display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; color: #64748b;
+}
+.page-jump input {
+  width: 58px; padding: 5px 6px; text-align: center;
+  border: 1px solid #d1d5db; border-radius: 6px;
+}
+.page-jump button { padding: 5px 9px; font-size: 12px; }
 tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; color: #b91c1c; }
 .active-filter { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 14px; background: #eff6ff; color: #1d4ed8; font-size: 12px; }
 .active-filter button { padding: 1px 6px; border: 0; color: #1d4ed8; background: transparent; font-size: 12px; }

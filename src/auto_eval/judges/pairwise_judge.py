@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from ..schema import EvalItem, SinglePair
-from .base import JudgeClient
+from .base import JudgeClient, JudgeOutputParseError
 from .prompts import PAIRWISE_SYSTEM, PAIRWISE_USER, parse_json_loose, resolve_prompt_context
 
 _SWAP = {"a": "b", "b": "a", "tie": "tie"}
@@ -40,7 +40,20 @@ class PairwiseJudge:
         reply = await self.client.complete(PAIRWISE_SYSTEM, user)
         data = parse_json_loose(reply.content)
         if data is None:
-            raise ValueError("成对裁判输出无法解析为 JSON")
+            repaired = await self.client.repair_json(
+                reply.content,
+                label="成对裁判输出",
+                round_no=reply.rounds + 1,
+            )
+            data = parse_json_loose(repaired)
+            if data is None:
+                raise JudgeOutputParseError(
+                    "成对裁判输出定向修复后仍无法解析为 JSON",
+                    raw_output=reply.content,
+                    repair_output=repaired,
+                    judge=self.client.cfg.name,
+                    model=self.client.model,
+                )
         raw = data.get("winner", "tie")
         if raw not in ("a", "b", "tie"):
             raw = "tie"
