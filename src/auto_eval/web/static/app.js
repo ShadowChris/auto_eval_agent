@@ -40,13 +40,18 @@ createApp({
     const correctnessFilter = ref("");
     const problemDimFilter = ref("");
     const resultPage = ref(1);
+    const previewPage = ref(1);
+    const progressPage = ref(1);
+    const resultJumpPage = ref("");
+    const previewJumpPage = ref("");
+    const progressJumpPage = ref("");
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
     const loadingHistory = ref(false);
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
-    const pageSize = 20;
+    const pageSize = 10;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
 
     const formatHint = computed(
@@ -78,6 +83,15 @@ createApp({
       else if (mode.value === "process") keys.push("answer", "trace", "reference");
       else keys.push("reference");
       return keys.filter((k) => items.value.some((it) => it[k] != null && it[k] !== ""));
+    });
+    const previewPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
+    const pagedPreviewItems = computed(() => {
+      const page = Math.min(previewPage.value, previewPageCount.value);
+      const start = (page - 1) * pageSize;
+      return items.value.slice(start, start + pageSize).map((item, offset) => ({
+        item,
+        index: start + offset,
+      }));
     });
 
     const progressRows = computed(() =>
@@ -111,6 +125,13 @@ createApp({
         };
       })
     );
+    const progressPageCount = computed(() => Math.max(1, Math.ceil(progressRows.value.length / pageSize)));
+    const pagedProgressRows = computed(() => {
+      const page = Math.min(progressPage.value, progressPageCount.value);
+      const start = (page - 1) * pageSize;
+      return progressRows.value.slice(start, start + pageSize);
+    });
+    const skillOverviewRows = computed(() => summary.value?.by_skill?.overview || []);
 
     function progressStageRank(progressItem) {
       if (progressItem.status === "done") return 4;
@@ -211,10 +232,29 @@ createApp({
 
     function progressEventMeta(event) {
       const parts = [];
+      if (event.module) parts.push(event.module);
       if (event.judge) parts.push(event.judge);
       if (Number(event.round || 0) > 0) parts.push(`第${event.round}轮`);
-      if (event.module) parts.push(event.module);
       return parts.join(" · ");
+    }
+
+    function progressEventMessage(event) {
+      let message = String(event.message || "");
+      const prefixes = [
+        event.judge,
+        Number(event.round || 0) > 0 ? `第${event.round}轮` : "",
+        event.module,
+      ].filter(Boolean);
+      for (const prefix of prefixes) {
+        message = message
+          .replace(new RegExp(`^${escapeRegExp(prefix)}\\s*[·|｜]\\s*`), "")
+          .replace(new RegExp(`^${escapeRegExp(prefix)}\\s*[：:]\\s*`), "");
+      }
+      return message.trim();
+    }
+
+    function escapeRegExp(value) {
+      return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
 
     function scrollProgressLog(event) {
@@ -335,13 +375,18 @@ createApp({
     });
 
     function columnWidth(c) {
-      if (c.rubricDim) return 96;
-      if (["query", "context"].includes(c.key)) return 230;
-      if (["answer", "generated_answer", "answer_a", "answer_b"].includes(c.key)) return 300;
-      if (c.key === "rationale") return 340;
-      if (c.key === "item_id") return 90;
-      if (["correctness", "winner", "total", "used_search", "truncated", "arbitrated", "agree", "latency_s", "bidirectional_consistent"].includes(c.key)) return 92;
-      return 120;
+      const compact = c.rubricDim
+        || ["correctness", "winner", "total", "used_search", "truncated", "arbitrated", "agree", "latency_s", "bidirectional_consistent"].includes(c.key);
+      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale"].includes(c.key);
+      const minWidth = compact ? 88 : c.key === "item_id" ? 90 : textColumn ? 180 : 110;
+      const maxWidth = compact ? 130 : c.key === "rationale" ? 420 : textColumn ? 360 : 220;
+      const visualLength = (value) => Array.from(String(value ?? "")).reduce(
+        (sum, char) => sum + (char.charCodeAt(0) > 255 ? 2 : 1),
+        0,
+      );
+      const sampleLengths = results.value.slice(0, 100).map((result) => visualLength(cell(result, c)));
+      const desired = (Math.max(visualLength(c.label), ...sampleLengths, 1) * 7) + 28;
+      return Math.max(minWidth, Math.min(maxWidth, desired));
     }
 
     const resultTableWidth = computed(
@@ -379,6 +424,7 @@ createApp({
       activeSkill.value = key;
       problemDimFilter.value = "";
       resultPage.value = 1;
+      progressPage.value = 1;
     }
     function drillDownDimension(skill, dimension) {
       activeSkill.value = skill;
@@ -394,8 +440,53 @@ createApp({
     function resetResultPage() {
       resultPage.value = 1;
     }
+
+    function paginationPages(current, total) {
+      if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1);
+      const pages = new Set([1, total]);
+      for (let page = Math.max(2, current - 1); page <= Math.min(total - 1, current + 1); page += 1) {
+        pages.add(page);
+      }
+      const sorted = [...pages].sort((a, b) => a - b);
+      const result = [];
+      sorted.forEach((page, index) => {
+        if (index > 0 && page - sorted[index - 1] > 1) result.push(`ellipsis-${page}`);
+        result.push(page);
+      });
+      return result;
+    }
+
+    function setTablePage(kind, requestedPage) {
+      const configs = {
+        result: [resultPage, pageCount, resultJumpPage],
+        preview: [previewPage, previewPageCount, previewJumpPage],
+        progress: [progressPage, progressPageCount, progressJumpPage],
+      };
+      const config = configs[kind];
+      if (!config || requestedPage === "" || requestedPage == null) return;
+      const [pageRef, countRef, jumpRef] = config;
+      const page = Math.trunc(Number(requestedPage));
+      if (!Number.isFinite(page)) return;
+      pageRef.value = Math.min(countRef.value, Math.max(1, page));
+      jumpRef.value = "";
+    }
+
     function changePage(delta) {
-      resultPage.value = Math.min(pageCount.value, Math.max(1, resultPage.value + delta));
+      setTablePage("result", resultPage.value + delta);
+    }
+    function changePreviewPage(delta) {
+      setTablePage("preview", previewPage.value + delta);
+    }
+    function changeProgressPage(delta) {
+      setTablePage("progress", progressPage.value + delta);
+    }
+    function jumpTablePage(kind) {
+      const jumpValues = {
+        result: resultJumpPage.value,
+        preview: previewJumpPage.value,
+        progress: progressJumpPage.value,
+      };
+      setTablePage(kind, jumpValues[kind]);
     }
 
     function trunc(v) {
@@ -407,6 +498,8 @@ createApp({
     function switchMode(k) {
       mode.value = k;
       items.value = [];
+      previewPage.value = 1;
+      progressPage.value = 1;
       errors.value = [];
       fileText.value = "";
       isJsonl.value = false;
@@ -475,6 +568,7 @@ createApp({
       const d = await r.json();
       items.value = d.items;
       errors.value = d.errors;
+      previewPage.value = 1;
       if (errors.value.length) console.log("解析错误：", errors.value);
     }
 
@@ -514,7 +608,6 @@ createApp({
       resultPage.value = 1;
       progress.value = 0;
       total.value = items.value.length;
-      const startedAt = Date.now();
       itemProgress.value = Object.fromEntries(
         items.value.map((item, index) => [
           index,
@@ -525,7 +618,6 @@ createApp({
             percent: 0,
             message: "排队中",
             stage_rank: 0,
-            started_at: startedAt,
           },
         ])
       );
@@ -854,6 +946,7 @@ createApp({
       correctnessFilter.value = "";
       problemDimFilter.value = "";
       resultPage.value = 1;
+      progressPage.value = 1;
       barChartRefs.value = [];
       if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
       renderCharts();
@@ -889,16 +982,22 @@ createApp({
 
     return {
       modes, mode, text, items, errors, judges, models, selectedJudges, selectedModel,
-      concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError, itemProgress, progressEvents, progressRows, progressStages, historyItems, loadingHistory,
+      concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
+      itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
+      historyItems, loadingHistory, pageSize,
+      previewPage, previewPageCount, previewJumpPage,
+      progressPage, progressPageCount, progressJumpPage,
+      resultJumpPage,
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
-      formatHint, placeholder, previewKeys, resultCols, opItems, canSubmit,
+      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, canSubmit,
       trunc, switchMode, onFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
+      changePreviewPage, changeProgressPage, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
-      progressMeta, formatProgressEventTime, progressEventMeta, scrollProgressLog,
+      progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,
     };

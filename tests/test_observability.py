@@ -53,6 +53,26 @@ def test_context_is_nested_and_progress_event_contains_chain_fields():
     assert current_context().request_id == "-"
 
 
+def test_progress_event_accepts_runtime_fields():
+    events = []
+    with bind_chain_context(
+        request_id="2607051200_timer_q0",
+        item_id="q0",
+        item_index=0,
+        progress_callback=events.append,
+    ):
+        log_event(
+            "任务",
+            "开始评测",
+            progress=1,
+            progress_message="开始评测",
+            progress_fields={"started_at": 1_788_517_600_000},
+        )
+
+    assert events[0]["started_at"] == 1_788_517_600_000
+    assert events[0]["message"] == "开始评测"
+
+
 async def test_parallel_judge_contexts_do_not_mix():
     events = []
 

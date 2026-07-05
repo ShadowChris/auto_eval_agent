@@ -51,6 +51,9 @@ def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
     events = task.progress_events.setdefault(key, [])
     sequence = int(events[-1].get("sequence", 0)) + 1 if events else 1
     event_payload = {**payload, "sequence": sequence}
+    previous = task.item_progress.get(key) or {}
+    if "started_at" not in event_payload and previous.get("started_at") is not None:
+        event_payload["started_at"] = previous["started_at"]
     events.append(event_payload)
     if len(events) > MAX_PROGRESS_EVENTS_PER_ITEM:
         del events[:-MAX_PROGRESS_EVENTS_PER_ITEM]
@@ -146,7 +149,6 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             item_index=idx,
             progress_callback=publish_progress,
         ):
-            started = time.perf_counter()
             log_event(
                 "任务",
                 "开始",
@@ -159,6 +161,15 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                 progress_message="排队等待评测",
             )
             async with sem:
+                # 排队时间不计入单题耗时；取得并发槽后才启动计时。
+                started = time.perf_counter()
+                log_event(
+                    "任务",
+                    "开始评测",
+                    progress=1,
+                    progress_message="开始评测",
+                    progress_fields={"started_at": int(time.time() * 1000)},
+                )
                 last_error = None
                 res = None
                 for attempt in range(2):

@@ -121,6 +121,36 @@ def test_progress_history_is_bounded_and_keeps_multi_judge_events():
     assert task.item_progress["0"] == events[-1]
 
 
+def test_progress_keeps_started_at_after_evaluation_begins():
+    task = Task(id="progress-timer", mode="single", items=[], options={})
+
+    queued = runner._record_progress(
+        task,
+        0,
+        {"item_index": 0, "status": "pending", "message": "排队等待评测"},
+    )
+    assert "started_at" not in queued
+
+    started = runner._record_progress(
+        task,
+        0,
+        {
+            "item_index": 0,
+            "status": "running",
+            "message": "开始评测",
+            "started_at": 1_788_517_600_000,
+        },
+    )
+    assert started["started_at"] == 1_788_517_600_000
+
+    completed = runner._record_progress(
+        task,
+        0,
+        {"item_index": 0, "status": "done", "message": "评测完成"},
+    )
+    assert completed["started_at"] == 1_788_517_600_000
+
+
 @pytest.mark.asyncio
 async def test_snapshot_exception_does_not_replace_result_with_global_error(monkeypatch):
     task = Task(

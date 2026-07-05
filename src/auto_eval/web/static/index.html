@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260705_progress_log">
+  <link rel="stylesheet" href="/static/style.css?v=20260705_progress_width">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -28,22 +28,24 @@
   <details class="history-section">
     <summary>历史记录（{{ historyItems.length }}）<button @click.stop="loadHistory" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
     <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
-    <table class="grid history-table" v-if="historyItems.length">
-      <thead><tr><th>时间</th><th>模式</th><th>状态</th><th>进度</th><th>预览</th><th>操作</th></tr></thead>
-      <tbody>
-        <tr v-for="h in historyItems" :key="h.task_id">
-          <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
-          <td>{{ h.mode }}</td>
-          <td>{{ h.status }}</td>
-          <td>{{ h.done }}/{{ h.total }}</td>
-          <td>{{ h.preview }}</td>
-          <td style="white-space:nowrap">
-            <button @click="loadHistoryTask(h.task_id)">加载</button>
-            <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
+    <div class="table-scroll" v-if="historyItems.length">
+      <table class="grid history-table auto-table">
+        <thead><tr><th>时间</th><th>模式</th><th>状态</th><th>进度</th><th>预览</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr v-for="h in historyItems" :key="h.task_id">
+            <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
+            <td>{{ h.mode }}</td>
+            <td>{{ h.status }}</td>
+            <td>{{ h.done }}/{{ h.total }}</td>
+            <td>{{ h.preview }}</td>
+            <td style="white-space:nowrap">
+              <button @click="loadHistoryTask(h.task_id)">加载</button>
+              <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
     <p v-else class="hint">暂无历史记录。</p>
   </details>
   <section>
@@ -84,10 +86,29 @@
       <details v-if="errors.length"><summary>错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
       <details v-if="items.length" open>
         <summary>预览（{{ items.length }} 题）</summary>
-        <table class="grid">
-          <thead><tr><th>#</th><th v-for="k in previewKeys">{{ k }}</th></tr></thead>
-          <tbody><tr v-for="(it,i) in items"><td>{{ i+1 }}</td><td v-for="k in previewKeys">{{ trunc(it[k]) }}</td></tr></tbody>
-        </table>
+        <div class="table-scroll">
+          <table class="grid auto-table preview-table">
+            <thead><tr><th>#</th><th v-for="k in previewKeys">{{ k }}</th></tr></thead>
+            <tbody>
+              <tr v-for="entry in pagedPreviewItems" :key="'preview-'+entry.index">
+                <td>{{ entry.index+1 }}</td>
+                <td v-for="k in previewKeys" :title="entry.item[k]">{{ trunc(entry.item[k]) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination" v-if="previewPageCount>1">
+          <button @click="changePreviewPage(-1)" :disabled="previewPage<=1">上一页</button>
+          <template v-for="page in paginationPages(previewPage, previewPageCount)" :key="'preview-page-'+page">
+            <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
+            <button v-else class="page-number" :class="{active:page===previewPage}" @click="setTablePage('preview', page)">{{ page }}</button>
+          </template>
+          <button @click="changePreviewPage(1)" :disabled="previewPage>=previewPageCount">下一页</button>
+          <span class="page-jump">
+            跳至 <input v-model="previewJumpPage" type="number" min="1" :max="previewPageCount" @keyup.enter="jumpTablePage('preview')"> 页
+            <button @click="jumpTablePage('preview')">确定</button>
+          </span>
+        </div>
       </details>
     </div>
   </section>
@@ -124,13 +145,20 @@
 
   <section v-if="running || Object.keys(itemProgress).length" class="live-progress">
     <h2>逐题运行进度</h2>
-    <div class="result-table-wrap">
+    <div class="result-table-wrap progress-table-wrap">
       <table class="grid progress-table">
+        <colgroup>
+          <col class="progress-col-index">
+          <col class="progress-col-query">
+          <col class="progress-col-status">
+          <col class="progress-col-elapsed">
+          <col class="progress-col-request">
+        </colgroup>
         <thead>
           <tr><th>#</th><th>Query</th><th>当前状态</th><th>耗时</th><th>请求 ID</th></tr>
         </thead>
         <tbody>
-          <tr v-for="row in progressRows" :key="'progress-'+row.index" :class="{'progress-error':row.status==='error'}">
+          <tr v-for="row in pagedProgressRows" :key="'progress-'+row.index" :class="{'progress-error':row.status==='error'}">
             <td class="progress-index">
               <strong>{{ row.index + 1 }}</strong>
               <small>{{ row.itemId }}</small>
@@ -155,7 +183,7 @@
                     >
                       <time>{{ formatProgressEventTime(event.updated_at) }}</time>
                       <span class="progress-log-meta">{{ progressEventMeta(event) }}</span>
-                      <span class="progress-log-message">{{ event.message }}</span>
+                      <span class="progress-log-message">{{ progressEventMessage(event) }}</span>
                     </div>
                   </div>
                 </details>
@@ -169,7 +197,7 @@
                 >
                   <time>{{ formatProgressEventTime(event.updated_at) }}</time>
                   <span class="progress-log-meta">{{ progressEventMeta(event) }}</span>
-                  <span class="progress-log-message">{{ event.message }}</span>
+                  <span class="progress-log-message">{{ progressEventMessage(event) }}</span>
                 </div>
               </div>
               <div v-else class="progress-message" :title="row.message">{{ row.message }}</div>
@@ -182,6 +210,18 @@
           </tr>
         </tbody>
       </table>
+    </div>
+    <div class="pagination" v-if="progressPageCount>1">
+      <button @click="changeProgressPage(-1)" :disabled="progressPage<=1">上一页</button>
+      <template v-for="page in paginationPages(progressPage, progressPageCount)" :key="'progress-page-'+page">
+        <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
+        <button v-else class="page-number" :class="{active:page===progressPage}" @click="setTablePage('progress', page)">{{ page }}</button>
+      </template>
+      <button @click="changeProgressPage(1)" :disabled="progressPage>=progressPageCount">下一页</button>
+      <span class="page-jump">
+        跳至 <input v-model="progressJumpPage" type="number" min="1" :max="progressPageCount" @keyup.enter="jumpTablePage('progress')"> 页
+        <button @click="jumpTablePage('progress')">确定</button>
+      </span>
     </div>
   </section>
 
@@ -207,10 +247,11 @@
       <p v-if="fallbackStat && fallbackStat.fbCount > 0" class="fallback-hint">
         ⚠️ 共 {{ fallbackStat.total }} 题，其中 {{ fallbackStat.fbCount }} 题（{{ (fallbackStat.rate*100).toFixed(0) }}%）未命中明确垂域（落“通用”）→ 建议检查 Skill 匹配表覆盖度或预标 category
       </p>
-      <table class="grid">
+      <div class="table-scroll">
+      <table class="grid auto-table">
         <thead><tr><th>垂域</th><th>样本量</th><th>成功评测</th><th>出问题数</th><th>正确率</th><th>平均分</th><th>首要错因</th><th>低一致率</th></tr></thead>
         <tbody>
-          <tr v-for="s in summary.by_skill.overview" :key="s.skill">
+          <tr v-for="s in skillOverviewRows" :key="s.skill">
             <td>{{ s.display }}</td>
             <td>{{ s.n_items }}</td>
             <td>{{ s.eval_n ?? s.n_items }}</td>
@@ -222,6 +263,7 @@
           </tr>
         </tbody>
       </table>
+      </div>
       <div class="skill-chart-grid">
         <template v-for="(s,i) in (summary.by_skill.sections||[])" :key="'sec-'+s.skill">
           <div v-if="s.n_items>0 && Object.values(s.dim_problem_dist||{}).some(info => info.rate > 0)" class="skill-section">
@@ -276,7 +318,7 @@
           <tbody>
             <template v-for="(r,i) in pagedResults" :key="r.index ?? i">
               <tr :class="{'result-error':r.error}">
-                <td><div class="cell-clamp cell-center">{{ (resultPage-1)*20+i+1 }}</div></td>
+                <td><div class="cell-clamp cell-center">{{ (resultPage-1)*pageSize+i+1 }}</div></td>
                 <td
                   v-for="c in resultCols"
                   :key="c.key"
@@ -299,8 +341,15 @@
       </div>
       <div class="pagination" v-if="pageCount>1">
         <button @click="changePage(-1)" :disabled="resultPage<=1">上一页</button>
-        <span>第 {{ resultPage }} / {{ pageCount }} 页</span>
+        <template v-for="page in paginationPages(resultPage, pageCount)" :key="'result-page-'+page">
+          <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
+          <button v-else class="page-number" :class="{active:page===resultPage}" @click="setTablePage('result', page)">{{ page }}</button>
+        </template>
         <button @click="changePage(1)" :disabled="resultPage>=pageCount">下一页</button>
+        <span class="page-jump">
+          跳至 <input v-model="resultJumpPage" type="number" min="1" :max="pageCount" @keyup.enter="jumpTablePage('result')"> 页
+          <button @click="jumpTablePage('result')">确定</button>
+        </span>
       </div>
     </div>
     <div
@@ -313,6 +362,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260705_progress_log"></script>
+  <script type="module" src="/static/app.js?v=20260705_progress_timer"></script>
 </body>
 </html>

@@ -238,6 +238,7 @@ def log_event(
     progress: int | None = None,
     progress_message: str | None = None,
     progress_status: str = "running",
+    progress_fields: dict[str, Any] | None = None,
 ) -> None:
     ctx = current_context()
     payload = dict(details or {})
@@ -256,8 +257,7 @@ def log_event(
     )
     if ctx.progress_callback and progress is not None:
         try:
-            ctx.progress_callback(
-                {
+            progress_payload = {
                     "request_id": ctx.request_id,
                     "item_id": ctx.item_id,
                     "item_index": ctx.item_index,
@@ -271,7 +271,9 @@ def log_event(
                     "round": ctx.round,
                     "updated_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
                 }
-            )
+            if progress_fields:
+                progress_payload.update(progress_fields)
+            ctx.progress_callback(progress_payload)
         except Exception:
             pass
 
