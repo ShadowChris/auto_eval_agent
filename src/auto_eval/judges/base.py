@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from ..config import JudgeConfig
 from ..llm_stream import build_openai_client, stream_chat_completion
+from ..observability import bind_chain_context, log_event
 from ..paths import resolve_project_path
 from .prompts import persona_text
 from .tools import build_tools
@@ -142,11 +143,15 @@ class JudgeClient:
         truncated = False
         for _ in range(self.max_rounds):
             rounds += 1
-            kwargs = {"model": self.model, "messages": messages, "temperature": self.cfg.temperature}
-            if self.has_tools:
-                kwargs["tools"] = self.tool_defs
-                kwargs["tool_choice"] = "auto"
-            resp = await self._llm_create(kwargs, stream_callback=stream_callback)
+            judge_label = f"{self.cfg.display or self.cfg.name}({self.cfg.name})"
+            with bind_chain_context(
+                module="模型裁判", judge=judge_label, round=rounds
+            ):
+                kwargs = {"model": self.model, "messages": messages, "temperature": self.cfg.temperature}
+                if self.has_tools:
+                    kwargs["tools"] = self.tool_defs
+                    kwargs["tool_choice"] = "auto"
+                resp = await self._llm_create(kwargs, stream_callback=stream_callback)
             msg = resp.choices[0].message
             last_content = msg.content or ""
             tool_calls = getattr(msg, "tool_calls", None)
@@ -189,12 +194,57 @@ class JudgeClient:
                 if not isinstance(args, dict):
                     result = f"(工具参数不是合法 JSON 对象: {args})"
                     summary = f"{name}(参数格式错误)"
+                    with bind_chain_context(
+                        module="工具调用", judge=judge_label, round=rounds
+                    ):
+                        log_event(
+                            "工具调用",
+                            "参数错误",
+                            level=logging.ERROR,
+                            details={"工具": name, "参数": args},
+                            progress=70,
+                            progress_message=f"{judge_label} · 第{rounds}轮 · 工具参数错误",
+                            progress_status="error",
+                        )
                     trace.append(summary)
                     if do_trace:
                         tool_results.append({"name": name, "args": args, "result": result})
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
                     continue
-                result, summary = await self._exec_tool_async(name, args)
+                with bind_chain_context(
+                    module="工具调用", judge=judge_label, round=rounds
+                ):
+                    log_event(
+                        "工具调用",
+                        "开始",
+                        details={"工具": name, "参数": args},
+                        progress=65,
+                        progress_message=f"{judge_label} · 第{rounds}轮 · 调用{name}",
+                    )
+                    tool_started = time.perf_counter()
+                    result, summary = await self._exec_tool_async(name, args)
+                    tool_failed = (
+                        str(result).startswith("(工具")
+                        or "超时" in summary
+                        or "错误" in summary
+                    )
+                    log_event(
+                        "工具调用",
+                        "失败" if tool_failed else "成功",
+                        level=logging.ERROR if tool_failed else logging.INFO,
+                        details={
+                            "工具": name,
+                            "结果": summary,
+                            "耗时": f"{time.perf_counter() - tool_started:.2f}秒",
+                        },
+                        progress=75,
+                        progress_message=(
+                            f"{judge_label} · 第{rounds}轮 · {name}调用失败"
+                            if tool_failed
+                            else f"{judge_label} · 第{rounds}轮 · {name}调用成功"
+                        ),
+                        progress_status="running",
+                    )
                 trace.append(summary)
                 if do_trace:
                     tool_results.append({"name": name, "args": args, "result": result})
@@ -215,10 +265,22 @@ class JudgeClient:
                 "content": "你已收集足够信息（或已达工具调用上限）。请不要再调用任何工具，"
                            "直接输出最终的 <analysis>...</analysis> 思考与 JSON 判定。",
             })
-            resp = await self._llm_create(
-                {"model": self.model, "messages": messages, "temperature": self.cfg.temperature},
-                stream_callback=stream_callback,
-            )
+            judge_label = f"{self.cfg.display or self.cfg.name}({self.cfg.name})"
+            with bind_chain_context(
+                module="模型裁判", judge=judge_label, round=rounds + 1
+            ):
+                log_event(
+                    "模型裁判",
+                    "达到轮次上限，强制生成判定",
+                    level=logging.WARNING,
+                    details={"最大轮次": self.max_rounds},
+                    progress=80,
+                    progress_message=f"{judge_label} · 强制生成最终判定",
+                )
+                resp = await self._llm_create(
+                    {"model": self.model, "messages": messages, "temperature": self.cfg.temperature},
+                    stream_callback=stream_callback,
+                )
             msg = resp.choices[0].message
             last_content = msg.content or ""
             rounds += 1

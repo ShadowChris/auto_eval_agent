@@ -1,4 +1,4 @@
-import { createApp, ref, computed, onMounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
+import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
 import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 
 createApp({
@@ -29,6 +29,9 @@ createApp({
     const results = ref([]);
     const summary = ref(null);
     const taskId = ref("");
+    const runError = ref("");
+    const itemProgress = ref({});
+    const progressEvents = ref({});
     const pieChart = ref(null);
     const barChartRefs = ref([]);
     const resultBrowser = ref(null);
@@ -40,8 +43,11 @@ createApp({
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
     const loadingHistory = ref(false);
+    const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
+    let progressClockTimer = null;
     const pageSize = 20;
+    const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
 
     const formatHint = computed(
       () =>
@@ -73,6 +79,173 @@ createApp({
       else keys.push("reference");
       return keys.filter((k) => items.value.some((it) => it[k] != null && it[k] !== ""));
     });
+
+    const progressRows = computed(() =>
+      items.value.map((item, index) => {
+        const current = itemProgress.value[index] || {};
+        const result = results.value.find((entry) => entry.index === index);
+        const events = progressEvents.value[index] || [];
+        const startedAt = Number(current.started_at || 0);
+        const finishedAt = Number(current.finished_at || 0);
+        const resultElapsed = Number(result?.latency_s);
+        const elapsedSeconds = Number.isFinite(resultElapsed)
+          ? resultElapsed
+          : startedAt > 0
+            ? Math.max(0, ((finishedAt || clockNow.value) - startedAt) / 1000)
+            : null;
+        return {
+          index,
+          itemId: item.id || `q${index}`,
+          query: item.query || item.question || "",
+          percent: current.percent ?? 0,
+          status: current.status || "pending",
+          message: current.message || "排队中",
+          requestId: current.request_id || "",
+          module: current.module || "",
+          judge: current.judge || "",
+          round: Number(current.round || 0),
+          stageRank: current.stage_rank ?? progressStageRank(current),
+          elapsedSeconds,
+          events,
+          latestEvents: events.slice(-2),
+        };
+      })
+    );
+
+    function progressStageRank(progressItem) {
+      if (progressItem.status === "done") return 4;
+      if (progressItem.module === "结果聚合") return 3;
+      if (["模型裁判", "工具调用", "被测模型", "单题评测"].includes(progressItem.module)) return 2;
+      if (progressItem.module === "垂域分类") return 1;
+      return 0;
+    }
+
+    function mergeItemProgress(incoming) {
+      appendProgressEvent(incoming);
+      const index = incoming.item_index;
+      const previous = itemProgress.value[index] || {};
+      const previousRank = previous.stage_rank ?? progressStageRank(previous);
+      const incomingRank = progressStageRank(incoming);
+      const terminal = incoming.status === "done" || incoming.status === "error";
+      const updatedAt = Date.parse(incoming.updated_at || "");
+      itemProgress.value = {
+        ...itemProgress.value,
+        [index]: {
+          ...previous,
+          ...incoming,
+          // Agent Loop 总轮数未知，宏观阶段只前进、不倒退。
+          stage_rank: incoming.status === "done"
+            ? 4
+            : Math.max(previousRank, incomingRank),
+          finished_at: terminal
+            ? (previous.finished_at || (Number.isFinite(updatedAt) ? updatedAt : Date.now()))
+            : previous.finished_at,
+        },
+      };
+    }
+
+    function appendProgressEvent(incoming) {
+      const index = incoming.item_index;
+      if (index == null) return;
+      const previous = progressEvents.value[index] || [];
+      const eventKey = incoming.sequence != null
+        ? `seq:${incoming.sequence}`
+        : [
+            incoming.updated_at, incoming.module, incoming.event,
+            incoming.judge, incoming.round, incoming.message,
+          ].join("|");
+      if (previous.some((entry) => entry._key === eventKey)) return;
+      progressEvents.value = {
+        ...progressEvents.value,
+        [index]: [...previous, { ...incoming, _key: eventKey }].slice(-100),
+      };
+    }
+
+    function progressStageClass(row, stageIndex) {
+      if (row.status === "done") return "completed";
+      if (stageIndex < row.stageRank) return "completed";
+      if (stageIndex === row.stageRank) return row.status === "error" ? "error" : "active";
+      return "pending";
+    }
+
+    function progressDisplay(row) {
+      const message = row.message || "排队中";
+      const parts = [];
+      if (row.judge && !message.includes(row.judge)) parts.push(row.judge);
+      const roundLabel = row.round > 0 ? `第${row.round}轮` : "";
+      if (roundLabel && !message.includes(roundLabel)) parts.push(roundLabel);
+      parts.push(message);
+      return parts.join(" · ");
+    }
+
+    function progressStageLabel(row) {
+      if (row.status === "error") return "失败";
+      if (row.status === "done") return "完成";
+      return progressStages[Math.max(0, Math.min(4, row.stageRank))];
+    }
+
+    function progressStatusClass(row) {
+      if (row.status === "error") return "status-error";
+      if (row.status === "done") return "status-done";
+      if (row.stageRank === 0) return "status-pending";
+      return "status-running";
+    }
+
+    function progressMeta(row) {
+      const parts = [];
+      if (row.judge) parts.push(row.judge);
+      if (row.round > 0) parts.push(`第${row.round}轮`);
+      return parts.join(" · ");
+    }
+
+    function formatProgressEventTime(value) {
+      const date = new Date(value || "");
+      if (Number.isNaN(date.getTime())) return "--:--:--";
+      return date.toLocaleTimeString("zh-CN", {
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+    }
+
+    function progressEventMeta(event) {
+      const parts = [];
+      if (event.judge) parts.push(event.judge);
+      if (Number(event.round || 0) > 0) parts.push(`第${event.round}轮`);
+      if (event.module) parts.push(event.module);
+      return parts.join(" · ");
+    }
+
+    function scrollProgressLog(event) {
+      if (!event.currentTarget.open) return;
+      nextTick(() => {
+        const panel = event.currentTarget.querySelector(".progress-log-scroll");
+        if (panel) panel.scrollTop = panel.scrollHeight;
+      });
+    }
+
+    function formatProgressElapsed(seconds, status) {
+      if (seconds == null || !Number.isFinite(seconds)) return "—";
+      if (status === "done" || status === "error") {
+        if (seconds < 60) return `${seconds.toFixed(1)}s`;
+      }
+      const whole = Math.max(0, Math.floor(seconds));
+      if (whole < 60) return `${whole}s`;
+      return `${Math.floor(whole / 60)}m ${String(whole % 60).padStart(2, "0")}s`;
+    }
+
+    function shortRequestId(requestId) {
+      if (!requestId) return "等待生成";
+      return requestId.length > 12 ? `…${requestId.slice(-11)}` : requestId;
+    }
+
+    async function copyRequestId(requestId) {
+      if (!requestId) return;
+      try {
+        await navigator.clipboard.writeText(requestId);
+      } catch (_) {}
+    }
 
     const skillTabs = computed(() => {
       const map = new Map();
@@ -306,6 +479,7 @@ createApp({
     }
 
     async function submit() {
+      runError.value = "";
       if (mode.value === "operation") {
         const valid = opItems.value.filter((it) => it.query.trim() && (it.frames || []).length);
         if (!valid.length) {
@@ -331,6 +505,7 @@ createApp({
       }
       results.value = [];
       summary.value = null;
+      progressEvents.value = {};
       barChartRefs.value = [];
       activeSkill.value = "";
       resultQuery.value = "";
@@ -339,6 +514,21 @@ createApp({
       resultPage.value = 1;
       progress.value = 0;
       total.value = items.value.length;
+      const startedAt = Date.now();
+      itemProgress.value = Object.fromEntries(
+        items.value.map((item, index) => [
+          index,
+          {
+            item_index: index,
+            item_id: item.id || `q${index}`,
+            status: "pending",
+            percent: 0,
+            message: "排队中",
+            stage_rank: 0,
+            started_at: startedAt,
+          },
+        ])
+      );
       running.value = true;
       const body = {
         mode: mode.value,
@@ -350,22 +540,101 @@ createApp({
           eval_timeout_s: evalTimeout.value,
         },
       };
-      const r = await fetch("/api/eval", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const d = await r.json();
+      let r;
+      try {
+        r = await fetch("/api/eval", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (error) {
+        running.value = false;
+        itemProgress.value = {};
+        runError.value = "无法启动评估：" + (error?.message || "网络错误");
+        return;
+      }
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.task_id) {
+        running.value = false;
+        itemProgress.value = {};
+        const detail = typeof d.detail === "string" ? d.detail : "服务端拒绝了评估请求";
+        runError.value = "无法启动评估：" + detail;
+        return;
+      }
       taskId.value = d.task_id;
       connectSSE();
     }
 
+    async function reconcileTaskAfterError(message) {
+      let snapshot = null;
+      try {
+        const response = await fetch(`/api/history/${taskId.value}`);
+        if (response.ok) snapshot = await response.json();
+      } catch (_) {}
+      const snapshotResults = snapshot?.results || results.value;
+      const resultByIndex = new Map(snapshotResults.map((entry) => [entry.index, entry]));
+      const snapshotProgress = snapshot?.item_progress || {};
+      progressEvents.value = snapshot?.progress_events || progressEvents.value;
+      const reconciled = {};
+      items.value.forEach((item, index) => {
+        const previous = itemProgress.value[index] || {};
+        const remote = snapshotProgress[index] || snapshotProgress[String(index)] || {};
+        const result = resultByIndex.get(index);
+        let status = remote.status || previous.status || "error";
+        let rowMessage = remote.message || previous.message || "";
+        if (result) {
+          status = result.error ? "error" : "done";
+          rowMessage = result.error ? "评测失败" : "评测完成";
+        } else if (status !== "done" && status !== "error") {
+          status = "error";
+          rowMessage = `任务中断：${message}`;
+        }
+        const updatedAt = Date.parse(remote.updated_at || "");
+        reconciled[index] = {
+          ...previous,
+          ...remote,
+          status,
+          message: rowMessage,
+          percent: status === "done" || status === "error" ? 100 : (remote.percent ?? previous.percent ?? 0),
+          stage_rank: status === "done" ? 4 : (remote.stage_rank ?? previous.stage_rank ?? 0),
+          finished_at: previous.finished_at
+            || (Number.isFinite(updatedAt) ? updatedAt : Date.now()),
+        };
+      });
+      results.value = snapshotResults;
+      progress.value = snapshotResults.length;
+      itemProgress.value = reconciled;
+      if (snapshot?.summary) summary.value = snapshot.summary;
+    }
+
     function connectSSE() {
       const es = new EventSource(`/api/eval/${taskId.value}/stream`);
+      es.addEventListener("item_progress", (e) => {
+        const d = JSON.parse(e.data);
+        mergeItemProgress(d);
+      });
+      es.addEventListener("progress_event", (e) => {
+        appendProgressEvent(JSON.parse(e.data));
+      });
       es.addEventListener("result", (e) => {
         const d = JSON.parse(e.data);
         results.value.push(d.result);
         progress.value = d.progress;
+        const index = d.result.index;
+        if (index != null) {
+          const previous = itemProgress.value[index] || {};
+          itemProgress.value = {
+            ...itemProgress.value,
+            [index]: {
+              ...previous,
+              status: d.result.error ? "error" : "done",
+              percent: 100,
+              message: d.result.error ? "评测失败" : "评测完成",
+              stage_rank: d.result.error ? (previous.stage_rank ?? 0) : 4,
+              finished_at: Date.now(),
+            },
+          };
+        }
       });
       es.addEventListener("done", (e) => {
         summary.value = JSON.parse(e.data).summary;
@@ -376,15 +645,18 @@ createApp({
         renderCharts();
         loadHistory();
       });
-      es.addEventListener("error", (e) => {
+      es.addEventListener("error", async (e) => {
+        // 原生 EventSource 网络错误没有 data，让浏览器按协议自动重连并回放状态。
+        if (!e.data) return;
+        let message = "未知错误";
         try {
-          if (e.data) {
-            const d = JSON.parse(e.data);
-            alert("评估出错：" + (d.message || "未知"));
-          }
+          const d = JSON.parse(e.data);
+          message = d.message || message;
         } catch (_) {}
         running.value = false;
         es.close();
+        await reconcileTaskAfterError(message);
+        runError.value = "评估出错：" + message;
       });
     }
 
@@ -571,6 +843,8 @@ createApp({
       mode.value = d.mode || mode.value;
       items.value = d.items || [];
       results.value = d.results || [];
+      itemProgress.value = d.item_progress || {};
+      progressEvents.value = d.progress_events || {};
       summary.value = d.summary || null;
       total.value = items.value.length || results.value.length;
       progress.value = results.value.length;
@@ -597,6 +871,9 @@ createApp({
     }
 
     onMounted(async () => {
+      progressClockTimer = window.setInterval(() => {
+        clockNow.value = Date.now();
+      }, 1000);
       const r = await fetch("/api/config");
       const d = await r.json();
       judges.value = d.judges;
@@ -606,9 +883,13 @@ createApp({
       loadHistory();
     });
 
+    onUnmounted(() => {
+      if (progressClockTimer != null) window.clearInterval(progressClockTimer);
+    });
+
     return {
       modes, mode, text, items, errors, judges, models, selectedJudges, selectedModel,
-      concurrency, evalTimeout, running, progress, total, results, summary, taskId, historyItems, loadingHistory,
+      concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError, itemProgress, progressEvents, progressRows, progressStages, historyItems, loadingHistory,
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
@@ -616,6 +897,9 @@ createApp({
       trunc, switchMode, onFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
+      progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
+      progressMeta, formatProgressEventTime, progressEventMeta, scrollProgressLog,
+      formatProgressElapsed, shortRequestId, copyRequestId,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,
     };
   },

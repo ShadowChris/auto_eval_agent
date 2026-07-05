@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
 import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
+
+from .observability import current_context, error_details, log_event
 
 
 class StreamProtocolError(RuntimeError):
@@ -120,9 +124,17 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
     usage = None
     model = kwargs.get("model", "")
     saw_choice = False
+    started = time.perf_counter()
+    stats = {
+        "chunk数": 0,
+        "输出字符": 0,
+        "工具参数字符": 0,
+        "首Token耗时": None,
+    }
 
     try:
         async for chunk in stream:
+            stats["chunk数"] += 1
             usage = getattr(chunk, "usage", None) or usage
             model = getattr(chunk, "model", None) or model
             choices = getattr(chunk, "choices", None) or []
@@ -134,7 +146,19 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             delta = choice.delta
             content = getattr(delta, "content", None)
             if content:
+                if stats["首Token耗时"] is None:
+                    stats["首Token耗时"] = round(
+                        (time.perf_counter() - started) * 1000
+                    )
+                    log_event(
+                        current_context().module or "模型调用",
+                        "收到首个Token",
+                        details={"耗时": f"{stats['首Token耗时']}ms"},
+                        progress=45,
+                        progress_message="正在接收模型流式输出",
+                    )
                 content_chunks.append(content)
+                stats["输出字符"] += len(content)
 
             for tool_call in (getattr(delta, "tool_calls", None) or []):
                 index = tool_call.index
@@ -149,9 +173,16 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
                         entry["name"] += function.name
                     if function.arguments:
                         entry["arguments"] += function.arguments
+                        stats["工具参数字符"] += len(function.arguments)
 
             if choice.finish_reason:
                 finish_reason = choice.finish_reason
+    except Exception as exc:
+        try:
+            setattr(exc, "_auto_eval_stream_stats", dict(stats))
+        except Exception:
+            pass
+        raise
     finally:
         close = getattr(stream, "close", None)
         if close is not None:
@@ -186,7 +217,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             )
         ],
     )
-    return response, content_chunks
+    return response, content_chunks, stats
 
 
 async def stream_chat_completion(
@@ -210,9 +241,26 @@ async def stream_chat_completion(
     last_exc: BaseException | None = None
     use_usage = include_usage
     for attempt in range(max_attempts):
+        module = current_context().module or "模型调用"
+        call_started = time.perf_counter()
+        log_event(
+            module,
+            "流式调用开始" if attempt == 0 else "开始重试",
+            details={
+                "模型": kwargs.get("model", ""),
+                "请求次数": f"{attempt + 1}/{max_attempts}",
+                "超时": f"{total_timeout_s:g}秒",
+            },
+            progress=35,
+            progress_message=(
+                f"{module}：等待模型响应"
+                if attempt == 0
+                else f"{module}：第{attempt + 1}次重试"
+            ),
+        )
         try:
             try:
-                response, chunks = await asyncio.wait_for(
+                response, chunks, stats = await asyncio.wait_for(
                     _collect_stream(client, kwargs, include_usage=use_usage),
                     timeout=total_timeout_s,
                 )
@@ -220,7 +268,13 @@ async def stream_chat_completion(
                 # 一些内部 OpenAI 兼容网关支持 stream，但不接受 stream_options。
                 if use_usage and _rejects_stream_usage(exc):
                     use_usage = False
-                    response, chunks = await asyncio.wait_for(
+                    log_event(
+                        module,
+                        "网关不支持usage参数，降级重试",
+                        level=logging.WARNING,
+                        details={"HTTP状态": _status_code(exc)},
+                    )
+                    response, chunks, stats = await asyncio.wait_for(
                         _collect_stream(client, kwargs, include_usage=False),
                         timeout=total_timeout_s,
                     )
@@ -230,17 +284,79 @@ async def stream_chat_completion(
                 for chunk in chunks:
                     try:
                         callback(chunk)
-                    except Exception:
-                        pass
+                    except Exception as callback_exc:
+                        log_event(
+                            module,
+                            "流式回调失败",
+                            level=logging.WARNING,
+                            details=error_details(callback_exc, include_traceback=False),
+                        )
+            choice = response.choices[0]
+            tool_calls = getattr(choice.message, "tool_calls", None) or []
+            usage = getattr(response, "usage", None)
+            log_event(
+                module,
+                "流式调用成功" if attempt == 0 else "重试成功",
+                details={
+                    "模型": kwargs.get("model", ""),
+                    "请求次数": f"{attempt + 1}/{max_attempts}",
+                    "结束原因": getattr(choice, "finish_reason", None),
+                    "下一步": (
+                        f"调用{tool_calls[0].function.name}" if tool_calls else "生成最终判定"
+                    ),
+                    "chunk数": stats.get("chunk数"),
+                    "输出字符": stats.get("输出字符"),
+                    "输入Token": getattr(usage, "prompt_tokens", None) if usage else None,
+                    "输出Token": getattr(usage, "completion_tokens", None) if usage else None,
+                    "耗时": f"{time.perf_counter() - call_started:.2f}秒",
+                },
+                progress=60,
+                progress_message=(
+                    f"{module}：模型返回成功"
+                    if not tool_calls
+                    else f"{module}：准备调用{tool_calls[0].function.name}"
+                ),
+            )
             return response
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             last_exc = exc
-            if attempt >= max_attempts - 1 or not is_retriable_llm_error(exc):
+            retriable = is_retriable_llm_error(exc)
+            final = attempt >= max_attempts - 1 or not retriable
+            stats = getattr(exc, "_auto_eval_stream_stats", {}) or {}
+            details = {
+                "模型": kwargs.get("model", ""),
+                "请求次数": f"{attempt + 1}/{max_attempts}",
+                "可重试": retriable,
+                "已接收chunk": stats.get("chunk数"),
+                "已接收字符": stats.get("输出字符"),
+                "耗时": f"{time.perf_counter() - call_started:.2f}秒",
+                **error_details(exc, include_traceback=final),
+            }
+            if final:
+                log_event(
+                    module,
+                    "流式调用最终失败",
+                    level=logging.ERROR,
+                    details=details,
+                    progress=100,
+                    progress_message=f"{module}：模型调用失败",
+                    progress_status="error",
+                )
                 raise
             cap = min(retry_max_s, retry_base_s * (2**attempt))
-            await asyncio.sleep(random.uniform(0.0, cap))
+            wait = random.uniform(0.0, cap)
+            details["等待"] = f"{wait:.2f}秒"
+            log_event(
+                module,
+                "调用失败，准备重试",
+                level=logging.WARNING,
+                details=details,
+                progress=40,
+                progress_message=f"{module}：调用失败，准备第{attempt + 2}次重试",
+            )
+            await asyncio.sleep(wait)
 
     assert last_exc is not None
     raise last_exc

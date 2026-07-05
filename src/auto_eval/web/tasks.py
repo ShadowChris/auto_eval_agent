@@ -18,6 +18,8 @@ class Task:
     options: dict
     status: str = "pending"  # pending | running | done | error
     results: list[dict] = field(default_factory=list)
+    item_progress: dict[str, dict] = field(default_factory=dict)
+    progress_events: dict[str, list[dict]] = field(default_factory=dict)
     summary: dict = field(default_factory=dict)
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     created_at: float = field(default_factory=time.time)
@@ -58,6 +60,8 @@ def get_task(task_id: str) -> Task | None:
         options=snapshot.get("options") or {},
         status=status,
         results=snapshot.get("results") or [],
+        item_progress=snapshot.get("item_progress") or {},
+        progress_events=snapshot.get("progress_events") or {},
         summary=snapshot.get("summary") or {},
         created_at=float(snapshot.get("created_at") or time.time()),
         done_total=int(snapshot.get("done_total") or len(snapshot.get("results") or [])),

@@ -10,6 +10,7 @@ from pathlib import Path
 from ..config import RubricDim
 from ..llm_stream import build_openai_client, stream_chat_completion
 from ..media import encode_frame
+from ..observability import bind_chain_context, log_event
 from ..schema import EvalItem, SingleScore
 
 logger = logging.getLogger("auto_eval.classify")
@@ -126,7 +127,11 @@ class RubricJudge:
                     stream_callback=None) -> SingleScore:
         prompt_context = resolve_prompt_context(item.context, self.evaluation_time)
         # 自动垂域分类：若未预标 → 兜底用当前裁判 model 分类（正常流程已在 ensure_classified 完成）
-        if (not item.category or item.category == "default") and self.skill_router:
+        if (
+            (not item.category or item.category == "default")
+            and self.skill_router
+            and not item.metadata.get("category_source")
+        ):
             label = await _classify(item, self.client.client, self.client.model, self.skill_router)
             if label:
                 item.category = label
@@ -344,27 +349,52 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
                 "\n可信背景条件（由评测样本提供，请作为意图判断前提）："
                 f"\n{item.context}"
             )
-        resp = await stream_chat_completion(
-            client,
-            {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": f"{query_text}\n\n标签："},
-                ],
-                "temperature": 0,
-                "max_tokens": 200,
-            },
-            total_timeout_s=15.0,
-            max_attempts=3,
-        )
+        with bind_chain_context(module="垂域分类", round=0):
+            log_event(
+                "垂域分类",
+                "开始",
+                details={"模型": model, "问题": item.question},
+                progress=10,
+                progress_message="正在进行垂域分类",
+            )
+            resp = await stream_chat_completion(
+                client,
+                {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": f"{query_text}\n\n标签："},
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 200,
+                },
+                total_timeout_s=15.0,
+                max_attempts=3,
+            )
         text = (resp.choices[0].message.content or "").strip()
         result = _normalize_label(text, labels, fallback)
         if result:
             logger.info("classify ok: id=%s raw=%r -> skill=%s", item.id, text, result)
         else:
             logger.info("classify fallback: id=%s raw=%r -> default", item.id, text)
+        with bind_chain_context(module="垂域分类", round=0):
+            log_event(
+                "垂域分类",
+                "成功",
+                details={"模型输出": text, "分类": result or "通用"},
+                progress=20,
+                progress_message=f"垂域分类完成：{result or '通用'}",
+            )
         return result
-    except Exception:
+    except Exception as exc:
         logger.exception("classify failed: id=%s", item.id)
+        with bind_chain_context(module="垂域分类", round=0):
+            log_event(
+                "垂域分类",
+                "失败，回退通用分类",
+                level=logging.ERROR,
+                details={"错误类型": type(exc).__name__, "错误": str(exc)},
+                progress=20,
+                progress_message="垂域分类失败，已回退通用分类",
+            )
         return None

@@ -6,8 +6,11 @@ XLSX 直接生成 OOXML，避免给项目额外引入 openpyxl / xlsxwriter 依�
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import time
+import uuid
 import zipfile
 from datetime import datetime
 from html import escape
@@ -19,6 +22,7 @@ from ..paths import RUNS_DIR
 
 
 HISTORY_DIR = RUNS_DIR / "web_history"
+logger = logging.getLogger(__name__)
 
 
 def _task_path(task_id: str) -> Path:
@@ -34,6 +38,8 @@ def task_to_snapshot(task) -> dict:
         "options": task.options,
         "status": task.status,
         "results": task.results,
+        "item_progress": task.item_progress,
+        "progress_events": task.progress_events,
         "summary": task.summary,
         "created_at": task.created_at,
         "updated_at": time.time(),
@@ -42,12 +48,39 @@ def task_to_snapshot(task) -> dict:
     }
 
 
-def save_task(task) -> None:
+def save_task(task, *, max_attempts: int = 3) -> bool:
+    """Best-effort atomic snapshot save.
+
+    Snapshot persistence must never terminate an evaluation.  A unique
+    temporary file avoids concurrent writers sharing the same ``.tmp`` path;
+    short retries cover transient Windows file locks.
+    """
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     path = _task_path(task.id)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(task_to_snapshot(task), ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    content = json.dumps(task_to_snapshot(task), ensure_ascii=False, indent=2)
+    last_error: OSError | None = None
+    attempts = max(1, max_attempts)
+    for attempt in range(attempts):
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            os.replace(tmp, path)
+            return True
+        except OSError as exc:
+            last_error = exc
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if attempt + 1 < attempts:
+                time.sleep(0.02 * (attempt + 1))
+    logger.error(
+        "保存任务快照失败: task_id=%s attempts=%s error=%s",
+        getattr(task, "id", "-"),
+        attempts,
+        last_error,
+    )
+    return False
 
 
 def load_snapshot(task_id: str) -> dict | None:
@@ -115,6 +148,8 @@ def snapshot_payload(data: dict) -> dict:
         "options": data.get("options") or {},
         "status": data.get("status"),
         "results": data.get("results") or [],
+        "item_progress": data.get("item_progress") or {},
+        "progress_events": data.get("progress_events") or {},
         "summary": data.get("summary") or {},
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
