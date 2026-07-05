@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 
 from jinja2 import Template
 
@@ -23,6 +24,21 @@ PERSONAS: dict[str, str] = {
 
 def persona_text(persona: str | None) -> str:
     return PERSONAS.get(persona or "", PERSONAS["balanced"])
+
+
+def resolve_prompt_context(
+    context: str | None,
+    evaluation_time: datetime | None = None,
+) -> str:
+    """返回裁判实际使用的可信背景，不改写评测样本本身。"""
+    if context and context.strip():
+        return context.strip()
+    now = evaluation_time or datetime.now().astimezone()
+    if now.tzinfo is None:
+        now = now.astimezone()
+    offset = now.strftime("%z")
+    timezone = f"UTC{offset[:3]}:{offset[3:]}" if offset else (now.tzname() or "本地时区")
+    return f"当前时间：{now:%Y年%m月%d日 %H:%M:%S}（时区：{timezone}）"
 
 
 RUBRIC_SYSTEM = Template(
@@ -110,9 +126,7 @@ RUBRIC_SYSTEM = Template(
 )
 
 RUBRIC_USER = Template(
-    """当前日期：{{ current_date }}（请据此理解『现在/最新/在售/当前/今年』等时新表述，搜索时使用当前及近期时间，不要用过时年份）。
-
-题目：
+    """题目：
 {{ question }}
 {% if context %}
 可信背景条件（由评测样本提供，请作为题目前提；不要忽略、改写或质疑）：
@@ -158,9 +172,7 @@ OPERATION_SYSTEM = Template(
 )
 
 OPERATION_USER = Template(
-    """当前日期：{{ current_date }}。
-
-操作意图（query）：
+    """操作意图（query）：
 {{ question }}
 {% if context %}
 可信背景条件（由评测样本提供，请作为操作意图的前提；不要忽略、改写或质疑）：
@@ -229,9 +241,7 @@ RUBRIC_COMPARE_SYSTEM = Template(
 )
 
 RUBRIC_COMPARE_USER = Template(
-    """当前日期：{{ current_date }}（请据此理解『现在/最新/在售/当前/今年』等时新表述，搜索时使用当前及近期时间，不要用过时年份）。
-
-题目：
+    """题目：
 {{ question }}
 {% if context %}
 可信背景条件（由评测样本提供，请作为题目前提；不要忽略、改写或质疑）：
@@ -299,9 +309,7 @@ RUBRIC_PROCESS_SYSTEM = Template(
 )
 
 RUBRIC_PROCESS_USER = Template(
-    """当前日期：{{ current_date }}（请据此理解『现在/最新/在售/当前/今年』等时新表述，搜索时使用当前及近期时间，不要用过时年份）。
-
-题目：
+    """题目：
 {{ question }}
 {% if context %}
 可信背景条件（由评测样本提供，请作为题目前提；不要忽略、改写或质疑）：

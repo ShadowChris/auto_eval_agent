@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,7 +7,12 @@ import pytest
 
 from auto_eval.config import load_config
 from auto_eval.dataset import to_prompt
-from auto_eval.judges.prompts import OPERATION_USER, PAIRWISE_USER, RUBRIC_USER
+from auto_eval.judges.prompts import (
+    OPERATION_USER,
+    PAIRWISE_USER,
+    RUBRIC_USER,
+    resolve_prompt_context,
+)
 from auto_eval.judges.rubric_judge import _classify
 from auto_eval.judges.skill_router import SkillRouter
 from auto_eval.schema import EvalItem
@@ -88,6 +94,35 @@ def test_context_reaches_model_and_judge_prompts_as_trusted_background():
     assert ISOLATION_RULE in rubric
     assert "隔离的信息区" in pairwise
     assert "隔离的信息区" in operation
+
+
+def test_explicit_context_replaces_default_evaluation_time():
+    frozen = datetime(2026, 7, 4, 23, 40, 12, tzinfo=timezone(timedelta(hours=8)))
+    context = "当前时间：2024年1月1日"
+
+    resolved = resolve_prompt_context(context, frozen)
+    prompt = RUBRIC_USER.render(
+        question="今天是星期几？", context=resolved, model_name="answer", answer="星期一"
+    )
+
+    assert resolved == context
+    assert "2024年1月1日" in prompt
+    assert "2026年07月04日" not in prompt
+    assert "当前日期：" not in prompt
+
+
+@pytest.mark.parametrize("context", [None, "", "   "])
+def test_empty_context_falls_back_to_frozen_evaluation_time(context):
+    frozen = datetime(2026, 7, 4, 23, 40, 12, tzinfo=timezone(timedelta(hours=8)))
+
+    resolved = resolve_prompt_context(context, frozen)
+    prompt = RUBRIC_USER.render(
+        question="今天是星期几？", context=resolved, model_name="answer", answer="星期六"
+    )
+
+    assert resolved == "当前时间：2026年07月04日 23:40:12（时区：UTC+08:00）"
+    assert resolved in prompt
+    assert TRUSTED_LABEL in prompt
 
 
 @pytest.mark.asyncio

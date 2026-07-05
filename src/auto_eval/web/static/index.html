@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20260705_progress_log">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -119,6 +119,70 @@
   <section>
     <button class="primary" @click="submit" :disabled="running || !canSubmit">▶ 开始评估</button>
     <span v-if="running" class="running">评估中… {{ progress }}/{{ total }}</span>
+    <p v-if="runError" class="run-error">{{ runError }}</p>
+  </section>
+
+  <section v-if="running || Object.keys(itemProgress).length" class="live-progress">
+    <h2>逐题运行进度</h2>
+    <div class="result-table-wrap">
+      <table class="grid progress-table">
+        <thead>
+          <tr><th>#</th><th>Query</th><th>当前状态</th><th>耗时</th><th>请求 ID</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in progressRows" :key="'progress-'+row.index" :class="{'progress-error':row.status==='error'}">
+            <td class="progress-index">
+              <strong>{{ row.index + 1 }}</strong>
+              <small>{{ row.itemId }}</small>
+            </td>
+            <td class="progress-query" :title="row.query">
+              <div class="progress-query-text">{{ row.query }}</div>
+            </td>
+            <td class="progress-status-cell">
+              <div class="progress-status-line">
+                <span class="status-badge" :class="progressStatusClass(row)">
+                  <span class="status-dot"></span>{{ progressStageLabel(row) }}
+                </span>
+                <span v-if="progressMeta(row)" class="progress-meta">{{ progressMeta(row) }}</span>
+                <details v-if="row.events.length > 2" class="progress-log-details" @toggle="scrollProgressLog">
+                  <summary>日志 {{ row.events.length }}</summary>
+                  <div class="progress-log-scroll">
+                    <div
+                      v-for="event in row.events"
+                      :key="event._key"
+                      class="progress-log-line"
+                      :class="'log-'+(event.level || 'info')"
+                    >
+                      <time>{{ formatProgressEventTime(event.updated_at) }}</time>
+                      <span class="progress-log-meta">{{ progressEventMeta(event) }}</span>
+                      <span class="progress-log-message">{{ event.message }}</span>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              <div v-if="row.latestEvents.length" class="progress-log-preview">
+                <div
+                  v-for="event in row.latestEvents"
+                  :key="'latest-'+event._key"
+                  class="progress-log-line"
+                  :class="'log-'+(event.level || 'info')"
+                >
+                  <time>{{ formatProgressEventTime(event.updated_at) }}</time>
+                  <span class="progress-log-meta">{{ progressEventMeta(event) }}</span>
+                  <span class="progress-log-message">{{ event.message }}</span>
+                </div>
+              </div>
+              <div v-else class="progress-message" :title="row.message">{{ row.message }}</div>
+            </td>
+            <td class="progress-elapsed">{{ formatProgressElapsed(row.elapsedSeconds, row.status) }}</td>
+            <td class="progress-request-id" :title="row.requestId || '等待生成'">
+              <span>{{ shortRequestId(row.requestId) }}</span>
+              <button v-if="row.requestId" class="copy-id" title="复制完整请求 ID" @click="copyRequestId(row.requestId)">复制</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </section>
 
   <section v-if="results.length || summary">
@@ -249,6 +313,6 @@
   </section>
 </div>
 
-<script type="module" src="/static/app.js?v=20260703_context"></script>
+  <script type="module" src="/static/app.js?v=20260705_progress_log"></script>
 </body>
 </html>

@@ -5,16 +5,25 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from ..schema import EvalItem, SingleScore
 from .base import JudgeClient
-from .prompts import ARBITRATOR_SYSTEM, ARBITRATOR_USER, parse_analysis, parse_json_loose
+from .prompts import (
+    ARBITRATOR_SYSTEM,
+    ARBITRATOR_USER,
+    parse_analysis,
+    parse_json_loose,
+    resolve_prompt_context,
+)
 
 _VALID = {"right", "wrong", "partial", "unclear"}
 
 
 class Arbitrator:
-    def __init__(self, client: JudgeClient):
+    def __init__(self, client: JudgeClient, evaluation_time: datetime | None = None):
         self.client = client
+        self.evaluation_time = evaluation_time
 
     async def arbitrate(self, item: EvalItem, answer: str, single_scores: list[SingleScore]) -> dict:
         system = ARBITRATOR_SYSTEM.render()
@@ -29,7 +38,10 @@ class Arbitrator:
             for s in single_scores
         ]
         user = ARBITRATOR_USER.render(
-            question=item.question, context=item.context, answer=answer, judges=judges_summary
+            question=item.question,
+            context=resolve_prompt_context(item.context, self.evaluation_time),
+            answer=answer,
+            judges=judges_summary,
         )
         reply = await self.client.complete(system, user)
         data = parse_json_loose(reply.content)

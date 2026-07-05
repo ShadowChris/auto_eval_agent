@@ -1,17 +1,16 @@
 """Rubric 盲打分裁判：意图理解 + 理想锚定 + 多角度分析的深度盲评（可联网）。"""
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from datetime import datetime
 
-from openai import AsyncOpenAI
-
 from pathlib import Path
 
 from ..config import RubricDim
+from ..llm_stream import build_openai_client, stream_chat_completion
 from ..media import encode_frame
+from ..observability import bind_chain_context, log_event
 from ..schema import EvalItem, SingleScore
 
 logger = logging.getLogger("auto_eval.classify")
@@ -27,6 +26,7 @@ from .prompts import (
     RUBRIC_USER,
     parse_analysis,
     parse_json_loose,
+    resolve_prompt_context,
 )
 
 _VALID = {"right", "wrong", "partial", "unclear"}
@@ -86,8 +86,14 @@ async def ensure_classified(item: EvalItem, skill_router, *,
     """
     if item.category and item.category != "default":
         return  # 已分类（dataset 预标 或 已跑过）
+    client = None
     try:
-        client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        client = build_openai_client(
+            base_url=base_url,
+            api_key=api_key,
+            connect_timeout_s=min(10.0, timeout),
+            read_timeout_s=timeout,
+        )
         result = await _classify(item, client, model, skill_router)
         if result:
             item.category = result
@@ -97,21 +103,35 @@ async def ensure_classified(item: EvalItem, skill_router, *,
     except Exception:
         logger.exception("classify failed, falling back to default: id=%s", item.id)
         item.metadata.setdefault("category_source", "fallback_default")
+    finally:
+        if client is not None:
+            await client.close()
 
 
 class RubricJudge:
-    def __init__(self, client: JudgeClient, dims: list[RubricDim], skill_router=None):
+    def __init__(
+        self,
+        client: JudgeClient,
+        dims: list[RubricDim],
+        skill_router=None,
+        evaluation_time: datetime | None = None,
+    ):
         self.client = client
         self.dims = dims
         self.scale = dims[0].scale if dims else 5
         self.skill_router = skill_router
+        self.evaluation_time = evaluation_time
 
     async def score(self, item: EvalItem, model_name: str, answer: str, run_idx: int = 0,
                     eval_mode: str = "result", process_dims=None, competitor: str | None = None,
                     stream_callback=None) -> SingleScore:
-        today = datetime.now().strftime("%Y年%m月%d日")
+        prompt_context = resolve_prompt_context(item.context, self.evaluation_time)
         # 自动垂域分类：若未预标 → 兜底用当前裁判 model 分类（正常流程已在 ensure_classified 完成）
-        if not item.category or item.category == "default":
+        if (
+            (not item.category or item.category == "default")
+            and self.skill_router
+            and not item.metadata.get("category_source")
+        ):
             label = await _classify(item, self.client.client, self.client.model, self.skill_router)
             if label:
                 item.category = label
@@ -134,7 +154,7 @@ class RubricJudge:
                 scale=dims[0].scale if dims else 5,
             )
             user = OPERATION_USER.render(
-                question=item.question, context=item.context, current_date=today
+                question=item.question, context=prompt_context
             )
             frames = item.metadata.get("frames") or []
             user_images = [encode_frame(Path(p)) for p in frames] if frames else None
@@ -145,7 +165,7 @@ class RubricJudge:
                 persona=self.client.persona, scale=dims[0].scale if dims else 5, dims=dims, skill_rules=skill_rules
             )
             user = RUBRIC_PROCESS_USER.render(
-                question=item.question, context=item.context, answer=answer, trace=item.trace, current_date=today
+                question=item.question, context=prompt_context, answer=answer, trace=item.trace
             )
         elif is_product_compare:
             dims = skill_dims or self.dims  # 产品专家：待评 vs 竞品 对比盲评
@@ -153,8 +173,8 @@ class RubricJudge:
                 persona=self.client.persona, scale=self.scale, dims=dims, skill_rules=skill_rules
             )
             user = RUBRIC_COMPARE_USER.render(
-                question=item.question, context=item.context, model_name=model_name, answer=answer,
-                competitor=competitor, current_date=today
+                question=item.question, context=prompt_context, model_name=model_name, answer=answer,
+                competitor=competitor
             )
         else:
             dims = skill_dims or self.dims  # 垂域 skill 维度优先
@@ -162,11 +182,19 @@ class RubricJudge:
                 persona=self.client.persona, scale=self.scale, dims=dims, skill_rules=skill_rules
             )
             user = RUBRIC_USER.render(
-                question=item.question, context=item.context, model_name=model_name, answer=answer, current_date=today
+                question=item.question, context=prompt_context, model_name=model_name, answer=answer
             )
         t0 = time.perf_counter()
-        reply = await self.client.complete(system, user, stream_callback=stream_callback,
-                                           user_images=user_images, user_image_refs=user_image_refs)
+        if stream_callback is None and user_images is None and user_image_refs is None:
+            reply = await self.client.complete(system, user)
+        else:
+            reply = await self.client.complete(
+                system,
+                user,
+                stream_callback=stream_callback,
+                user_images=user_images,
+                user_image_refs=user_image_refs,
+            )
         latency = int((time.perf_counter() - t0) * 1000)
 
         analysis = parse_analysis(reply.content)
@@ -313,49 +341,60 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
         "对比例子：\n" + "\n".join(fewshot_lines) + "\n\n"
         "在心中完成意图判断后，只输出标签本身，不输出解释、标点或 JSON。"
     )
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        try:
-            logger.info("classify start: id=%s query=%.120s", item.id, item.question)
-            query_text = f"查询：{item.question}"
-            if item.context:
-                query_text += (
-                    "\n可信背景条件（由评测样本提供，请作为意图判断前提）："
-                    f"\n{item.context}"
-                )
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": f"{query_text}\n\n标签："},
-                ],
-                temperature=0,
-                max_tokens=200,
-                timeout=15.0,  # 轻量分类，15 秒足够
+    try:
+        logger.info("classify start: id=%s query=%.120s", item.id, item.question)
+        query_text = f"查询：{item.question}"
+        if item.context:
+            query_text += (
+                "\n可信背景条件（由评测样本提供，请作为意图判断前提）："
+                f"\n{item.context}"
             )
-            # 防护：API 可能返回空 choices（并发/限流等场景）
-            if not resp or not resp.choices:
-                logger.warning("classify empty response: id=%s attempt=%d", item.id, attempt + 1)
-                if attempt < max_attempts - 1:
-                    await asyncio.sleep(min(20.0, 2 ** attempt))  # 指数退避，上限 20s
-                    continue
-                return None
-            text = (resp.choices[0].message.content or "").strip()
-            result = _normalize_label(text, labels, fallback)
-            if result:
-                logger.info("classify ok: id=%s raw=%r -> skill=%s", item.id, text, result)
-            else:
-                logger.info("classify fallback: id=%s raw=%r -> default", item.id, text)
-            return result
-        except Exception as e:
-            msg = f"{type(e).__name__}: {e}"
-            retriable = any(
-                k in msg
-                for k in ("RateLimit", "Overload", "429", "Timeout", "Connection", "ServiceUnavailable")
+        with bind_chain_context(module="垂域分类", round=0):
+            log_event(
+                "垂域分类",
+                "开始",
+                details={"模型": model, "问题": item.question},
+                progress=10,
+                progress_message="正在进行垂域分类",
             )
-            if retriable and attempt < max_attempts - 1:
-                logger.warning("classify retriable error: id=%s attempt=%d %s", item.id, attempt + 1, msg)
-                await asyncio.sleep(min(20.0, 2 ** attempt))
-                continue
-            logger.exception("classify failed: id=%s", item.id)
-            return None
+            resp = await stream_chat_completion(
+                client,
+                {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": f"{query_text}\n\n标签："},
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 200,
+                },
+                total_timeout_s=15.0,
+                max_attempts=3,
+            )
+        text = (resp.choices[0].message.content or "").strip()
+        result = _normalize_label(text, labels, fallback)
+        if result:
+            logger.info("classify ok: id=%s raw=%r -> skill=%s", item.id, text, result)
+        else:
+            logger.info("classify fallback: id=%s raw=%r -> default", item.id, text)
+        with bind_chain_context(module="垂域分类", round=0):
+            log_event(
+                "垂域分类",
+                "成功",
+                details={"模型输出": text, "分类": result or "通用"},
+                progress=20,
+                progress_message=f"垂域分类完成：{result or '通用'}",
+            )
+        return result
+    except Exception as exc:
+        logger.exception("classify failed: id=%s", item.id)
+        with bind_chain_context(module="垂域分类", round=0):
+            log_event(
+                "垂域分类",
+                "失败，回退通用分类",
+                level=logging.ERROR,
+                details={"错误类型": type(exc).__name__, "错误": str(exc)},
+                progress=20,
+                progress_message="垂域分类失败，已回退通用分类",
+            )
+        return None

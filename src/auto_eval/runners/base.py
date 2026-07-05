@@ -14,6 +14,8 @@ from ..schema import ModelOutput
 
 
 class BaseRunner(abc.ABC):
+    handles_retries = False
+
     def __init__(self, cfg: ModelConfig):
         self.cfg = cfg
         self.name = cfg.name

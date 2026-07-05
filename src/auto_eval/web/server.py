@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -55,6 +56,34 @@ class EvalReq(BaseModel):
     options: dict = {}
 
 
+def _validate_eval_request(req: EvalReq, app_cfg) -> None:
+    """Reject requests for which every selected judge would be skipped."""
+    selected = req.options.get("judges") or (
+        [app_cfg.judges[0].name] if app_cfg.judges else []
+    )
+    selected_judges = [judge for judge in app_cfg.judges if judge.name in selected]
+    if not selected_judges:
+        selected_judges = app_cfg.judges[:1]
+    if req.mode not in ("single", "process") or not selected_judges:
+        return
+    if not all(judge.persona == "product_expert" for judge in selected_judges):
+        return
+    missing = [
+        index + 1
+        for index, item in enumerate(req.items)
+        if not str(item.get("competitor") or "").strip()
+    ]
+    if missing:
+        preview = "、".join(map(str, missing[:8]))
+        suffix = "…" if len(missing) > 8 else ""
+        raise HTTPException(
+            422,
+            "产品专家需要竞品答案；当前没有其他可用裁判，"
+            f"第 {preview}{suffix} 条缺少 competitor。"
+            "请补充竞品答案，或同时选择研发人员/终端用户。",
+        )
+
+
 def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -88,14 +117,14 @@ def api_parse(req: ParseReq):
 async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
+    app_cfg = cfg()
+    _validate_eval_request(req, app_cfg)
     task = new_task(req.mode, req.items, req.options)
-    import asyncio
-
     async def _start_later():
         # 先把 task_id 响应给前端，再启动可能较重的评估任务；
         # 避免后台裁判/工具调用抢占事件循环，导致 /api/eval 本身迟迟不返回。
         await asyncio.sleep(0.05)
-        await run_eval(task, cfg())
+        await run_eval(task, app_cfg)
 
     asyncio.create_task(_start_later())
     return {"task_id": task.id}
@@ -131,8 +160,22 @@ async def api_stream(task_id: str):
         raise HTTPException(404, "task not found")
 
     async def event_gen():
+        # 清掉连接建立前已进入队列的快照类事件；下面统一回放最新状态，
+        # 避免先回放 60% 后又消费旧队列事件退回到 10%。
+        while True:
+            try:
+                task.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # 回放有界事件历史，供 Web 展示与文件日志同源的逐行调用记录。
+        for item_events in list(task.progress_events.values()):
+            for progress_event in item_events:
+                yield _sse("progress_event", progress_event)
+        # 回放每题最新进度，断线重连后能立即恢复当前阶段。
+        for progress_item in list(task.item_progress.values()):
+            yield _sse("item_progress", progress_item)
         # 先回放已有结果（断线重连不丢已完成的）
-        for r in task.results:
+        for r in list(task.results):
             yield _sse("result", {"progress": task.done_total, "total": len(task.items), "result": r})
         if task.status == "done":
             yield _sse("done", {"summary": task.summary, "total": len(task.items)})

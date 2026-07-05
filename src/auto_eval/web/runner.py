@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 import traceback
@@ -19,10 +20,43 @@ from ..judges import (Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, Skill
                         ensure_classified)
 from ..judges.ensemble import aggregate_pairs, aggregate_scores
 from ..meta import ground_truth
+from ..observability import (
+    bind_chain_context,
+    error_details,
+    log_event,
+    make_request_id,
+)
 from ..runners import build_runner
 from ..schema import EvalItem
 from .history import save_task
 from .tasks import Task
+
+
+logger = logging.getLogger(__name__)
+MAX_PROGRESS_EVENTS_PER_ITEM = 100
+
+
+def _persist_task(task: Task) -> bool:
+    """Persist without allowing history I/O to break the evaluation/SSE."""
+    try:
+        return bool(save_task(task))
+    except Exception:
+        logger.exception("unexpected task snapshot failure: task_id=%s", task.id)
+        return False
+
+
+def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
+    """Store one bounded Web projection of the same structured log event."""
+    key = str(item_index)
+    events = task.progress_events.setdefault(key, [])
+    sequence = int(events[-1].get("sequence", 0)) + 1 if events else 1
+    event_payload = {**payload, "sequence": sequence}
+    events.append(event_payload)
+    if len(events) > MAX_PROGRESS_EVENTS_PER_ITEM:
+        del events[:-MAX_PROGRESS_EVENTS_PER_ITEM]
+    task.item_progress[key] = event_payload
+    task.queue.put_nowait({"event": "item_progress", "data": event_payload})
+    return event_payload
 
 
 def _to_evalitem(item: dict, idx: int) -> EvalItem:
@@ -45,31 +79,35 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
 async def run_eval(task: Task, cfg: AppConfig) -> None:
     await task.publish("start", {"total": len(task.items), "mode": task.mode})
     task.status = "running"
-    save_task(task)
+    _persist_task(task)
     try:
         await _run(task, cfg)
         task.summary = _summarize(task, cfg)
         task.status = "done"
-        save_task(task)
         await task.publish("done", {"summary": task.summary, "total": len(task.items)})
+        _persist_task(task)
     except Exception as e:
         task.status = "error"
         task.error = f"{type(e).__name__}: {e}"
-        save_task(task)
         await task.publish("error", {"message": task.error})
+        _persist_task(task)
 
 
 async def _run(task: Task, cfg: AppConfig) -> None:
     selected = task.options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
+    evaluation_time = datetime.fromtimestamp(task.created_at).astimezone()
     _providers = cfg.eval_options.effective_providers()
     clients = [
         JudgeClient(j, _providers, cfg.eval_options.search_topk)
         for j in judges_cfg
     ]
     skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
-    rubrics = [RubricJudge(c, cfg.rubrics, skill_router) for c in clients]
-    pair_judges = [PairwiseJudge(c) for c in clients]
+    rubrics = [
+        RubricJudge(c, cfg.rubrics, skill_router, evaluation_time=evaluation_time)
+        for c in clients
+    ]
+    pair_judges = [PairwiseJudge(c, evaluation_time=evaluation_time) for c in clients]
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     sem = asyncio.Semaphore(int(task.options.get("concurrency", 4)))
     eval_timeout = float(task.options.get("eval_timeout_s") or task.options.get("eval_timeout") or 300.0)
@@ -80,46 +118,120 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         mc = next((m for m in cfg.models if m.name == model_name), cfg.models[0])
         online_runner = build_runner(mc)
     process_dims = cfg.process_rubrics
-    arbitrator = Arbitrator(clients[0]) if len(judges_cfg) >= 2 else None
+    arbitrator = (
+        Arbitrator(clients[0], evaluation_time=evaluation_time)
+        if len(judges_cfg) >= 2
+        else None
+    )
+    loop = asyncio.get_running_loop()
 
     async def one(idx: int, item_dict: dict):
-        async with sem:
-            last_error = None
-            res = None
-            for attempt in range(2):
-                try:
-                    res = await asyncio.wait_for(
-                        _eval_one(
-                            task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
-                            online_runner, process_dims, arbitrator, task=task
-                        ),
-                        timeout=eval_timeout,
-                    )
-                    break
-                except asyncio.TimeoutError:
-                    last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
-                    break
-                except Exception as e:
-                    last_error = e
-                    if attempt == 0:
-                        await asyncio.sleep(1.0)
-            if res is None:
-                res = {
-                    "index": idx,
-                    "query": item_dict.get("query", ""),
-                    "error": f"{type(last_error).__name__}: {last_error}",
-                }
-                if item_dict.get("context"):
-                    res["context"] = item_dict["context"]
-                _write_eval_error(task.id, idx, item_dict, last_error)
-        res["index"] = idx
-        task.results.append(res)
-        task.done_total += 1
-        save_task(task)
-        await task.publish(
-            "result",
-            {"progress": task.done_total, "total": len(task.items), "result": res},
-        )
+        request_id = make_request_id(task.created_at, task.id, idx)
+
+        def publish_progress(payload: dict) -> None:
+            def apply() -> None:
+                _record_progress(task, idx, payload)
+            try:
+                if asyncio.get_running_loop() is loop:
+                    apply()
+                else:
+                    loop.call_soon_threadsafe(apply)
+            except RuntimeError:
+                loop.call_soon_threadsafe(apply)
+
+        item_id = item_dict.get("id", f"q{idx}")
+        with bind_chain_context(
+            request_id=request_id,
+            item_id=item_id,
+            item_index=idx,
+            progress_callback=publish_progress,
+        ):
+            started = time.perf_counter()
+            log_event(
+                "任务",
+                "开始",
+                details={
+                    "问题": item_dict.get("query", ""),
+                    "模式": task.mode,
+                    "裁判": ",".join(j.display or j.name for j in judges_cfg),
+                },
+                progress=0,
+                progress_message="排队等待评测",
+            )
+            async with sem:
+                last_error = None
+                res = None
+                for attempt in range(2):
+                    try:
+                        if attempt:
+                            log_event(
+                                "单题评测",
+                                "开始外层重试",
+                                level=logging.WARNING,
+                                details={"请求次数": f"{attempt + 1}/2"},
+                                progress=15,
+                                progress_message="正在重新执行单题评测",
+                            )
+                        res = await asyncio.wait_for(
+                            _eval_one(
+                                task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
+                                online_runner, process_dims, arbitrator, task=task
+                            ),
+                            timeout=eval_timeout,
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
+                        log_event(
+                            "单题评测",
+                            "超时",
+                            level=logging.ERROR,
+                            details=error_details(last_error),
+                        )
+                        break
+                    except Exception as e:
+                        last_error = e
+                        log_event(
+                            "单题评测",
+                            "失败，准备重试" if attempt == 0 else "最终失败",
+                            level=logging.WARNING if attempt == 0 else logging.ERROR,
+                            details={"请求次数": f"{attempt + 1}/2", **error_details(e)},
+                        )
+                        if attempt == 0:
+                            await asyncio.sleep(1.0)
+                if res is None:
+                    res = {
+                        "index": idx,
+                        "query": item_dict.get("query", ""),
+                        "error": f"{type(last_error).__name__}: {last_error}",
+                    }
+                    if item_dict.get("context"):
+                        res["context"] = item_dict["context"]
+                    _write_eval_error(task.id, idx, item_dict, last_error)
+            res["index"] = idx
+            task.results.append(res)
+            task.done_total += 1
+            failed = bool(res.get("error"))
+            log_event(
+                "任务",
+                "完成",
+                level=logging.ERROR if failed else logging.INFO,
+                details={
+                    "状态": "失败" if failed else "成功",
+                    "判定": res.get("correctness") or res.get("winner"),
+                    "得分": res.get("total"),
+                    "总耗时": f"{time.perf_counter() - started:.2f}秒",
+                    "错误": res.get("error"),
+                },
+                progress=100,
+                progress_message="评测失败" if failed else "评测完成",
+                progress_status="error" if failed else "done",
+            )
+            await task.publish(
+                "result",
+                {"progress": task.done_total, "total": len(task.items), "result": res},
+            )
+            _persist_task(task)
 
     await asyncio.gather(*[one(i, it) for i, it in enumerate(task.items)])
 
@@ -188,17 +300,23 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
             # 产品专家缺竞品 → 跳过该裁判（不参与本题聚合）
             if r.client.cfg.persona == "product_expert" and not competitor:
                 return None
-            def on_token(token: str):
-                # 发送 SSE 事件到前端（task 由 _eval_one 参数传入）
-                if task is not None:
-                    asyncio.create_task(task.publish("token", {"token": token}))
-
             return await r.score(item, "answer", answer, eval_mode=eval_mode,
-                                    process_dims=process_dims, competitor=competitor, stream_callback=on_token)
+                                    process_dims=process_dims, competitor=competitor)
 
         raw = await asyncio.gather(*[_score(r) for r in rubrics])
         scores = [s for s in raw if s is not None]
         v = aggregate_scores(scores, dims, cfg.ensemble, cfg.ensemble.flag_low_agreement)
+        log_event(
+            "结果聚合",
+            "成功",
+            details={
+                "裁判数": len(scores),
+                "判定": v.correctness if v else None,
+                "得分": round(v.total, 2) if v else None,
+            },
+            progress=90,
+            progress_message="正在聚合裁判结果",
+        )
         # 多裁判分歧 → 主席仲裁（覆盖为主席最终结论）
         if v and v.low_agreement and len(scores) >= 2 and arbitrator:
             try:
@@ -250,6 +368,14 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
             if cfg.eval_options.pairwise_bidirectional:
                 pairs.append(await pj.compare_once(item, "A", aa, "B", ab, order="ba"))
         pr = aggregate_pairs(pairs, cfg.ensemble, cfg.ensemble.flag_low_agreement)
+        log_event(
+            "结果聚合",
+            "成功" if pr is not None else "失败",
+            level=logging.INFO if pr is not None else logging.ERROR,
+            details={"裁判结果数": len(pairs), "胜者": pr.winner if pr else None},
+            progress=90,
+            progress_message="正在聚合对比结果",
+        )
         if pr is None:
             out["error"] = "裁判无成对输出"
         else:
@@ -260,13 +386,21 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
             )
 
     else:  # online
-        mo = await online_runner.generate_strict(to_prompt(item), item_id=item.id)
+        with bind_chain_context(module="被测模型", round=0):
+            mo = await online_runner.generate_strict(to_prompt(item), item_id=item.id)
         out["generated_answer"] = mo.answer
         out["answer"] = mo.answer
         if mo.error:
             out["gen_error"] = mo.error
         scores = await asyncio.gather(*[r.score(item, "answer", mo.answer) for r in rubrics])
         v = aggregate_scores(list(scores), cfg.rubrics, cfg.ensemble, cfg.ensemble.flag_low_agreement)
+        log_event(
+            "结果聚合",
+            "成功",
+            details={"裁判数": len(scores), "判定": v.correctness if v else None},
+            progress=90,
+            progress_message="正在聚合裁判结果",
+        )
         _fill_verdict(out, v)
         _maybe_meta(out, item, mo.answer, v)
 

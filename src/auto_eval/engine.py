@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -43,6 +44,7 @@ class EvalEngine:
         self.ens = cfg.ensemble
         self.threshold = cfg.ensemble.flag_low_agreement
         self.on_progress = on_progress
+        self.evaluation_time = datetime.now().astimezone()
 
         self.verdicts_file = self.run_dir / "verdicts.jsonl"
         self.pairs_file = self.run_dir / "pairs.jsonl"
@@ -54,7 +56,10 @@ class EvalEngine:
             for j in cfg.judges
         ]
         self.skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
-        self.rubric_judges = [RubricJudge(c, cfg.rubrics, self.skill_router) for c in self.clients]
+        self.rubric_judges = [
+            RubricJudge(c, cfg.rubrics, self.skill_router, evaluation_time=self.evaluation_time)
+            for c in self.clients
+        ]
         # 轻量分类客户端配置：优先 eval_options，回落第一个裁判的 base_url / api_key
         self._classify_model = cfg.eval_options.classify_model
         self._classify_base_url = cfg.eval_options.classify_base_url or (
@@ -67,7 +72,9 @@ class EvalEngine:
         )
         _judge_key = _first_judge.api_key() if _first_judge else None
         self._classify_api_key = _env_key or _judge_key or "EMPTY"  # 绝不为 None
-        self.pairwise_judges = [PairwiseJudge(c) for c in self.clients]
+        self.pairwise_judges = [
+            PairwiseJudge(c, evaluation_time=self.evaluation_time) for c in self.clients
+        ]
         self.limiters = {j.name: RateLimiter(j.concurrency) for j in cfg.judges}
         self.global_sem = asyncio.Semaphore(global_concurrency)
         self.scale = cfg.rubrics[0].scale if cfg.rubrics else 5
@@ -112,7 +119,7 @@ class EvalEngine:
         return v
 
     async def _arbitrate(self, item: EvalItem, answer: str, v: Verdict, scores: list) -> Verdict:
-        arbitrator = Arbitrator(self.clients[0])
+        arbitrator = Arbitrator(self.clients[0], evaluation_time=self.evaluation_time)
         try:
             arb = await arbitrator.arbitrate(item, answer, scores)
         except Exception:
