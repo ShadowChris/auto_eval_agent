@@ -18,6 +18,23 @@ class StreamProtocolError(RuntimeError):
     """流正常关闭，但没有返回可用的 choice。"""
 
 
+class ProviderStreamError(RuntimeError):
+    """HTTP 连接正常，但流式 chunk 通过 error 字段报告服务端错误。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        body: Any,
+        status_code: int | None = None,
+        retriable: bool = False,
+    ):
+        super().__init__(message)
+        self.body = body
+        self.status_code = status_code
+        self.retriable = retriable
+
+
 @dataclass
 class AggregatedFunction:
     name: str
@@ -85,6 +102,8 @@ def _status_code(exc: BaseException) -> int | None:
 
 def is_retriable_llm_error(exc: BaseException) -> bool:
     """只重试瞬时错误，避免对鉴权和参数错误反复请求。"""
+    if isinstance(exc, ProviderStreamError):
+        return exc.retriable
     if isinstance(
         exc,
         (
@@ -103,6 +122,58 @@ def is_retriable_llm_error(exc: BaseException) -> bool:
     if isinstance(exc, APIStatusError):
         return _status_code(exc) in {408, 409, 429, 500, 502, 503, 504}
     return False
+
+
+def _error_value(error: Any, key: str) -> Any:
+    if isinstance(error, dict):
+        return error.get(key)
+    return getattr(error, key, None)
+
+
+def _provider_stream_error(error: Any) -> ProviderStreamError:
+    """兼容 error 为字符串、dict 或 SDK 动态对象的网关响应。"""
+    message = _error_value(error, "message") or _error_value(error, "detail")
+    code = _error_value(error, "code")
+    error_type = _error_value(error, "type")
+    status = (
+        _error_value(error, "status_code")
+        or _error_value(error, "status")
+        or _error_value(error, "http_status")
+    )
+    try:
+        status_code = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+
+    if not message:
+        message = str(error)
+    signal = " ".join(str(v) for v in (code, error_type, message) if v).lower()
+    retriable = (
+        status_code in {408, 409, 429, 500, 502, 503, 504}
+        or any(
+            marker in signal
+            for marker in (
+                "aborted",
+                "timeout",
+                "rate_limit",
+                "rate limit",
+                "too many requests",
+                "overloaded",
+                "server_error",
+                "service unavailable",
+                "temporarily unavailable",
+                "系统繁忙",
+                "请求过于频繁",
+                "限流",
+            )
+        )
+    )
+    return ProviderStreamError(
+        f"服务端流式错误：{message}",
+        body=error,
+        status_code=status_code,
+        retriable=retriable,
+    )
 
 
 def _rejects_stream_usage(exc: BaseException) -> bool:
@@ -137,6 +208,11 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             stats["chunk数"] += 1
             usage = getattr(chunk, "usage", None) or usage
             model = getattr(chunk, "model", None) or model
+            chunk_error = getattr(chunk, "error", None)
+            if chunk_error is None:
+                chunk_error = (getattr(chunk, "model_extra", None) or {}).get("error")
+            if chunk_error is not None:
+                raise _provider_stream_error(chunk_error)
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
@@ -190,9 +266,6 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             if hasattr(result, "__await__"):
                 await result
 
-    if not saw_choice:
-        raise StreamProtocolError("流式响应中没有有效 choice")
-
     tool_calls = [
         AggregatedToolCall(
             id=entry["id"],
@@ -203,6 +276,51 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
         )
         for _, entry in sorted(tool_chunks.items())
     ] or None
+    if not saw_choice:
+        error = StreamProtocolError("流式响应中没有有效 choice")
+        setattr(error, "_auto_eval_stream_stats", dict(stats))
+        raise error
+
+    normalized_finish_reason = str(finish_reason or "").strip().lower()
+    if normalized_finish_reason in {
+        "aborted",
+        "abort",
+        "cancelled",
+        "canceled",
+        "error",
+        "failed",
+        "server_error",
+    }:
+        error = ProviderStreamError(
+            f"服务端异常结束生成：finish_reason={finish_reason}",
+            body={"finish_reason": finish_reason},
+            retriable=True,
+        )
+        setattr(error, "_auto_eval_stream_stats", dict(stats))
+        raise error
+    if normalized_finish_reason in {
+        "blocked",
+        "content_filter",
+        "content_filtered",
+        "safety",
+        "prohibited_content",
+    }:
+        error = ProviderStreamError(
+            f"服务端阻断生成：finish_reason={finish_reason}",
+            body={"finish_reason": finish_reason},
+            retriable=False,
+        )
+        setattr(error, "_auto_eval_stream_stats", dict(stats))
+        raise error
+    if not content_chunks and not tool_calls:
+        error = ProviderStreamError(
+            f"服务端返回空响应：finish_reason={finish_reason or '空'}",
+            body={"finish_reason": finish_reason, "content": ""},
+            retriable=True,
+        )
+        setattr(error, "_auto_eval_stream_stats", dict(stats))
+        raise error
+
     response = AggregatedResponse(
         model=model,
         usage=usage,
@@ -337,7 +455,11 @@ async def stream_chat_completion(
             if final:
                 log_event(
                     module,
-                    "流式调用最终失败",
+                    (
+                        "服务端返回错误，停止重试"
+                        if isinstance(exc, ProviderStreamError)
+                        else "流式调用最终失败"
+                    ),
                     level=logging.ERROR,
                     details=details,
                     progress=100,
@@ -350,7 +472,11 @@ async def stream_chat_completion(
             details["等待"] = f"{wait:.2f}秒"
             log_event(
                 module,
-                "调用失败，准备重试",
+                (
+                    "服务端返回错误，准备重试"
+                    if isinstance(exc, ProviderStreamError)
+                    else "调用失败，准备重试"
+                ),
                 level=logging.WARNING,
                 details=details,
                 progress=40,
