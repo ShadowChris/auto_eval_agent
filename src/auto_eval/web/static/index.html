@@ -15,6 +15,9 @@
     .op-upload-btn { display:inline-block; padding:5px 12px; border:1px dashed #94a3b8; border-radius:6px; cursor:pointer; color:#475569; background:#fff; font-size:13px; }
     .op-upload-btn:hover { border-color:#3b82f6; color:#3b82f6; }
     .op-add { align-self:flex-start; padding:6px 14px; }
+    .op-import { border:1px solid #bfdbfe; background:#eff6ff; border-radius:8px; padding:12px; }
+    .op-import-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .op-path { font-size:12px; color:#64748b; overflow-wrap:anywhere; }
   </style>
 </head>
 <body>
@@ -53,10 +56,23 @@
     <p class="hint">{{ formatHint }}</p>
 
     <div v-if="mode==='operation'" class="op-cards">
+      <div class="op-import">
+        <div class="op-import-row">
+          <label class="op-upload-btn">
+            <input type="file" accept=".jsonl,application/json" @change="onOpManifestFile" hidden>
+            导入操作类 JSONL
+          </label>
+          <span v-if="opPreparing" class="running">正在校验视频并批量抽帧…</span>
+          <span v-else-if="items.length" class="ok">✓ 已准备 {{ items.length }} 条</span>
+          <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
+        </div>
+        <p class="hint">示例：{"id":"op_001","query":"设置7点闹钟","context":"当前时间22:00","video_path":"data/videos/alarm.mp4","agent_statement":"已设置完成"}</p>
+        <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
+      </div>
       <div v-for="(it,i) in opItems" :key="i" class="op-card"
            @dragover.prevent @drop="onOpDrop($event, i)">
         <div class="op-card-head">
-          <span class="op-idx">题目 {{ i+1 }}</span>
+          <span class="op-idx">题目 {{ i+1 }}<template v-if="it.id"> · {{ it.id }}</template></span>
           <button v-if="opItems.length>1" @click="removeOpItem(i)" class="btn-danger op-del">删除</button>
         </div>
         <textarea v-model="it.query" rows="2" placeholder="操作意图(query)，如：设一个明天早上7点的闹钟"></textarea>
@@ -67,9 +83,10 @@
             {{ it.videoName ? '更换视频' : '选择 / 拖拽上传录屏(mp4 ≤20MB)' }}
           </label>
           <span v-if="it.uploading" class="hint">抽帧中…</span>
-          <span v-if="it.videoName" class="ok">📹 {{ it.videoName }} · {{ it.frameCount }} 帧 ✓</span>
+          <span v-if="it.videoName" class="ok">📹 {{ it.videoName }} · {{ it.frameCount }} 帧<template v-if="it.duration"> · {{ it.duration }} 秒</template> ✓</span>
           <span v-if="it.uploadError" class="err">{{ it.uploadError }}</span>
         </div>
+        <div v-if="it.videoPath" class="op-path">{{ it.videoPath }}</div>
         <textarea v-model="it.answer" rows="1" placeholder="(可选) agent 自述，如「我已设好7点闹钟」—— 用于交叉验证是否只说不做"></textarea>
       </div>
       <button @click="addOpItem" class="op-add">+ 添加题目</button>
@@ -362,6 +379,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260705_progress_timer"></script>
+  <script type="module" src="/static/app.js?v=20260716_operation_jsonl"></script>
 </body>
 </html>

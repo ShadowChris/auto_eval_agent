@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -54,6 +56,90 @@ class EvalReq(BaseModel):
     mode: Mode
     items: list[dict]
     options: dict = {}
+
+
+class OperationPrepareReq(BaseModel):
+    items: list[dict]
+    concurrency: int = 2
+
+
+_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+
+
+def _operation_video_roots() -> list[Path]:
+    """批量清单可访问的根目录；默认仅项目目录，可通过环境变量显式扩展。"""
+    roots = [BASE_DIR.resolve()]
+    for raw in os.getenv("OPERATION_VIDEO_ROOTS", "").split(os.pathsep):
+        if raw.strip():
+            root = Path(raw.strip()).expanduser()
+            if not root.is_absolute():
+                root = BASE_DIR / root
+            roots.append(root.resolve())
+    return roots
+
+
+def _resolve_operation_video_path(raw_path: str) -> Path:
+    """相对路径按项目根目录解析，并阻止清单越权读取未授权目录。"""
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = BASE_DIR / candidate
+    candidate = candidate.resolve()
+    if not any(candidate.is_relative_to(root) for root in _operation_video_roots()):
+        raise ValueError(
+            "视频路径不在允许目录中；相对路径请以项目根目录为基准，"
+            "外部目录需通过 OPERATION_VIDEO_ROOTS 配置"
+        )
+    if not candidate.is_file():
+        raise ValueError(f"视频文件不存在：{raw_path}")
+    if candidate.suffix.lower() not in _VIDEO_EXTENSIONS:
+        supported = ", ".join(sorted(_VIDEO_EXTENSIONS))
+        raise ValueError(f"不支持的视频格式 {candidate.suffix or '(无扩展名)'}；支持：{supported}")
+    return candidate
+
+
+def _prepare_operation_item(item: dict) -> dict:
+    """校验一条本地视频记录并按内容状态缓存关键帧。"""
+    raw_path = str(item.get("video_path") or "").strip()
+    if not raw_path:
+        raise ValueError("缺少 video_path")
+    video_path = _resolve_operation_video_path(raw_path)
+    duration = probe_duration(video_path)
+    if duration <= 0:
+        raise ValueError(f"无法读取视频或视频时长为 0：{raw_path}")
+
+    stat = video_path.stat()
+    fingerprint = (
+        f"{video_path}:{stat.st_size}:{stat.st_mtime_ns}:"
+        "scene-v1-max10-min4-threshold0.10-gap0.8-edge720"
+    )
+    cache_id = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:20]
+    frame_dir = RUNS_DIR / "videos" / "imported" / f"{cache_id}_frames"
+    complete_marker = frame_dir / ".complete"
+    frames: list[Path] = []
+    if complete_marker.exists():
+        try:
+            expected_count = int(complete_marker.read_text(encoding="utf-8").strip())
+            cached_frames = sorted(frame_dir.glob("kf_*.jpg"))
+            if expected_count > 0 and len(cached_frames) == expected_count:
+                frames = cached_frames
+        except (OSError, ValueError):
+            pass
+    if not frames:
+        frames = extract_scene_keyframes(video_path, frame_dir)
+    if not frames:
+        raise ValueError(f"视频抽帧失败：{raw_path}")
+    complete_marker.write_text(str(len(frames)), encoding="utf-8")
+
+    prepared = dict(item)
+    prepared.update({
+        "video_path": str(video_path),
+        "video_name": video_path.name,
+        "media": [str(video_path)],
+        "frames": [str(frame) for frame in frames],
+        "frame_count": len(frames),
+        "duration": round(duration, 2),
+    })
+    return prepared
 
 
 def _validate_eval_request(req: EvalReq, app_cfg) -> None:
@@ -128,6 +214,42 @@ async def api_eval(req: EvalReq):
 
     asyncio.create_task(_start_later())
     return {"task_id": task.id}
+
+
+@app.post("/api/operation/prepare")
+async def api_prepare_operation(req: OperationPrepareReq):
+    """批量校验 JSONL 中的本地视频路径并并发抽帧，逐条隔离错误。"""
+    if not req.items:
+        raise HTTPException(400, "items 为空")
+    concurrency = max(1, min(int(req.concurrency or 2), 8))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def prepare_one(index: int, item: dict) -> tuple[int, dict | None, str | None]:
+        async with semaphore:
+            try:
+                prepared = await asyncio.to_thread(_prepare_operation_item, item)
+                return index, prepared, None
+            except Exception as exc:
+                line = item.get("source_line") or index + 1
+                item_id = item.get("id") or f"第 {line} 行"
+                return index, None, f"{item_id}：{exc}"
+
+    prepared_rows = await asyncio.gather(*[
+        prepare_one(index, item) for index, item in enumerate(req.items)
+    ])
+    prepared_items: list[dict] = []
+    errors: list[str] = []
+    for _, item, error in sorted(prepared_rows, key=lambda row: row[0]):
+        if item is not None:
+            prepared_items.append(item)
+        if error:
+            errors.append(error)
+    return {
+        "items": prepared_items,
+        "errors": errors,
+        "count": len(prepared_items),
+        "failed": len(errors),
+    }
 
 @app.post("/api/upload/video")
 async def api_upload_video(file: UploadFile = File(...)):

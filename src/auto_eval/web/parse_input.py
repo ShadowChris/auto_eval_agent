@@ -5,6 +5,7 @@
   compare: {query, context?, answer_a, answer_b, reference?}
   online : {query, context?, reference?}
   process: {query, context?, answer, trace, reference?}
+  operation: {id?, query, context?, video_path, answer?}
 
 文本格式在 query 后支持可选的显式背景段：
   query ||| @context: 背景信息 ||| 其余原有字段
@@ -76,10 +77,9 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
 
 def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 jsonl 文本。字段：question/query 必填；context 可选且空值忽略。"""
-    if mode == "operation":
-        return [], ["操作类评测请在页面上逐题上传视频，不支持 jsonl 粘贴"]
     items: list[dict] = []
     errors: list[str] = []
+    operation_ids: set[str] = set()
     for ln, raw in enumerate(content.splitlines(), 1):
         raw = raw.strip()
         if not raw:
@@ -89,11 +89,14 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
         except json.JSONDecodeError as e:
             errors.append(f"第 {ln} 行 JSON 错误：{e}")
             continue
+        if not isinstance(obj, dict):
+            errors.append(f"第 {ln} 行必须是 JSON 对象")
+            continue
         q = obj.get("question") or obj.get("query")
-        if not q:
+        if not isinstance(q, str) or not q.strip():
             errors.append(f"第 {ln} 行缺少 question")
             continue
-        item: dict = {"query": q}
+        item: dict = {"query": q.strip()}
         context = obj.get("context")
         if context is not None and not isinstance(context, str):
             errors.append(f"第 {ln} 行 context 必须是字符串")
@@ -122,6 +125,31 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 errors.append(f"第 {ln} 行 process 模式缺少 answer/trace")
                 continue
             item["answer"], item["trace"] = a, tr
+        elif mode == "operation":
+            video_path = obj.get("video_path")
+            if not isinstance(video_path, str) or not video_path.strip():
+                errors.append(f"第 {ln} 行 operation 模式缺少 video_path")
+                continue
+            item_id = obj.get("id")
+            if item_id is not None:
+                if not isinstance(item_id, str) or not item_id.strip():
+                    errors.append(f"第 {ln} 行 id 必须是非空字符串")
+                    continue
+                item_id = item_id.strip()
+                if item_id in operation_ids:
+                    errors.append(f"第 {ln} 行 id 重复：{item_id}")
+                    continue
+                operation_ids.add(item_id)
+                item["id"] = item_id
+            statement = obj.get("agent_statement", obj.get("answer"))
+            if statement is not None and not isinstance(statement, str):
+                errors.append(f"第 {ln} 行 agent_statement 必须是字符串")
+                continue
+            item["video_path"] = video_path.strip()
+            item["category"] = obj.get("category") or "operation"
+            item["source_line"] = ln
+            if statement and statement.strip():
+                item["answer"] = statement.strip()
         # online 不需要 answer
         if obj.get("reference"):
             item["reference"] = obj["reference"]

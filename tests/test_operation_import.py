@@ -1,0 +1,122 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from auto_eval.web import server
+from auto_eval.web.parse_input import parse_jsonl
+from auto_eval.web.server import OperationPrepareReq
+
+
+def test_operation_jsonl_normalizes_manifest_fields():
+    content = "\n".join([
+        json.dumps({
+            "id": "op_001",
+            "query": "设置早上七点的闹钟",
+            "context": "当前时间22:00",
+            "video_path": "data/videos/alarm.mp4",
+            "agent_statement": "已设置完成",
+        }, ensure_ascii=False),
+        json.dumps({
+            "query": "关闭无线局域网",
+            "video_path": "data/videos/wifi.mp4",
+        }, ensure_ascii=False),
+    ])
+
+    items, errors = parse_jsonl(content, "operation")
+
+    assert not errors
+    assert items[0] == {
+        "id": "op_001",
+        "query": "设置早上七点的闹钟",
+        "context": "当前时间22:00",
+        "video_path": "data/videos/alarm.mp4",
+        "category": "operation",
+        "source_line": 1,
+        "answer": "已设置完成",
+    }
+    assert items[1]["category"] == "operation"
+    assert "context" not in items[1]
+    assert "answer" not in items[1]
+
+
+def test_operation_jsonl_reports_invalid_rows_without_losing_valid_rows():
+    content = "\n".join([
+        '{"id":"same","query":"q1","video_path":"a.mp4"}',
+        '{"id":"same","query":"q2","video_path":"b.mp4"}',
+        '{"query":"q3"}',
+        '{"query":"q4","video_path":"d.mp4","agent_statement":42}',
+    ])
+
+    items, errors = parse_jsonl(content, "operation")
+
+    assert [item["query"] for item in items] == ["q1"]
+    assert len(errors) == 3
+    assert "id 重复" in errors[0]
+    assert "缺少 video_path" in errors[1]
+    assert "agent_statement 必须是字符串" in errors[2]
+
+
+def test_prepare_operation_item_resolves_project_relative_path_and_caches_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    video = tmp_path / "data" / "alarm.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"fake video")
+    calls = []
+
+    def fake_extract(path, out_dir):
+        calls.append(Path(path))
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        frame = out_dir / "kf_001.jpg"
+        frame.write_bytes(b"jpg")
+        return [frame]
+
+    monkeypatch.setattr(server, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(server, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(server, "probe_duration", lambda _: 12.5)
+    monkeypatch.setattr(server, "extract_scene_keyframes", fake_extract)
+    monkeypatch.delenv("OPERATION_VIDEO_ROOTS", raising=False)
+
+    first = server._prepare_operation_item({"query": "q", "video_path": "data/alarm.mp4"})
+    second = server._prepare_operation_item({"query": "q", "video_path": "data/alarm.mp4"})
+
+    assert first["media"] == [str(video)]
+    assert first["frame_count"] == 1
+    assert first["duration"] == 12.5
+    assert second["frames"] == first["frames"]
+    assert calls == [video]
+
+
+def test_operation_video_path_cannot_escape_allowed_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"fake")
+    monkeypatch.setattr(server, "BASE_DIR", project)
+    monkeypatch.delenv("OPERATION_VIDEO_ROOTS", raising=False)
+
+    with pytest.raises(ValueError, match="不在允许目录"):
+        server._resolve_operation_video_path(str(outside))
+
+
+@pytest.mark.asyncio
+async def test_batch_prepare_isolates_item_errors(monkeypatch: pytest.MonkeyPatch):
+    def fake_prepare(item):
+        if item["query"] == "bad":
+            raise ValueError("视频不存在")
+        return {**item, "frames": ["one.jpg"], "media": ["one.mp4"]}
+
+    monkeypatch.setattr(server, "_prepare_operation_item", fake_prepare)
+    response = await server.api_prepare_operation(OperationPrepareReq(items=[
+        {"id": "ok", "query": "good", "video_path": "good.mp4"},
+        {"id": "broken", "query": "bad", "video_path": "bad.mp4"},
+    ]))
+
+    assert response["count"] == 1
+    assert response["failed"] == 1
+    assert response["items"][0]["id"] == "ok"
+    assert "broken：视频不存在" in response["errors"][0]

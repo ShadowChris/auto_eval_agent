@@ -16,6 +16,7 @@ createApp({
     const isJsonl = ref(false);
     const items = ref([]);
     const opItems = ref([{ query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", uploading: false, uploadError: "" }]);
+    const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
     const models = ref([]);
@@ -61,7 +62,7 @@ createApp({
           compare: "每行一题：query [||| @context: 背景] ||| answerA ||| answerB [||| reference]",
           online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
-          operation: "逐题填写操作意图(query)、可选可信背景(context)并上传手机操作录屏；后端自动抽帧评测。",
+          operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)；相对视频路径以项目根目录为基准。",
         }[mode.value])
     );
     const placeholder = computed(
@@ -519,7 +520,7 @@ createApp({
 
     // —— 操作类评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
     function newOpItem() {
-      return { query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", uploading: false, uploadError: "" };
+      return { id: "", query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", uploading: false, uploadError: "" };
     }
     function addOpItem() { opItems.value.push(newOpItem()); }
     function removeOpItem(i) { if (opItems.value.length > 1) opItems.value.splice(i, 1); }
@@ -537,6 +538,7 @@ createApp({
         it.videoPath = d.video_path;
         it.frames = d.frames || [];
         it.frameCount = d.frame_count || 0;
+        it.duration = d.duration || 0;
       } catch (e) {
         it.uploadError = "上传出错：" + e;
       } finally {
@@ -550,9 +552,63 @@ createApp({
       if (f) uploadVideo(i, f);
     }
 
+    async function onOpManifestFile(e) {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = "";
+      if (!file) return;
+      opPreparing.value = true;
+      errors.value = [];
+      items.value = [];
+      opItems.value = [newOpItem()];
+      try {
+        const content = await file.text();
+        const parseResponse = await fetch("/api/parse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "operation", jsonl: content }),
+        });
+        const parsed = await parseResponse.json().catch(() => ({}));
+        if (!parseResponse.ok) throw new Error(parsed.detail || "JSONL 解析请求失败");
+        const importErrors = [...(parsed.errors || [])];
+        if (!(parsed.items || []).length) {
+          errors.value = importErrors.length ? importErrors : ["JSONL 中没有可导入的数据"];
+          return;
+        }
+
+        const prepareResponse = await fetch("/api/operation/prepare", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: parsed.items, concurrency: 2 }),
+        });
+        const prepared = await prepareResponse.json().catch(() => ({}));
+        if (!prepareResponse.ok) throw new Error(prepared.detail || "批量视频准备失败");
+        errors.value = [...importErrors, ...(prepared.errors || [])];
+        const ready = prepared.items || [];
+        if (ready.length) {
+          items.value = ready;
+          opItems.value = ready.map((item) => ({
+            ...newOpItem(),
+            id: item.id || "",
+            query: item.query || "",
+            context: item.context || "",
+            videoName: item.video_name || String(item.video_path || "").split(/[\\/]/).pop(),
+            videoPath: item.video_path || "",
+            frames: item.frames || [],
+            frameCount: item.frame_count || (item.frames || []).length,
+            duration: item.duration || 0,
+            answer: item.answer || "",
+          }));
+        }
+      } catch (error) {
+        errors.value = ["批量导入失败：" + (error?.message || String(error))];
+      } finally {
+        opPreparing.value = false;
+      }
+    }
+
     const canSubmit = computed(() => {
       if (mode.value === "operation")
-        return opItems.value.some((it) => it.query.trim() && (it.frames || []).length);
+        return !opPreparing.value && opItems.value.some((it) => it.query.trim() && (it.frames || []).length);
       return !!text.value;
     });
 
@@ -581,10 +637,11 @@ createApp({
           return;
         }
         items.value = valid.map((it, idx) => ({
-          id: `op${idx + 1}`,
+          id: it.id || `op${idx + 1}`,
           query: it.query.trim(),
           context: (it.context || "").trim(),
           answer: (it.answer || "").trim(),
+          category: "operation",
           media: [it.videoPath],
           frames: it.frames,
         }));
@@ -991,8 +1048,8 @@ createApp({
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
-      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, canSubmit,
-      trunc, switchMode, onFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, opPreparing, canSubmit,
+      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
       changePreviewPage, changeProgressPage, paginationPages, setTablePage, jumpTablePage,
