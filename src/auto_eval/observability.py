@@ -26,6 +26,8 @@ from .paths import PROJECT_ROOT
 
 @dataclass(frozen=True)
 class ChainContext:
+    task_id: str = "-"
+    session_name: str = "-"
     request_id: str = "-"
     item_id: str = "-"
     item_index: int = -1

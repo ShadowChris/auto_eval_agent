@@ -5,9 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import os
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -23,6 +21,12 @@ from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
 from .parse_input import Mode, parse_jsonl, parse_text
 from .history import build_xlsx, delete_snapshot, export_rows, list_snapshots, load_snapshot, rows_to_csv, snapshot_payload, task_to_snapshot
+from .operation_media import (
+    VIDEO_EXTENSIONS,
+    operation_video_roots,
+    prepare_cached_operation_item,
+    resolve_operation_video_path,
+)
 from .runner import run_eval
 from .tasks import get_task, new_task
 
@@ -63,83 +67,25 @@ class OperationPrepareReq(BaseModel):
     concurrency: int = 2
 
 
-_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+_VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
 
 
 def _operation_video_roots() -> list[Path]:
-    """批量清单可访问的根目录；默认仅项目目录，可通过环境变量显式扩展。"""
-    roots = [BASE_DIR.resolve()]
-    for raw in os.getenv("OPERATION_VIDEO_ROOTS", "").split(os.pathsep):
-        if raw.strip():
-            root = Path(raw.strip()).expanduser()
-            if not root.is_absolute():
-                root = BASE_DIR / root
-            roots.append(root.resolve())
-    return roots
+    return operation_video_roots(BASE_DIR)
 
 
 def _resolve_operation_video_path(raw_path: str) -> Path:
-    """相对路径按项目根目录解析，并阻止清单越权读取未授权目录。"""
-    candidate = Path(raw_path).expanduser()
-    if not candidate.is_absolute():
-        candidate = BASE_DIR / candidate
-    candidate = candidate.resolve()
-    if not any(candidate.is_relative_to(root) for root in _operation_video_roots()):
-        raise ValueError(
-            "视频路径不在允许目录中；相对路径请以项目根目录为基准，"
-            "外部目录需通过 OPERATION_VIDEO_ROOTS 配置"
-        )
-    if not candidate.is_file():
-        raise ValueError(f"视频文件不存在：{raw_path}")
-    if candidate.suffix.lower() not in _VIDEO_EXTENSIONS:
-        supported = ", ".join(sorted(_VIDEO_EXTENSIONS))
-        raise ValueError(f"不支持的视频格式 {candidate.suffix or '(无扩展名)'}；支持：{supported}")
-    return candidate
+    return resolve_operation_video_path(raw_path, base_dir=BASE_DIR)
 
 
 def _prepare_operation_item(item: dict) -> dict:
-    """校验一条本地视频记录并按内容状态缓存关键帧。"""
-    raw_path = str(item.get("video_path") or "").strip()
-    if not raw_path:
-        raise ValueError("缺少 video_path")
-    video_path = _resolve_operation_video_path(raw_path)
-    duration = probe_duration(video_path)
-    if duration <= 0:
-        raise ValueError(f"无法读取视频或视频时长为 0：{raw_path}")
-
-    stat = video_path.stat()
-    fingerprint = (
-        f"{video_path}:{stat.st_size}:{stat.st_mtime_ns}:"
-        "scene-v1-max10-min4-threshold0.10-gap0.8-edge720"
+    return prepare_cached_operation_item(
+        item,
+        base_dir=BASE_DIR,
+        runs_dir=RUNS_DIR,
+        probe_fn=probe_duration,
+        extract_fn=extract_scene_keyframes,
     )
-    cache_id = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:20]
-    frame_dir = RUNS_DIR / "videos" / "imported" / f"{cache_id}_frames"
-    complete_marker = frame_dir / ".complete"
-    frames: list[Path] = []
-    if complete_marker.exists():
-        try:
-            expected_count = int(complete_marker.read_text(encoding="utf-8").strip())
-            cached_frames = sorted(frame_dir.glob("kf_*.jpg"))
-            if expected_count > 0 and len(cached_frames) == expected_count:
-                frames = cached_frames
-        except (OSError, ValueError):
-            pass
-    if not frames:
-        frames = extract_scene_keyframes(video_path, frame_dir)
-    if not frames:
-        raise ValueError(f"视频抽帧失败：{raw_path}")
-    complete_marker.write_text(str(len(frames)), encoding="utf-8")
-
-    prepared = dict(item)
-    prepared.update({
-        "video_path": str(video_path),
-        "video_name": video_path.name,
-        "media": [str(video_path)],
-        "frames": [str(frame) for frame in frames],
-        "frame_count": len(frames),
-        "duration": round(duration, 2),
-    })
-    return prepared
 
 
 def _validate_eval_request(req: EvalReq, app_cfg) -> None:

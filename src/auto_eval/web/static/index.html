@@ -62,8 +62,8 @@
             <input type="file" accept=".jsonl,application/json" @change="onOpManifestFile" hidden>
             导入操作类 JSONL
           </label>
-          <span v-if="opPreparing" class="running">正在校验视频并批量抽帧…</span>
-          <span v-else-if="items.length" class="ok">✓ 已准备 {{ items.length }} 条</span>
+          <span v-if="opPreparing" class="running">正在解析 JSONL…</span>
+          <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
         <p class="hint">示例：{"id":"op_001","query":"设置7点闹钟","context":"当前时间22:00","video_path":"data/videos/alarm.mp4","agent_statement":"已设置完成"}</p>
@@ -83,7 +83,8 @@
             {{ it.videoName ? '更换视频' : '选择 / 拖拽上传录屏(mp4 ≤20MB)' }}
           </label>
           <span v-if="it.uploading" class="hint">抽帧中…</span>
-          <span v-if="it.videoName" class="ok">📹 {{ it.videoName }} · {{ it.frameCount }} 帧<template v-if="it.duration"> · {{ it.duration }} 秒</template> ✓</span>
+          <span v-if="it.videoName && it.frameCount" class="ok">📹 {{ it.videoName }} · {{ it.frameCount }} 帧<template v-if="it.duration"> · {{ it.duration }} 秒</template> ✓</span>
+          <span v-else-if="it.videoName" class="hint">📄 {{ it.videoName }} · 待开始评估时抽帧</span>
           <span v-if="it.uploadError" class="err">{{ it.uploadError }}</span>
         </div>
         <div v-if="it.videoPath" class="op-path">{{ it.videoPath }}</div>
@@ -379,6 +380,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260716_operation_jsonl"></script>
+  <script type="module" src="/static/app.js?v=20260717_operation_session_frames"></script>
 </body>
 </html>

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from auto_eval.web import server
+from auto_eval.web.operation_media import prepare_session_operation_item
 from auto_eval.web.parse_input import parse_jsonl
 from auto_eval.web.server import OperationPrepareReq
 
@@ -120,3 +121,53 @@ async def test_batch_prepare_isolates_item_errors(monkeypatch: pytest.MonkeyPatc
     assert response["failed"] == 1
     assert response["items"][0]["id"] == "ok"
     assert "broken：视频不存在" in response["errors"][0]
+
+
+def test_session_prepare_uses_history_name_and_one_based_item_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    project = tmp_path / "project"
+    video = project / "data" / "slow_query_001.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"fake video")
+    extracted_to = []
+
+    def fake_extract(path, out_dir):
+        out_dir = Path(out_dir)
+        extracted_to.append(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        frame = out_dir / "kf_001.jpg"
+        frame.write_bytes(b"jpg")
+        return [frame]
+
+    monkeypatch.delenv("OPERATION_VIDEO_ROOTS", raising=False)
+    item = {"id": "slow_query_001", "query": "q", "video_path": "data/slow_query_001.mp4"}
+    first = prepare_session_operation_item(
+        item,
+        session_name="20260717_103930_operation_aa5cd32001ec",
+        item_index=0,
+        total_items=55,
+        base_dir=project,
+        runs_dir=tmp_path / "runs",
+        probe_fn=lambda _: 8.5,
+        extract_fn=fake_extract,
+    )
+    second = prepare_session_operation_item(
+        item,
+        session_name="20260717_103930_operation_aa5cd32001ec",
+        item_index=0,
+        total_items=55,
+        base_dir=project,
+        runs_dir=tmp_path / "runs",
+        probe_fn=lambda _: 8.5,
+        extract_fn=fake_extract,
+    )
+
+    expected_dir = (
+        tmp_path / "runs" / "videos" / "imported"
+        / "20260717_103930_operation_aa5cd32001ec" / "001_slow_query_001"
+    )
+    assert extracted_to == [expected_dir]
+    assert first["frames"] == [str(expected_dir / "kf_001.jpg")]
+    assert second["frames"] == first["frames"]
+    assert first["media"] == [str(video)]

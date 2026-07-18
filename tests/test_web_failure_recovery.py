@@ -209,6 +209,50 @@ async def test_non_retriable_parse_error_does_not_restart_whole_item(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_operation_video_is_prepared_only_when_evaluation_starts(monkeypatch):
+    cfg = load_config(Path("config"))
+    task = Task(
+        id="operation-session",
+        mode="operation",
+        items=[{
+            "id": "slow_query_001",
+            "query": "打开设置",
+            "video_path": "data/slow_query_001.mp4",
+        }],
+        options={"judges": [cfg.judges[0].name], "concurrency": 1},
+        session_name="20260717_103930_operation_operation-session",
+    )
+    prepare_calls = []
+
+    def fake_prepare(item, **kwargs):
+        prepare_calls.append(kwargs)
+        return {
+            **item,
+            "video_path": "/abs/slow_query_001.mp4",
+            "media": ["/abs/slow_query_001.mp4"],
+            "frames": ["/abs/session/001_slow_query_001/kf_001.jpg"],
+            "frame_count": 1,
+            "duration": 8.5,
+        }
+
+    async def fake_eval(*args, **kwargs):
+        assert task.items[0]["frames"] == ["/abs/session/001_slow_query_001/kf_001.jpg"]
+        return {"index": 0, "query": "打开设置", "total": 5}
+
+    monkeypatch.setattr(runner, "prepare_session_operation_item", fake_prepare)
+    monkeypatch.setattr(runner, "_eval_one", fake_eval)
+    monkeypatch.setattr(runner, "_persist_task", lambda task: True)
+
+    await runner._run(task, cfg)
+
+    assert len(prepare_calls) == 1
+    assert prepare_calls[0]["session_name"] == task.session_name
+    assert prepare_calls[0]["item_index"] == 0
+    assert prepare_calls[0]["total_items"] == 1
+    assert task.results[0]["total"] == 5
+
+
+@pytest.mark.asyncio
 async def test_snapshot_exception_does_not_replace_result_with_global_error(monkeypatch):
     task = Task(
         id="snapshot-error",

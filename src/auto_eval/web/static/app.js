@@ -575,27 +575,17 @@ createApp({
           return;
         }
 
-        const prepareResponse = await fetch("/api/operation/prepare", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: parsed.items, concurrency: 2 }),
-        });
-        const prepared = await prepareResponse.json().catch(() => ({}));
-        if (!prepareResponse.ok) throw new Error(prepared.detail || "批量视频准备失败");
-        errors.value = [...importErrors, ...(prepared.errors || [])];
-        const ready = prepared.items || [];
-        if (ready.length) {
-          items.value = ready;
-          opItems.value = ready.map((item) => ({
+        errors.value = importErrors;
+        const imported = parsed.items || [];
+        if (imported.length) {
+          items.value = imported;
+          opItems.value = imported.map((item) => ({
             ...newOpItem(),
             id: item.id || "",
             query: item.query || "",
             context: item.context || "",
-            videoName: item.video_name || String(item.video_path || "").split(/[\\/]/).pop(),
+            videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || "",
-            frames: item.frames || [],
-            frameCount: item.frame_count || (item.frames || []).length,
-            duration: item.duration || 0,
             answer: item.answer || "",
           }));
         }
@@ -608,7 +598,9 @@ createApp({
 
     const canSubmit = computed(() => {
       if (mode.value === "operation")
-        return !opPreparing.value && opItems.value.some((it) => it.query.trim() && (it.frames || []).length);
+        return !opPreparing.value && opItems.value.some(
+          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
+        );
       return !!text.value;
     });
 
@@ -631,20 +623,28 @@ createApp({
     async function submit() {
       runError.value = "";
       if (mode.value === "operation") {
-        const valid = opItems.value.filter((it) => it.query.trim() && (it.frames || []).length);
+        const valid = opItems.value.filter(
+          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
+        );
         if (!valid.length) {
-          alert("请为每题填写操作意图(query)并上传视频(需完成抽帧)后再评估。");
+          alert("请为每题填写操作意图(query)，并提供视频路径或上传视频后再评估。");
           return;
         }
-        items.value = valid.map((it, idx) => ({
-          id: it.id || `op${idx + 1}`,
-          query: it.query.trim(),
-          context: (it.context || "").trim(),
-          answer: (it.answer || "").trim(),
-          category: "operation",
-          media: [it.videoPath],
-          frames: it.frames,
-        }));
+        items.value = valid.map((it, idx) => {
+          const item = {
+            id: it.id || `op${idx + 1}`,
+            query: it.query.trim(),
+            context: (it.context || "").trim(),
+            answer: (it.answer || "").trim(),
+            category: "operation",
+            video_path: it.videoPath,
+          };
+          if ((it.frames || []).length) {
+            item.media = [it.videoPath];
+            item.frames = it.frames;
+          }
+          return item;
+        });
         errors.value = [];
       } else {
         // 自动解析最新输入（用户可跳过手动"解析预览"）

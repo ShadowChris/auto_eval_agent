@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .history import load_snapshot, save_task
+from .history import load_snapshot, make_session_name, save_task
 
 
 @dataclass
@@ -16,6 +16,7 @@ class Task:
     mode: str
     items: list[dict]
     options: dict
+    session_name: str = ""
     status: str = "pending"  # pending | running | done | error
     results: list[dict] = field(default_factory=list)
     item_progress: dict[str, dict] = field(default_factory=dict)
@@ -35,7 +36,15 @@ TASKS: dict[str, Task] = {}
 
 def new_task(mode: str, items: list[dict], options: dict) -> Task:
     task_id = uuid.uuid4().hex[:12]
-    t = Task(id=task_id, mode=mode, items=items, options=options)
+    created_at = time.time()
+    t = Task(
+        id=task_id,
+        mode=mode,
+        items=items,
+        options=options,
+        session_name=make_session_name(created_at, mode, task_id),
+        created_at=created_at,
+    )
     TASKS[task_id] = t
     save_task(t)
     return t
@@ -58,6 +67,7 @@ def get_task(task_id: str) -> Task | None:
         mode=snapshot.get("mode") or "single",
         items=snapshot.get("items") or [],
         options=snapshot.get("options") or {},
+        session_name=snapshot.get("session_name") or "",
         status=status,
         results=snapshot.get("results") or [],
         item_progress=snapshot.get("item_progress") or {},
