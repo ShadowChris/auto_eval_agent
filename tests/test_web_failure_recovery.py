@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from auto_eval.config import JudgeConfig, load_config
 from auto_eval.judges.base import JudgeOutputParseError
+from auto_eval.observability import current_context
 from auto_eval.web import history, runner
 from auto_eval.web.server import EvalReq, _validate_eval_request
 from auto_eval.web.tasks import Task
@@ -209,7 +210,9 @@ async def test_non_retriable_parse_error_does_not_restart_whole_item(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_operation_video_is_prepared_only_when_evaluation_starts(monkeypatch):
+async def test_operation_video_is_prepared_only_when_evaluation_starts(
+    tmp_path, monkeypatch
+):
     cfg = load_config(Path("config"))
     task = Task(
         id="operation-session",
@@ -223,6 +226,7 @@ async def test_operation_video_is_prepared_only_when_evaluation_starts(monkeypat
         session_name="20260717_103930_operation_operation-session",
     )
     prepare_calls = []
+    trace_path = tmp_path / "judge_calls.jsonl"
 
     def fake_prepare(item, **kwargs):
         prepare_calls.append(kwargs)
@@ -237,7 +241,26 @@ async def test_operation_video_is_prepared_only_when_evaluation_starts(monkeypat
 
     async def fake_eval(*args, **kwargs):
         assert task.items[0]["frames"] == ["/abs/session/001_slow_query_001/kf_001.jpg"]
-        return {"index": 0, "query": "打开设置", "total": 5}
+        current_context().judge_trace_callback(str(trace_path), {
+            "task_id": task.id,
+            "session_name": task.session_name,
+            "request_id": current_context().request_id,
+            "item_id": "slow_query_001",
+            "item_index": 0,
+            "status": "success",
+            "judge": "judge_1",
+            "llm_rounds": [{"round": 1, "content": "raw model output"}],
+        })
+        return {
+            "index": 0,
+            "item_id": "slow_query_001",
+            "query": "打开设置",
+            "correctness": "right",
+            "total": 5,
+            "rubric": {"操作完成度": 5},
+            "rationale": "操作已完成",
+            "latency_s": 1.2,
+        }
 
     monkeypatch.setattr(runner, "prepare_session_operation_item", fake_prepare)
     monkeypatch.setattr(runner, "_eval_one", fake_eval)
@@ -250,6 +273,10 @@ async def test_operation_video_is_prepared_only_when_evaluation_starts(monkeypat
     assert prepare_calls[0]["item_index"] == 0
     assert prepare_calls[0]["total_items"] == 1
     assert task.results[0]["total"] == 5
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    assert trace["model_raw_output"] == "raw model output"
+    for field, value in task.results[0].items():
+        assert trace[field] == value
 
 
 @pytest.mark.asyncio

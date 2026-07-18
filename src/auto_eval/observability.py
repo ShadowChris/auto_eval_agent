@@ -35,6 +35,7 @@ class ChainContext:
     judge: str = ""
     round: int = 0
     progress_callback: Callable[[dict], None] | None = None
+    judge_trace_callback: Callable[[str, dict], None] | None = None
 
 
 _context: ContextVar[ChainContext] = ContextVar(

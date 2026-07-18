@@ -18,6 +18,7 @@ from ..config import AppConfig
 from ..dataset import to_prompt
 from ..judges import (Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, SkillRouter,
                         ensure_classified)
+from ..judges.base import flush_web_trace_records
 from ..judges.ensemble import aggregate_pairs, aggregate_scores
 from ..llm_stream import is_retriable_llm_error
 from ..meta import ground_truth
@@ -132,6 +133,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 
     async def one(idx: int, item_dict: dict):
         request_id = make_request_id(task.created_at, task.id, idx)
+        pending_judge_traces: list[tuple[str, dict]] = []
 
         def publish_progress(payload: dict) -> None:
             def apply() -> None:
@@ -145,6 +147,10 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                 loop.call_soon_threadsafe(apply)
 
         item_id = item_dict.get("id", f"q{idx}")
+
+        def collect_judge_trace(trace_path: str, record: dict) -> None:
+            pending_judge_traces.append((trace_path, record))
+
         with bind_chain_context(
             task_id=task.id,
             session_name=task.session_name,
@@ -152,6 +158,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             item_id=item_id,
             item_index=idx,
             progress_callback=publish_progress,
+            judge_trace_callback=collect_judge_trace,
         ):
             log_event(
                 "任务",
@@ -282,6 +289,12 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                         request_id=request_id,
                     )
             res["index"] = idx
+            if pending_judge_traces:
+                await asyncio.to_thread(
+                    flush_web_trace_records,
+                    pending_judge_traces,
+                    res,
+                )
             task.results.append(res)
             task.done_total += 1
             failed = bool(res.get("error"))
