@@ -15,18 +15,91 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..config import JudgeConfig
 from ..llm_stream import build_openai_client, stream_chat_completion
-from ..observability import bind_chain_context, log_event
+from ..observability import bind_chain_context, current_context, log_event
 from ..paths import resolve_project_path
 from .prompts import persona_text
 from .tools import build_tools
 
 logger = logging.getLogger("auto_eval.judge")
+_trace_lock = threading.Lock()
+
+_TRACE_FIELDS = {
+    "task_id",
+    "session_name",
+    "request_id",
+    "item_index",
+    "item_sequence",
+    "ts",
+    "status",
+    "judge",
+    "model",
+    "system",
+    "user",
+    "rounds",
+    "llm_rounds",
+    "tool_results",
+    "image_refs",
+    "messages",
+    "error",
+    "error_type",
+    "round",
+}
+
+
+def merge_trace_web_result(record: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """把 Web 最终结果平铺进模型调用记录，同时保留模型层审计字段。"""
+    llm_rounds = record.get("llm_rounds") or []
+    final_content = ""
+    for llm_round in reversed(llm_rounds):
+        content = llm_round.get("content") if isinstance(llm_round, dict) else None
+        if content:
+            final_content = str(content)
+            break
+    merged = dict(record)
+    merged.update({
+        "model_raw_output": final_content,
+        "result_recorded_at": time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime()
+        ),
+    })
+    for field, value in result.items():
+        if field in _TRACE_FIELDS and field in merged and merged[field] != value:
+            merged[f"call_{field}"] = merged[field]
+        merged[field] = value
+    return merged
+
+
+def _append_trace_record(trace_path: str, record: dict[str, Any]) -> bool:
+    try:
+        directory = os.path.dirname(trace_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with _trace_lock:
+            with open(trace_path, "a", encoding="utf-8") as file:
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return True
+    except Exception:
+        logger.exception("写入裁判调用日志失败: path=%s", trace_path)
+        return False
+
+
+def flush_web_trace_records(
+    records: list[tuple[str, dict[str, Any]]],
+    result: dict[str, Any],
+) -> int:
+    """将一题暂存的模型调用记录连同 Web 最终结果一起落盘。"""
+    written = 0
+    for trace_path, record in records:
+        if _append_trace_record(trace_path, merge_trace_web_result(record, result)):
+            written += 1
+    return written
 
 
 @dataclass
@@ -364,6 +437,7 @@ class JudgeClient:
         if do_trace:
             self._write_trace({
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                "status": "success",
                 "judge": self.cfg.name,
                 "model": self.model,
                 "system": system,
@@ -391,23 +465,45 @@ class JudgeClient:
     def _write_trace(self, detail: dict[str, Any]) -> None:
         assert self.trace_path
         try:
-            d = os.path.dirname(self.trace_path)
-            if d:
-                os.makedirs(d, exist_ok=True)
-            with open(self.trace_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(detail, ensure_ascii=False) + "\n")
+            ctx = current_context()
+            record = {
+                "task_id": ctx.task_id,
+                "session_name": ctx.session_name,
+                "request_id": ctx.request_id,
+                "item_id": ctx.item_id,
+                "item_index": ctx.item_index,
+                "item_sequence": ctx.item_index + 1 if ctx.item_index >= 0 else None,
+                **detail,
+            }
+            if ctx.judge_trace_callback:
+                ctx.judge_trace_callback(self.trace_path, record)
+            else:
+                _append_trace_record(self.trace_path, record)
         except Exception:
             # 日志失败不应影响评测主流程
-            pass
+            logger.exception("写入裁判调用日志失败: path=%s", self.trace_path)
 
     async def _llm_create(self, kwargs: dict, max_attempts: int | None = None,
                           stream_callback: Callable[[str], None] | None = None):
         """始终使用流式接口；callback 只负责可选的前端分片通知。"""
-        return await self._llm_create_stream(
-            kwargs,
-            callback=stream_callback,
-            max_attempts=max_attempts,
-        )
+        try:
+            return await self._llm_create_stream(
+                kwargs,
+                callback=stream_callback,
+                max_attempts=max_attempts,
+            )
+        except Exception as exc:
+            if self.trace_path:
+                self._write_trace({
+                    "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                    "status": "error",
+                    "judge": self.cfg.name,
+                    "model": self.model,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "round": current_context().round,
+                })
+            raise
 
     async def _llm_create_stream(
         self,

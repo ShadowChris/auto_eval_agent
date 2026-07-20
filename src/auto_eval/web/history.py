@@ -25,14 +25,36 @@ HISTORY_DIR = RUNS_DIR / "web_history"
 logger = logging.getLogger(__name__)
 
 
-def _task_path(task_id: str) -> Path:
-    safe = re.sub(r"[^0-9a-zA-Z_-]", "_", task_id)
-    return HISTORY_DIR / f"{safe}.json"
+def _safe_name(value: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z_-]", "_", value)
+
+
+def make_session_name(created_at: float, mode: str, task_id: str) -> str:
+    """生成可按文件名排序、同时能关联任务的稳定会话名。"""
+    dt = datetime.fromtimestamp(created_at).astimezone()
+    return f"{dt:%Y%m%d_%H%M%S}_{_safe_name(mode)}_{_safe_name(task_id)}"
+
+
+def _find_task_path(task_id: str) -> Path:
+    """优先查旧文件名，再查带时间前缀的新文件名。"""
+    safe = _safe_name(task_id)
+    legacy = HISTORY_DIR / f"{safe}.json"
+    if legacy.exists():
+        return legacy
+    matches = sorted(HISTORY_DIR.glob(f"*_{safe}.json"))
+    return matches[-1] if matches else legacy
+
+
+def _task_path(task_id: str, session_name: str = "") -> Path:
+    if session_name:
+        return HISTORY_DIR / f"{_safe_name(session_name)}.json"
+    return _find_task_path(task_id)
 
 
 def task_to_snapshot(task) -> dict:
     return {
         "task_id": task.id,
+        "session_name": task.session_name,
         "mode": task.mode,
         "items": task.items,
         "options": task.options,
@@ -56,7 +78,7 @@ def save_task(task, *, max_attempts: int = 3) -> bool:
     short retries cover transient Windows file locks.
     """
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    path = _task_path(task.id)
+    path = _task_path(task.id, getattr(task, "session_name", ""))
     content = json.dumps(task_to_snapshot(task), ensure_ascii=False, indent=2)
     last_error: OSError | None = None
     attempts = max(1, max_attempts)
@@ -84,7 +106,7 @@ def save_task(task, *, max_attempts: int = 3) -> bool:
 
 
 def load_snapshot(task_id: str) -> dict | None:
-    path = _task_path(task_id)
+    path = _find_task_path(task_id)
     if not path.exists():
         return None
     try:
@@ -95,7 +117,7 @@ def load_snapshot(task_id: str) -> dict | None:
 
 def delete_snapshot(task_id: str) -> bool:
     """删除某次评测的快照文件。返回是否删除成功（文件存在且已删除）。"""
-    path = _task_path(task_id)
+    path = _find_task_path(task_id)
     if not path.exists():
         return False
     try:
@@ -118,18 +140,26 @@ def list_snapshots(limit: int = 50) -> list[dict]:
         if status in {"pending", "running"}:
             status = "error"
             error = error or "服务中断，已保留中断前完成的评估结果"
+        task_id = data.get("task_id") or path.stem
+        created_at = data.get("created_at")
+        session_name = data.get("session_name") or (
+            path.stem
+            if path.stem != _safe_name(str(task_id))
+            else make_session_name(float(created_at or 0), data.get("mode") or "unknown", str(task_id))
+        )
         rows.append({
-            "task_id": data.get("task_id") or path.stem,
+            "task_id": task_id,
+            "session_name": session_name,
             "mode": data.get("mode"),
             "status": status,
             "total": len(data.get("items") or []),
             "done": len([r for r in (data.get("results") or []) if "error" not in r]),
-            "created_at": data.get("created_at"),
+            "created_at": created_at,
             "updated_at": data.get("updated_at") or data.get("created_at"),
             "error": error,
             "preview": _preview(data),
         })
-    rows.sort(key=lambda x: x.get("updated_at") or 0, reverse=True)
+    rows.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
     return rows[:limit]
 
 def _preview(data: dict) -> str:
@@ -143,6 +173,7 @@ def _preview(data: dict) -> str:
 def snapshot_payload(data: dict) -> dict:
     return {
         "task_id": data.get("task_id"),
+        "session_name": data.get("session_name"),
         "mode": data.get("mode"),
         "items": data.get("items") or [],
         "options": data.get("options") or {},

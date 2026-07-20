@@ -36,12 +36,12 @@ ei = _to_evalitem({"query": "设闹钟", "media": ["v.mp4"], "frames": ["f1.jpg"
 assert ei.media == ["v.mp4"] and ei.metadata.get("frames") == ["f1.jpg", "f2.jpg"], (ei.media, ei.metadata)
 print("[4] _to_evalitem OK")
 
-# 5) parse_text / parse_jsonl 对 operation 友好拦截
+# 5) operation 文本仍拦截，JSONL 支持批量清单
 items, errs = parse_text("任意", "operation")
 assert items == [] and errs
-items2, errs2 = parse_jsonl('{"question":"q"}', "operation")
-assert items2 == [] and errs2
-print("[5] parse operation 防御 OK")
+items2, errs2 = parse_jsonl('{"question":"q","video_path":"data/q.mp4"}', "operation")
+assert len(items2) == 1 and not errs2 and items2[0]["video_path"] == "data/q.mp4"
+print("[5] operation JSONL 解析 OK")
 
 # 6) python-multipart（UploadFile 需要）
 try:

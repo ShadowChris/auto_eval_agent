@@ -21,6 +21,12 @@ from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
 from .parse_input import Mode, parse_jsonl, parse_text
 from .history import build_xlsx, delete_snapshot, export_rows, list_snapshots, load_snapshot, rows_to_csv, snapshot_payload, task_to_snapshot
+from .operation_media import (
+    VIDEO_EXTENSIONS,
+    operation_video_roots,
+    prepare_cached_operation_item,
+    resolve_operation_video_path,
+)
 from .runner import run_eval
 from .tasks import get_task, new_task
 
@@ -54,6 +60,32 @@ class EvalReq(BaseModel):
     mode: Mode
     items: list[dict]
     options: dict = {}
+
+
+class OperationPrepareReq(BaseModel):
+    items: list[dict]
+    concurrency: int = 2
+
+
+_VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
+
+
+def _operation_video_roots() -> list[Path]:
+    return operation_video_roots(BASE_DIR)
+
+
+def _resolve_operation_video_path(raw_path: str) -> Path:
+    return resolve_operation_video_path(raw_path, base_dir=BASE_DIR)
+
+
+def _prepare_operation_item(item: dict) -> dict:
+    return prepare_cached_operation_item(
+        item,
+        base_dir=BASE_DIR,
+        runs_dir=RUNS_DIR,
+        probe_fn=probe_duration,
+        extract_fn=extract_scene_keyframes,
+    )
 
 
 def _validate_eval_request(req: EvalReq, app_cfg) -> None:
@@ -128,6 +160,42 @@ async def api_eval(req: EvalReq):
 
     asyncio.create_task(_start_later())
     return {"task_id": task.id}
+
+
+@app.post("/api/operation/prepare")
+async def api_prepare_operation(req: OperationPrepareReq):
+    """批量校验 JSONL 中的本地视频路径并并发抽帧，逐条隔离错误。"""
+    if not req.items:
+        raise HTTPException(400, "items 为空")
+    concurrency = max(1, min(int(req.concurrency or 2), 8))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def prepare_one(index: int, item: dict) -> tuple[int, dict | None, str | None]:
+        async with semaphore:
+            try:
+                prepared = await asyncio.to_thread(_prepare_operation_item, item)
+                return index, prepared, None
+            except Exception as exc:
+                line = item.get("source_line") or index + 1
+                item_id = item.get("id") or f"第 {line} 行"
+                return index, None, f"{item_id}：{exc}"
+
+    prepared_rows = await asyncio.gather(*[
+        prepare_one(index, item) for index, item in enumerate(req.items)
+    ])
+    prepared_items: list[dict] = []
+    errors: list[str] = []
+    for _, item, error in sorted(prepared_rows, key=lambda row: row[0]):
+        if item is not None:
+            prepared_items.append(item)
+        if error:
+            errors.append(error)
+    return {
+        "items": prepared_items,
+        "errors": errors,
+        "count": len(prepared_items),
+        "failed": len(errors),
+    }
 
 @app.post("/api/upload/video")
 async def api_upload_video(file: UploadFile = File(...)):

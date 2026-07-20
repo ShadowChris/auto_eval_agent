@@ -26,6 +26,8 @@ from .paths import PROJECT_ROOT
 
 @dataclass(frozen=True)
 class ChainContext:
+    task_id: str = "-"
+    session_name: str = "-"
     request_id: str = "-"
     item_id: str = "-"
     item_index: int = -1
@@ -33,6 +35,7 @@ class ChainContext:
     judge: str = ""
     round: int = 0
     progress_callback: Callable[[dict], None] | None = None
+    judge_trace_callback: Callable[[str, dict], None] | None = None
 
 
 _context: ContextVar[ChainContext] = ContextVar(

@@ -18,6 +18,7 @@ from ..config import AppConfig
 from ..dataset import to_prompt
 from ..judges import (Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, SkillRouter,
                         ensure_classified)
+from ..judges.base import flush_web_trace_records
 from ..judges.ensemble import aggregate_pairs, aggregate_scores
 from ..llm_stream import is_retriable_llm_error
 from ..meta import ground_truth
@@ -30,6 +31,7 @@ from ..observability import (
 from ..runners import build_runner
 from ..schema import EvalItem
 from .history import save_task
+from .operation_media import prepare_session_operation_item
 from .tasks import Task
 
 
@@ -131,6 +133,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 
     async def one(idx: int, item_dict: dict):
         request_id = make_request_id(task.created_at, task.id, idx)
+        pending_judge_traces: list[tuple[str, dict]] = []
 
         def publish_progress(payload: dict) -> None:
             def apply() -> None:
@@ -144,11 +147,18 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                 loop.call_soon_threadsafe(apply)
 
         item_id = item_dict.get("id", f"q{idx}")
+
+        def collect_judge_trace(trace_path: str, record: dict) -> None:
+            pending_judge_traces.append((trace_path, record))
+
         with bind_chain_context(
+            task_id=task.id,
+            session_name=task.session_name,
             request_id=request_id,
             item_id=item_id,
             item_index=idx,
             progress_callback=publish_progress,
+            judge_trace_callback=collect_judge_trace,
         ):
             log_event(
                 "任务",
@@ -173,52 +183,96 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                 )
                 last_error = None
                 res = None
-                for attempt in range(2):
+                if task.mode == "operation" and not item_dict.get("frames"):
                     try:
-                        if attempt:
-                            log_event(
-                                "单题评测",
-                                "开始外层重试",
-                                level=logging.WARNING,
-                                details={"请求次数": f"{attempt + 1}/2"},
-                                progress=15,
-                                progress_message="正在重新执行单题评测",
-                            )
-                        res = await asyncio.wait_for(
-                            _eval_one(
-                                task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
-                                online_runner, process_dims, arbitrator, task=task
-                            ),
-                            timeout=eval_timeout,
-                        )
-                        break
-                    except asyncio.TimeoutError:
-                        last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
                         log_event(
-                            "单题评测",
-                            "超时",
-                            level=logging.ERROR,
-                            details=error_details(last_error),
+                            "视频准备",
+                            "校验视频并分析场景",
+                            details={"视频路径": item_dict.get("video_path")},
+                            progress=3,
+                            progress_message="正在校验视频并分析场景",
                         )
-                        break
+                        prepared = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                prepare_session_operation_item,
+                                item_dict,
+                                session_name=task.session_name,
+                                item_index=idx,
+                                total_items=len(task.items),
+                            ),
+                            timeout=float(task.options.get("video_prepare_timeout_s") or 300),
+                        )
+                        item_dict.clear()
+                        item_dict.update(prepared)
+                        _persist_task(task)
+                        log_event(
+                            "视频准备",
+                            "关键帧提取完成",
+                            details={
+                                "关键帧数": item_dict.get("frame_count"),
+                                "抽帧目录": str(Path(item_dict["frames"][0]).parent),
+                            },
+                            progress=12,
+                            progress_message=f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
+                        )
                     except Exception as e:
                         last_error = e
-                        retryable = is_retriable_llm_error(e)
-                        will_retry = attempt == 0 and retryable
                         log_event(
-                            "单题评测",
-                            "失败，准备重试" if will_retry else "最终失败",
-                            level=logging.WARNING if will_retry else logging.ERROR,
-                            details={
-                                "请求次数": f"{attempt + 1}/2",
-                                "可重试": retryable,
-                                **error_details(e),
-                            },
+                            "视频准备",
+                            "失败",
+                            level=logging.ERROR,
+                            details=error_details(e),
+                            progress=12,
+                            progress_message="视频校验或抽帧失败",
+                            progress_status="error",
                         )
-                        if will_retry:
-                            await asyncio.sleep(1.0)
-                            continue
-                        break
+                if last_error is None:
+                    for attempt in range(2):
+                        try:
+                            if attempt:
+                                log_event(
+                                    "单题评测",
+                                    "开始外层重试",
+                                    level=logging.WARNING,
+                                    details={"请求次数": f"{attempt + 1}/2"},
+                                    progress=15,
+                                    progress_message="正在重新执行单题评测",
+                                )
+                            res = await asyncio.wait_for(
+                                _eval_one(
+                                    task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
+                                    online_runner, process_dims, arbitrator, task=task
+                                ),
+                                timeout=eval_timeout,
+                            )
+                            break
+                        except asyncio.TimeoutError:
+                            last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
+                            log_event(
+                                "单题评测",
+                                "超时",
+                                level=logging.ERROR,
+                                details=error_details(last_error),
+                            )
+                            break
+                        except Exception as e:
+                            last_error = e
+                            retryable = is_retriable_llm_error(e)
+                            will_retry = attempt == 0 and retryable
+                            log_event(
+                                "单题评测",
+                                "失败，准备重试" if will_retry else "最终失败",
+                                level=logging.WARNING if will_retry else logging.ERROR,
+                                details={
+                                    "请求次数": f"{attempt + 1}/2",
+                                    "可重试": retryable,
+                                    **error_details(e),
+                                },
+                            )
+                            if will_retry:
+                                await asyncio.sleep(1.0)
+                                continue
+                            break
                 if res is None:
                     res = {
                         "index": idx,
@@ -235,6 +289,12 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                         request_id=request_id,
                     )
             res["index"] = idx
+            if pending_judge_traces:
+                await asyncio.to_thread(
+                    flush_web_trace_records,
+                    pending_judge_traces,
+                    res,
+                )
             task.results.append(res)
             task.done_total += 1
             failed = bool(res.get("error"))
