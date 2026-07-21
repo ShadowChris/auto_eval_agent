@@ -125,7 +125,13 @@ class RubricJudge:
     async def score(self, item: EvalItem, model_name: str, answer: str, run_idx: int = 0,
                     eval_mode: str = "result", process_dims=None, competitor: str | None = None,
                     stream_callback=None) -> SingleScore:
-        prompt_context = resolve_prompt_context(item.context, self.evaluation_time)
+        # 操控类只使用样本显式提供的背景，避免把评测时间误当成录屏执行时间。
+        # 其他模式仍保留当前时间兜底，用于时效性事实判断。
+        prompt_context = (
+            (item.context or "").strip()
+            if eval_mode == "operation"
+            else resolve_prompt_context(item.context, self.evaluation_time)
+        )
         # 自动垂域分类：若未预标 → 兜底用当前裁判 model 分类（正常流程已在 ensure_classified 完成）
         if (
             (not item.category or item.category == "default")

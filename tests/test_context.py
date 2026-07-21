@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from auto_eval.config import load_config
+from auto_eval.config import RubricDim, load_config
 from auto_eval.dataset import to_prompt
 from auto_eval.judges.prompts import (
     OPERATION_USER,
@@ -13,7 +13,7 @@ from auto_eval.judges.prompts import (
     RUBRIC_USER,
     resolve_prompt_context,
 )
-from auto_eval.judges.rubric_judge import _classify
+from auto_eval.judges.rubric_judge import RubricJudge, _classify
 from auto_eval.judges.skill_router import SkillRouter
 from auto_eval.schema import EvalItem
 from auto_eval.web.history import export_rows
@@ -123,6 +123,51 @@ def test_empty_context_falls_back_to_frozen_evaluation_time(context):
     assert resolved == "当前时间：2026年07月04日 23:40:12（时区：UTC+08:00）"
     assert resolved in prompt
     assert TRUSTED_LABEL in prompt
+
+
+@pytest.mark.asyncio
+async def test_operation_without_context_does_not_inject_evaluation_time():
+    frozen = datetime(2026, 7, 4, 23, 40, 12, tzinfo=timezone(timedelta(hours=8)))
+
+    class CaptureClient:
+        persona = "终端用户"
+        cfg = SimpleNamespace(name="judge", persona="end_user")
+
+        def __init__(self):
+            self.user_prompt = ""
+
+        async def complete(self, system, user):
+            self.user_prompt = user
+            return SimpleNamespace(
+                content=(
+                    '<analysis>画面显示目标状态。</analysis>'
+                    '{"rubric":{"最终态正确":5},"total":5,'
+                    '"correctness":"right","error_type":null,"rationale":"已完成"}'
+                ),
+                rounds=1,
+                used_search=False,
+                tool_trace=[],
+                search_queries=[],
+                truncated=False,
+            )
+
+    client = CaptureClient()
+    judge = RubricJudge(
+        client,
+        [RubricDim(name="最终态正确", description="最终状态是否满足用户需求", scale=5)],
+        evaluation_time=frozen,
+    )
+
+    await judge.score(
+        EvalItem(id="op", question="打开蓝牙"),
+        model_name="agent",
+        answer="已打开",
+        eval_mode="operation",
+    )
+
+    assert "当前时间" not in client.user_prompt
+    assert "2026年07月04日" not in client.user_prompt
+    assert TRUSTED_LABEL not in client.user_prompt
 
 
 @pytest.mark.asyncio
