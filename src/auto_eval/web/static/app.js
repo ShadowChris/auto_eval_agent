@@ -15,7 +15,7 @@ createApp({
     const fileText = ref("");
     const isJsonl = ref(false);
     const items = ref([]);
-    const opItems = ref([{ query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", uploading: false, uploadError: "" }]);
+    const opItems = ref([{ query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", taskStartTime: null, taskEndTime: null, uploading: false, uploadError: "" }]);
     const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
@@ -62,7 +62,7 @@ createApp({
           compare: "每行一题：query [||| @context: 背景] ||| answerA ||| answerB [||| reference]",
           online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
-          operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)；相对视频路径以项目根目录为基准。",
+          operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
         }[mode.value])
     );
     const placeholder = computed(
@@ -520,7 +520,7 @@ createApp({
 
     // —— 操作类评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
     function newOpItem() {
-      return { id: "", query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", uploading: false, uploadError: "" };
+      return { id: "", query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, uploading: false, uploadError: "" };
     }
     function addOpItem() { opItems.value.push(newOpItem()); }
     function removeOpItem(i) { if (opItems.value.length > 1) opItems.value.splice(i, 1); }
@@ -587,6 +587,8 @@ createApp({
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || "",
             answer: item.answer || "",
+            taskStartTime: item.task_start_time ?? null,
+            taskEndTime: item.task_end_time ?? null,
           }));
         }
       } catch (error) {
@@ -643,6 +645,8 @@ createApp({
             item.media = [it.videoPath];
             item.frames = it.frames;
           }
+          if (Number.isFinite(it.taskStartTime)) item.task_start_time = it.taskStartTime;
+          if (Number.isFinite(it.taskEndTime)) item.task_end_time = it.taskEndTime;
           return item;
         });
         errors.value = [];

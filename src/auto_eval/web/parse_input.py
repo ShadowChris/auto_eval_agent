@@ -5,7 +5,8 @@
   compare: {query, context?, answer_a, answer_b, reference?}
   online : {query, context?, reference?}
   process: {query, context?, answer, trace, reference?}
-  operation: {id?, query, context?, video_path, answer?}
+  operation: {id?, query, context?, video_path, answer?,
+              task_start_time?, task_end_time?}
 
 文本格式在 query 后支持可选的显式背景段：
   query ||| @context: 背景信息 ||| 其余原有字段
@@ -14,7 +15,11 @@
 from __future__ import annotations
 
 import json
+import math
+from numbers import Real
 from typing import Literal
+
+from ..media import DEFAULT_TASK_START_TIME
 
 Mode = Literal["single", "compare", "online", "process", "operation"]
 _CONTEXT_PREFIX = "@context:"
@@ -26,6 +31,29 @@ def _extract_text_context(parts: list[str]) -> tuple[list[str], str | None]:
         return parts, None
     context = parts[1][len(_CONTEXT_PREFIX):].strip()
     return [parts[0], *parts[2:]], context or None
+
+
+def _operation_times(obj: dict) -> dict[str, float]:
+    """读取操作类 JSONL 的可选任务起止时间（单位：秒）。"""
+    times: dict[str, float] = {}
+    for field in ("task_start_time", "task_end_time"):
+        value = obj.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"{field} 必须是有限数字（单位：秒）")
+        normalized = float(value)
+        if not math.isfinite(normalized):
+            raise ValueError(f"{field} 必须是有限数字（单位：秒）")
+        if normalized < 0:
+            raise ValueError(f"{field} 不能小于 0")
+        times[field] = normalized
+
+    start = times.get("task_start_time", DEFAULT_TASK_START_TIME)
+    end = times.get("task_end_time")
+    if end is not None and end <= start:
+        raise ValueError("task_end_time 必须大于 task_start_time")
+    return times
 
 
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
@@ -76,7 +104,7 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
 
 
 def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
-    """解析 jsonl 文本。字段：question/query 必填；context 可选且空值忽略。"""
+    """解析 jsonl；操作类任务起止时间为可选的秒数，空值使用默认策略。"""
     items: list[dict] = []
     errors: list[str] = []
     operation_ids: set[str] = set()
@@ -130,6 +158,11 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             if not isinstance(video_path, str) or not video_path.strip():
                 errors.append(f"第 {ln} 行 operation 模式缺少 video_path")
                 continue
+            try:
+                operation_times = _operation_times(obj)
+            except ValueError as exc:
+                errors.append(f"第 {ln} 行 {exc}")
+                continue
             item_id = obj.get("id")
             if item_id is not None:
                 if not isinstance(item_id, str) or not item_id.strip():
@@ -148,6 +181,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item["video_path"] = video_path.strip()
             item["category"] = obj.get("category") or "operation"
             item["source_line"] = ln
+            item.update(operation_times)
             if statement and statement.strip():
                 item["answer"] = statement.strip()
         # online 不需要 answer
