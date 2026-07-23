@@ -10,7 +10,7 @@ judges:
     api_key_env: PROXY_API_KEY
     model: kimi-for-coding-openai
     persona: strict_expert
-    temperature: 1            # kimi-for-coding-openai 限定 temperature 只能为 1（其余裁判默认 0）
+    temperature: 1            # 当前兼容端点使用 temperature=1（其余裁判默认 0）
     enable_web_search: true          # 开启 agent loop 联网查证
     enable_fetch: true               # 允许抓取网页正文深挖
     enable_calculate: true           # 允许算术核查
@@ -21,9 +21,10 @@ judges:
   - name: judge_2
     display: 终端用户
     runner: openai_compat
-    base_url: http://1239mxgn96959.vicp.fun:4009
-    api_key_env: PROXY_API_KEY
-    model: deepseek-v4-pro-openai
+    base_url: https://api.siliconflow.cn/v1
+    api_key_env: SILICON_FLOW_API_KEY
+    model: Qwen/Qwen3.5-397B-A17B
+    temperature: 1            # kimi-for-coding-openai 限定 temperature 只能为 1（其余裁判默认 0）
     persona: end_user              # 与 judge_1(strict_expert) 形成视角差异
     enable_web_search: true
     enable_fetch: true
@@ -54,7 +55,7 @@ eval_options:
   search_provider: [tavily]   # 联网检索：tavily | serpapi | bing | jina
   search_topk: 3
   # 轻量垂域分类：每个 case 仅跑一次，独立于裁判
-  classify_model: deepseek-v4-pro-openai
+  classify_model: glm-5.2-openai
   classify_base_url: http://1239mxgn96959.vicp.fun:4009
   classify_api_key_env: PROXY_API_KEY
 

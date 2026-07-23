@@ -496,8 +496,17 @@ createApp({
       return s.length > 50 ? s.slice(0, 50) + "…" : s;
     }
 
+    function defaultJudgeSelection(targetMode) {
+      if (targetMode === "operation") {
+        const endUserJudge = judges.value.find((judge) => judge.persona === "end_user");
+        if (endUserJudge) return [endUserJudge.name];
+      }
+      return judges.value.length ? [judges.value[0].name] : [];
+    }
+
     function switchMode(k) {
       mode.value = k;
+      selectedJudges.value = defaultJudgeSelection(k);
       items.value = [];
       previewPage.value = 1;
       progressPage.value = 1;
@@ -846,7 +855,7 @@ createApp({
       if (c.key === "winner") return v === "a" ? "A" : v === "b" ? "B" : "平";
       if (c.key === "correctness") {
         if (mode.value === "operation")
-          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 部分", unclear: "?" }[v] || v) || "";
+          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 部分/非完美", unclear: "? 无法判断" }[v] || v) || "";
         return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
       }
       if (v == null) return "";
@@ -1032,7 +1041,7 @@ createApp({
       const d = await r.json();
       judges.value = d.judges;
       models.value = d.models;
-      selectedJudges.value = d.judges.length ? [d.judges[0].name] : [];
+      selectedJudges.value = defaultJudgeSelection(mode.value);
       selectedModel.value = d.models[0] || "";
       loadHistory();
     });

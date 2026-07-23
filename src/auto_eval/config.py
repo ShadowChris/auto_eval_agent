@@ -87,6 +87,8 @@ class RubricDim(BaseModel):
     description: str
     weight: float = 1.0
     scale: int = 5
+    criteria: list[str] = Field(default_factory=list)  # 仅作为评分检查项，不单独输出分数
+    score_anchors: dict[int, str] = Field(default_factory=dict)  # 各分值对应的评分标准
     sub_dimensions: list[SubDim] = Field(default_factory=list)  # 一级下有二级则渲染二级，裁判按二级评分  # 满分
 
 

@@ -60,8 +60,11 @@ def _flatten_rubric(raw, dim_names=None):
                     out[k] = int(v["total"])
                 else:
                     out[k] = round(sum(nums) / len(nums))
+            elif isinstance(v.get("total"), (int, float)) and not isinstance(v.get("total"), bool):
+                # 无二级维度的统一格式：{"total": score, "reason": "..."}
+                out[k] = int(v["total"])
             else:
-                # 所有子维度都 N/A → 整一级维度 N/A
+                # 没有可用 total，或所有子维度都 N/A → 整个一级维度 N/A
                 na_dims.append(k)
                 if v.get("reason"):
                     reasons[k] = str(v["reason"])
