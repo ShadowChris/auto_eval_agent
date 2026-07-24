@@ -257,4 +257,6 @@ def test_web_exposes_rich_content_mode_and_columns() -> None:
     assert '{ key: "rich_content", label: "垂域挂卡 / Superlink" }' in app_js
     assert '{ key: "card_presence", label: "挂卡" }' in app_js
     assert '{ key: "superlink_count", label: "链接数" }' in app_js
+    assert '{ key: "needs_review", label: "需人工复核" }' in app_js
+    assert "需人工复核 {{ summary.needs_review_count }} 条" in index_html
     assert "mode!=='rich_content'" in index_html

@@ -265,7 +265,7 @@
       <span v-if="summary.card_suitable_rate!=null">挂卡合适率 {{ (summary.card_suitable_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.superlink_presence_rate!=null">Superlink 出现率 {{ (summary.superlink_presence_rate*100).toFixed(0) }}%（观察到 {{ summary.superlink_total_observed }} 个）</span>
       <span v-if="summary.both_count!=null">挂卡与链接同现 {{ summary.both_count }} 条</span>
-      <span v-if="summary.needs_review_count">待人工复核 {{ summary.needs_review_count }} 条</span>
+      <span v-if="summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
     </div>
     <details class="skill-breakdown" v-if="summary && summary.by_skill && summary.by_skill.overview && summary.by_skill.overview.length" open>
       <summary>📊 按垂域分析（{{ summary.by_skill.overview.length }} 个垂域 · 维度问题阈值 ≤ {{ summary.by_skill.threshold }}）</summary>
@@ -388,6 +388,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260723_rich_content_v1"></script>
+  <script type="module" src="/static/app.js?v=20260724_rich_content_v2"></script>
 </body>
 </html>

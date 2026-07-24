@@ -378,7 +378,7 @@ createApp({
           { key: "superlink_count_type", label: "计数类型" },
           { key: "superlink_texts", label: "链接文字" },
           { key: "answer_coverage", label: "回答覆盖" },
-          { key: "needs_review", label: "人工复核" },
+          { key: "needs_review", label: "需人工复核" },
           { key: "rationale", label: "识别结论" },
           { key: "latency_s", label: "耗时" },
         ];
