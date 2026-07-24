@@ -9,13 +9,15 @@ createApp({
       { key: "online", label: "接模型在线评估" },
       { key: "process", label: "过程盲评(含轨迹)" },
       { key: "operation", label: "操作类(录屏)" },
+      { key: "rich_content", label: "垂域挂卡 / Superlink" },
     ];
     const mode = ref("single");
+    const isVideoMode = computed(() => ["operation", "rich_content"].includes(mode.value));
     const text = ref("");
     const fileText = ref("");
     const isJsonl = ref(false);
     const items = ref([]);
-    const opItems = ref([{ query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", taskStartTime: null, taskEndTime: null, uploading: false, uploadError: "" }]);
+    const opItems = ref([newOpItem()]);
     const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
@@ -63,6 +65,7 @@ createApp({
           online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
           operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
+          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/content_start_time/content_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
         }[mode.value])
     );
     const placeholder = computed(
@@ -73,6 +76,7 @@ createApp({
           online: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场\n计算 17 × 24 等于多少？",
           process: "规划回家路线 ||| @context: 当前位于上海人民广场，目的地徐家汇 ||| 最终回答 ||| 推理轨迹\n某函数是否正确？ ||| 正确 ||| def f(n): return 1 if n<=1 else n*f(n-1)",
           operation: "",
+          rich_content: "",
         }[mode.value])
     );
 
@@ -357,6 +361,27 @@ createApp({
           { key: "rationale", label: "步骤与证据" },
           { key: "latency_s", label: "耗时" },
         ];
+      if (mode.value === "rich_content")
+        return [
+          { key: "item_id", label: "题号" },
+          { key: "query", label: "Query" },
+          ...contextCols,
+          { key: "category_display", label: "垂域" },
+          { key: "card_presence", label: "挂卡" },
+          { key: "card_count", label: "挂卡数" },
+          { key: "card_types", label: "挂卡类型" },
+          { key: "card_contents", label: "挂卡内容" },
+          { key: "card_suitability", label: "挂卡适配性" },
+          { key: "card_suitability_score", label: "适配分" },
+          { key: "superlink_presence", label: "Superlink" },
+          { key: "superlink_count", label: "链接数" },
+          { key: "superlink_count_type", label: "计数类型" },
+          { key: "superlink_texts", label: "链接文字" },
+          { key: "answer_coverage", label: "回答覆盖" },
+          { key: "needs_review", label: "人工复核" },
+          { key: "rationale", label: "识别结论" },
+          { key: "latency_s", label: "耗时" },
+        ];
       const dims = rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d }));
       return [
         { key: "item_id", label: "题号" },
@@ -401,7 +426,7 @@ createApp({
         if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -497,7 +522,7 @@ createApp({
     }
 
     function defaultJudgeSelection(targetMode) {
-      if (targetMode === "operation") {
+      if (["operation", "rich_content"].includes(targetMode)) {
         const endUserJudge = judges.value.find((judge) => judge.persona === "end_user");
         if (endUserJudge) return [endUserJudge.name];
       }
@@ -513,6 +538,7 @@ createApp({
       errors.value = [];
       fileText.value = "";
       isJsonl.value = false;
+      if (["operation", "rich_content"].includes(k)) opItems.value = [newOpItem()];
     }
 
     function onFile(e) {
@@ -529,7 +555,7 @@ createApp({
 
     // —— 操作类评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
     function newOpItem() {
-      return { id: "", query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, uploading: false, uploadError: "" };
+      return { id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, contentStartTime: null, contentEndTime: null, uploading: false, uploadError: "" };
     }
     function addOpItem() { opItems.value.push(newOpItem()); }
     function removeOpItem(i) { if (opItems.value.length > 1) opItems.value.splice(i, 1); }
@@ -540,7 +566,7 @@ createApp({
       it.uploading = true; it.uploadError = "";
       const fd = new FormData(); fd.append("file", file);
       try {
-        const r = await fetch("/api/upload/video", { method: "POST", body: fd });
+        const r = await fetch(`/api/upload/video?mode=${encodeURIComponent(mode.value)}`, { method: "POST", body: fd });
         if (!r.ok) { it.uploadError = "上传失败 " + r.status; return; }
         const d = await r.json();
         it.videoName = file.name;
@@ -574,7 +600,7 @@ createApp({
         const parseResponse = await fetch("/api/parse", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "operation", jsonl: content }),
+          body: JSON.stringify({ mode: mode.value, jsonl: content }),
         });
         const parsed = await parseResponse.json().catch(() => ({}));
         if (!parseResponse.ok) throw new Error(parsed.detail || "JSONL 解析请求失败");
@@ -593,11 +619,14 @@ createApp({
             id: item.id || "",
             query: item.query || "",
             context: item.context || "",
+            category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || "",
-            answer: item.answer || "",
+            answer: mode.value === "rich_content" ? (item.answer_text || "") : (item.answer || ""),
             taskStartTime: item.task_start_time ?? null,
             taskEndTime: item.task_end_time ?? null,
+            contentStartTime: item.content_start_time ?? null,
+            contentEndTime: item.content_end_time ?? null,
           }));
         }
       } catch (error) {
@@ -608,7 +637,7 @@ createApp({
     }
 
     const canSubmit = computed(() => {
-      if (mode.value === "operation")
+      if (isVideoMode.value)
         return !opPreparing.value && opItems.value.some(
           (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
         );
@@ -633,29 +662,36 @@ createApp({
 
     async function submit() {
       runError.value = "";
-      if (mode.value === "operation") {
+      if (isVideoMode.value) {
         const valid = opItems.value.filter(
           (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
         );
         if (!valid.length) {
-          alert("请为每题填写操作意图(query)，并提供视频路径或上传视频后再评估。");
+          alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
           return;
         }
         items.value = valid.map((it, idx) => {
           const item = {
-            id: it.id || `op${idx + 1}`,
+            id: it.id || `${mode.value === "operation" ? "op" : "rich"}${idx + 1}`,
             query: it.query.trim(),
             context: (it.context || "").trim(),
-            answer: (it.answer || "").trim(),
-            category: "operation",
             video_path: it.videoPath,
           };
+          if (mode.value === "operation") {
+            item.category = "operation";
+            item.answer = (it.answer || "").trim();
+          } else {
+            item.category = (it.category || "").trim() || "default";
+            item.answer_text = (it.answer || "").trim();
+          }
           if ((it.frames || []).length) {
             item.media = [it.videoPath];
             item.frames = it.frames;
           }
           if (Number.isFinite(it.taskStartTime)) item.task_start_time = it.taskStartTime;
           if (Number.isFinite(it.taskEndTime)) item.task_end_time = it.taskEndTime;
+          if (Number.isFinite(it.contentStartTime)) item.content_start_time = it.contentStartTime;
+          if (Number.isFinite(it.contentEndTime)) item.content_end_time = it.contentEndTime;
           return item;
         });
         errors.value = [];
@@ -858,6 +894,28 @@ createApp({
           return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 部分/非完美", unclear: "? 无法判断" }[v] || v) || "";
         return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
       }
+      if (["card_types", "card_contents", "superlink_texts"].includes(c.key)) {
+        return Array.isArray(v) ? v.join("；") : (v || "");
+      }
+      if (c.key === "card_presence" || c.key === "superlink_presence") {
+        return ({ present: "有", absent: "无", unclear: "不确定" }[v] || v) || "";
+      }
+      if (c.key === "card_suitability") {
+        return ({
+          suitable: "合适",
+          partially_suitable: "部分合适",
+          unsuitable: "不合适",
+          unclear: "不确定",
+          not_applicable: "N/A",
+        }[v] || v) || "";
+      }
+      if (c.key === "answer_coverage") {
+        return ({ complete: "完整", partial: "部分", unclear: "不确定" }[v] || v) || "";
+      }
+      if (c.key === "superlink_count_type") {
+        return ({ exact: "精确", lower_bound: "至少", unknown: "未知" }[v] || v) || "";
+      }
+      if (c.key === "needs_review") return v ? "是" : "否";
       if (v == null) return "";
       return v;
     }
@@ -1051,7 +1109,7 @@ createApp({
     });
 
     return {
-      modes, mode, text, items, errors, judges, models, selectedJudges, selectedModel,
+      modes, mode, isVideoMode, text, items, errors, judges, models, selectedJudges, selectedModel,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, loadingHistory, pageSize,

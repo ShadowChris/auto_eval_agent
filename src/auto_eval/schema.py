@@ -12,6 +12,15 @@ from pydantic import BaseModel, Field
 Correctness = Literal["right", "wrong", "partial", "unclear"]
 Winner = Literal["a", "b", "tie"]
 Difficulty = Literal["easy", "medium", "hard"]
+AnswerCoverage = Literal["complete", "partial", "unclear"]
+CardRelation = Literal["direct", "supporting", "weak", "unrelated", "unclear"]
+CardSuitability = Literal[
+    "suitable",
+    "partially_suitable",
+    "unsuitable",
+    "unclear",
+    "not_applicable",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -82,6 +91,42 @@ class SingleScore(BaseModel):
     tool_trace: list[str] = Field(default_factory=list)  # 评测 agent 的工具调用轨迹
     truncated: bool = False  # 是否被 max_rounds 截断（已强制判定兜底）
     latency_ms: int = 0
+
+
+class RichContentCard(BaseModel):
+    """视觉裁判识别到的一张结构化富内容挂卡。"""
+
+    type: str
+    entity: str = ""
+    visible_content: str = ""
+    answer_position: str = ""
+    relation_to_query: CardRelation = "unclear"
+    suitability: CardSuitability = "unclear"
+    suitability_score: int | None = Field(default=None, ge=1, le=5)
+    reason: str = ""
+    evidence_frames: list[int] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class RichContentSuperlink(BaseModel):
+    """回答区域中一处可点击蓝色文字；同一处跨帧重复只保留一条。"""
+
+    text: str
+    answer_position: str = ""
+    surrounding_context: str = ""
+    evidence_frames: list[int] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class RichContentObservation(BaseModel):
+    """一次垂域挂卡 / Superlink 视频视觉识别结果。"""
+
+    answer_coverage: AnswerCoverage = "unclear"
+    cards: list[RichContentCard] = Field(default_factory=list)
+    superlinks: list[RichContentSuperlink] = Field(default_factory=list)
+    needs_review: bool = False
+    review_reason: str = ""
+    rationale: str = ""
 
 
 class SinglePair(BaseModel):

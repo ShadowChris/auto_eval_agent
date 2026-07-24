@@ -134,12 +134,38 @@ class DomainSkill(BaseModel):
     examples: list[str] = Field(default_factory=list)
 
 
+class VisualExtractionConfig(BaseModel):
+    """视频视觉评估模式的抽帧与图片编码参数。"""
+
+    algorithm_version: str
+    default_start_time: float = 0.0
+    max_frames: int = 16
+    sample_fps: float = 1.5
+    scene_threshold: float = 0.03
+    scene_min_gap_s: float = 0.5
+    state_layout_threshold: float = 0.025
+    stable_min_duration_s: float = 0.8
+    max_edge: int = 1280
+    jpeg_quality: int = 85
+
+
+class VisualModeProfile(BaseModel):
+    """独立于垂域分类的视频视觉评估配置。"""
+
+    name: str = ""
+    display: str = ""
+    card_types: dict[str, str] = Field(default_factory=dict)
+    suitability_anchors: dict[int, str] = Field(default_factory=dict)
+    extraction: VisualExtractionConfig
+
+
 class AppConfig(BaseModel):
     models: list[ModelConfig]
     judges: list[JudgeConfig]
     rubrics: list[RubricDim]
     process_rubrics: list[RubricDim] = Field(default_factory=list)  # 过程盲评维度
     domain_skills: dict[str, DomainSkill] = Field(default_factory=dict)  # 垂域 Skill
+    visual_modes: dict[str, VisualModeProfile] = Field(default_factory=dict)
     eval_options: EvalOptions = Field(default_factory=EvalOptions)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
 
@@ -157,7 +183,8 @@ def _read_yaml(path: Path) -> Any:
 
 def _parse_rubrics_list(raw_list):
     out = []
-    for raw in (raw_list or []):
+    for source in (raw_list or []):
+        raw = dict(source)
         subs_raw = raw.pop("sub_dimensions", None)
         subs = [SubDim(**s) for s in (subs_raw or [])]
         out.append(RubricDim(**raw, sub_dimensions=subs))
@@ -177,6 +204,18 @@ def _load_skills(config_dir):
     return skills
 
 
+def _load_visual_modes(config_dir):
+    profiles_dir = Path(config_dir) / "visual_modes"
+    if not profiles_dir.is_dir():
+        return {}
+    profiles = {}
+    for f in sorted(profiles_dir.glob("*.yaml")):
+        data = dict(_read_yaml(f) or {})
+        name = data.pop("name", f.stem)
+        profiles[name] = VisualModeProfile(name=name, **data)
+    return profiles
+
+
 def load_config(config_dir: str | Path) -> AppConfig:
     """读取 config_dir 下的 models/judges/rubrics.yaml（eval_options/ensemble 内联在 judges.yaml）。"""
     config_dir = Path(config_dir)
@@ -188,7 +227,8 @@ def load_config(config_dir: str | Path) -> AppConfig:
     judges = [JudgeConfig(**j) for j in (judges_data.get("judges") or [])]
     def _parse_rubrics(data):
         out = []
-        for raw in (data or []):
+        for source in (data or []):
+            raw = dict(source)
             subs_raw = raw.pop("sub_dimensions", None)
             subs = [SubDim(**s) for s in (subs_raw or [])]
             out.append(RubricDim(**raw, sub_dimensions=subs))
@@ -197,6 +237,7 @@ def load_config(config_dir: str | Path) -> AppConfig:
     rubrics = _parse_rubrics(rubrics_data.get("rubrics"))
     process_rubrics = _parse_rubrics(rubrics_data.get("process_rubrics"))
     domain_skills = _load_skills(config_dir)
+    visual_modes = _load_visual_modes(config_dir)
     eval_options = EvalOptions(**(judges_data.get("eval_options") or {}))
     ensemble = EnsembleConfig(**(judges_data.get("ensemble") or {}))
     return AppConfig(
@@ -205,6 +246,7 @@ def load_config(config_dir: str | Path) -> AppConfig:
         rubrics=rubrics,
         process_rubrics=process_rubrics,
         domain_skills=domain_skills,
+        visual_modes=visual_modes,
         eval_options=eval_options,
         ensemble=ensemble,
     )

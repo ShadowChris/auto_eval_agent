@@ -870,6 +870,7 @@ def extract_scene_keyframes(
     task_end_time: float | None = None,
     sample_fps: float = 1.0,
     config: KeyframeConfig | None = None,
+    algorithm_version: str = KEYFRAME_ALGORITHM_VERSION,
 ) -> list[Path]:
     """抽取操作录屏关键帧并返回有序图片路径。
 
@@ -928,7 +929,7 @@ def extract_scene_keyframes(
             )
 
         metadata = {
-            "algorithm_version": KEYFRAME_ALGORITHM_VERSION,
+            "algorithm_version": algorithm_version,
             "video": str(video),
             "duration": round(duration, 3),
             "config": asdict(config),

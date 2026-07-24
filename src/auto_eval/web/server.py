@@ -198,8 +198,8 @@ async def api_prepare_operation(req: OperationPrepareReq):
     }
 
 @app.post("/api/upload/video")
-async def api_upload_video(file: UploadFile = File(...)):
-    """操作类评测：上传录屏 → 存盘 → 场景抽帧 → 返回帧路径列表（供 /api/eval 的 item 引用）。"""
+async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation"):
+    """上传视觉评估录屏；富内容模式延迟到开始评估时使用专用参数抽帧。"""
     data = await file.read()
     if len(data) > 20 * 1024 * 1024:
         raise HTTPException(413, "视频过大，限制 ≤20MB")
@@ -209,9 +209,17 @@ async def api_upload_video(file: UploadFile = File(...)):
     suffix = Path(file.filename or "v.mp4").suffix.lower() or ".mp4"
     video_path = video_dir / f"{video_id}{suffix}"
     video_path.write_bytes(data)
+    duration = probe_duration(video_path)
+    if mode == "rich_content":
+        return {
+            "video_id": video_id,
+            "video_path": str(video_path),
+            "frames": [],
+            "frame_count": 0,
+            "duration": round(duration, 2),
+        }
     frame_dir = video_dir / f"{video_id}_frames"
     frames = extract_scene_keyframes(video_path, frame_dir)
-    duration = probe_duration(video_path)
     return {
         "video_id": video_id,
         "video_path": str(video_path),
@@ -321,4 +329,4 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8502)
+    uvicorn.run(app, host="0.0.0.0", port=8503)

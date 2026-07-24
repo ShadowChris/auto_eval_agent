@@ -7,6 +7,8 @@
   process: {query, context?, answer, trace, reference?}
   operation: {id?, query, context?, video_path, answer?,
               task_start_time?, task_end_time?}
+  rich_content: {id?, query, context?, video_path, answer_text?,
+                 content_start_time?, content_end_time?, category?}
 
 文本格式在 query 后支持可选的显式背景段：
   query ||| @context: 背景信息 ||| 其余原有字段
@@ -21,7 +23,14 @@ from typing import Literal
 
 from ..media import DEFAULT_TASK_START_TIME
 
-Mode = Literal["single", "compare", "online", "process", "operation"]
+Mode = Literal[
+    "single",
+    "compare",
+    "online",
+    "process",
+    "operation",
+    "rich_content",
+]
 _CONTEXT_PREFIX = "@context:"
 
 
@@ -56,10 +65,33 @@ def _operation_times(obj: dict) -> dict[str, float]:
     return times
 
 
+def _rich_content_times(obj: dict) -> dict[str, float]:
+    """读取富内容视频中回答内容的可选起止时间（单位：秒）。"""
+    times: dict[str, float] = {}
+    for field in ("content_start_time", "content_end_time"):
+        value = obj.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"{field} 必须是有限数字（单位：秒）")
+        normalized = float(value)
+        if not math.isfinite(normalized):
+            raise ValueError(f"{field} 必须是有限数字（单位：秒）")
+        if normalized < 0:
+            raise ValueError(f"{field} 不能小于 0")
+        times[field] = normalized
+    start = times.get("content_start_time", 0.0)
+    end = times.get("content_end_time")
+    if end is not None and end <= start:
+        raise ValueError("content_end_time 必须大于 content_start_time")
+    return times
+
+
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 ||| 分隔的粘贴文本。返回 (items, errors)。"""
-    if mode == "operation":
-        return [], ["操作类评测请在页面上逐题上传视频，不支持文本粘贴解析"]
+    if mode in ("operation", "rich_content"):
+        label = "操作类" if mode == "operation" else "挂卡 / Superlink"
+        return [], [f"{label}评测请逐题上传视频或导入 JSONL，不支持文本粘贴解析"]
     items: list[dict] = []
     errors: list[str] = []
     for ln, raw in enumerate(text.splitlines(), 1):
@@ -107,7 +139,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 jsonl；操作类任务起止时间为可选的秒数，空值使用默认策略。"""
     items: list[dict] = []
     errors: list[str] = []
-    operation_ids: set[str] = set()
+    video_item_ids: set[str] = set()
     for ln, raw in enumerate(content.splitlines(), 1):
         raw = raw.strip()
         if not raw:
@@ -153,13 +185,17 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 errors.append(f"第 {ln} 行 process 模式缺少 answer/trace")
                 continue
             item["answer"], item["trace"] = a, tr
-        elif mode == "operation":
+        elif mode in ("operation", "rich_content"):
             video_path = obj.get("video_path")
             if not isinstance(video_path, str) or not video_path.strip():
-                errors.append(f"第 {ln} 行 operation 模式缺少 video_path")
+                errors.append(f"第 {ln} 行 {mode} 模式缺少 video_path")
                 continue
             try:
-                operation_times = _operation_times(obj)
+                video_times = (
+                    _operation_times(obj)
+                    if mode == "operation"
+                    else _rich_content_times(obj)
+                )
             except ValueError as exc:
                 errors.append(f"第 {ln} 行 {exc}")
                 continue
@@ -169,21 +205,37 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                     errors.append(f"第 {ln} 行 id 必须是非空字符串")
                     continue
                 item_id = item_id.strip()
-                if item_id in operation_ids:
+                if item_id in video_item_ids:
                     errors.append(f"第 {ln} 行 id 重复：{item_id}")
                     continue
-                operation_ids.add(item_id)
+                video_item_ids.add(item_id)
                 item["id"] = item_id
-            statement = obj.get("agent_statement", obj.get("answer"))
-            if statement is not None and not isinstance(statement, str):
-                errors.append(f"第 {ln} 行 agent_statement 必须是字符串")
-                continue
             item["video_path"] = video_path.strip()
-            item["category"] = obj.get("category") or "operation"
             item["source_line"] = ln
-            item.update(operation_times)
-            if statement and statement.strip():
-                item["answer"] = statement.strip()
+            item.update(video_times)
+            if mode == "operation":
+                statement = obj.get("agent_statement", obj.get("answer"))
+                if statement is not None and not isinstance(statement, str):
+                    errors.append(f"第 {ln} 行 agent_statement 必须是字符串")
+                    continue
+                item["category"] = obj.get("category") or "operation"
+                if statement and statement.strip():
+                    item["answer"] = statement.strip()
+            else:
+                answer_text = obj.get("answer_text")
+                if answer_text is not None and not isinstance(answer_text, str):
+                    errors.append(f"第 {ln} 行 answer_text 必须是字符串")
+                    continue
+                expected_visual = obj.get("expected_visual")
+                if expected_visual is not None and not isinstance(expected_visual, dict):
+                    errors.append(f"第 {ln} 行 expected_visual 必须是 JSON 对象")
+                    continue
+                item["category"] = obj.get("category") or "default"
+                if answer_text and answer_text.strip():
+                    item["answer_text"] = answer_text.strip()
+                if expected_visual is not None:
+                    # 仅用于 mini/元评测核对，不会进入视觉裁判 prompt。
+                    item["expected_visual"] = expected_visual
         # online 不需要 answer
         if obj.get("reference"):
             item["reference"] = obj["reference"]

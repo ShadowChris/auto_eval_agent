@@ -55,18 +55,19 @@
     <h2>① 批量输入</h2>
     <p class="hint">{{ formatHint }}</p>
 
-    <div v-if="mode==='operation'" class="op-cards">
+    <div v-if="isVideoMode" class="op-cards">
       <div class="op-import">
         <div class="op-import-row">
           <label class="op-upload-btn">
             <input type="file" accept=".jsonl,application/json" @change="onOpManifestFile" hidden>
-            导入操作类 JSONL
+            导入{{ mode==='operation' ? '操作类' : '挂卡 / Superlink' }} JSONL
           </label>
           <span v-if="opPreparing" class="running">正在解析 JSONL…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
-        <p class="hint">示例：{"id":"op_001","query":"设置7点闹钟","context":"当前时间22:00","video_path":"data/videos/alarm.mp4","task_start_time":7,"task_end_time":28.5,"agent_statement":"已设置完成"}</p>
+        <p v-if="mode==='operation'" class="hint">示例：{"id":"op_001","query":"设置7点闹钟","context":"当前时间22:00","video_path":"data/videos/alarm.mp4","task_start_time":7,"task_end_time":28.5,"agent_statement":"已设置完成"}</p>
+        <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","content_start_time":0,"content_end_time":18.5}</p>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
       </div>
       <div v-for="(it,i) in opItems" :key="i" class="op-card"
@@ -75,20 +76,22 @@
           <span class="op-idx">题目 {{ i+1 }}<template v-if="it.id"> · {{ it.id }}</template></span>
           <button v-if="opItems.length>1" @click="removeOpItem(i)" class="btn-danger op-del">删除</button>
         </div>
-        <textarea v-model="it.query" rows="2" placeholder="操作意图(query)，如：设一个明天早上7点的闹钟"></textarea>
+        <textarea v-model="it.query" rows="2" :placeholder="mode==='operation' ? '操作意图(query)，如：设一个明天早上7点的闹钟' : '用户问题(query)，如：北京明天天气怎么样'"></textarea>
         <textarea v-model="it.context" rows="2" placeholder="(可选) 可信背景(context)，如：当前时间为晚上10点；设备时区为北京时间"></textarea>
+        <input v-if="mode==='rich_content'" v-model="it.category" placeholder="(可选) 垂域 category，如 weather / music / sports" style="width:100%;box-sizing:border-box;margin-bottom:8px">
         <div class="op-upload">
           <label class="op-upload-btn">
             <input type="file" accept="video/*" @change="onOpVideo($event, i)" hidden>
             {{ it.videoName ? '更换视频' : '选择 / 拖拽上传录屏(mp4 ≤20MB)' }}
           </label>
-          <span v-if="it.uploading" class="hint">抽帧中…</span>
+          <span v-if="it.uploading" class="hint">上传中…</span>
           <span v-if="it.videoName && it.frameCount" class="ok">📹 {{ it.videoName }} · {{ it.frameCount }} 帧<template v-if="it.duration"> · {{ it.duration }} 秒</template> ✓</span>
           <span v-else-if="it.videoName" class="hint">📄 {{ it.videoName }} · 待开始评估时抽帧</span>
           <span v-if="it.uploadError" class="err">{{ it.uploadError }}</span>
         </div>
         <div v-if="it.videoPath" class="op-path">{{ it.videoPath }}</div>
-        <textarea v-model="it.answer" rows="1" placeholder="(可选) agent 自述，如「我已设好7点闹钟」—— 用于交叉验证是否只说不做"></textarea>
+        <textarea v-if="mode==='operation'" v-model="it.answer" rows="1" placeholder="(可选) agent 自述，如「我已设好7点闹钟」—— 用于交叉验证是否只说不做"></textarea>
+        <textarea v-else v-model="it.answer" rows="2" placeholder="(可选) answer_text，只辅助理解回答语义，不能证明画面中存在挂卡或蓝色链接"></textarea>
       </div>
       <button @click="addOpItem" class="op-add">+ 添加题目</button>
     </div>
@@ -258,6 +261,11 @@
       <span v-if="summary.mean_total!=null">平均总分 {{ summary.mean_total }} / {{ (summary.norm_mean*100).toFixed(0) }}%</span>
       <span v-if="summary.judge_accuracy!=null">裁判判题准确率 {{ (summary.judge_accuracy*100).toFixed(0) }}% （{{ summary.meta_n }} 题有参考答案）</span>
       <span v-if="summary.a_winrate!=null">A 胜率 {{ (summary.a_winrate*100).toFixed(0) }}%</span>
+      <span v-if="summary.card_presence_rate!=null">挂卡出现率 {{ (summary.card_presence_rate*100).toFixed(0) }}%（{{ summary.card_total }} 张）</span>
+      <span v-if="summary.card_suitable_rate!=null">挂卡合适率 {{ (summary.card_suitable_rate*100).toFixed(0) }}%</span>
+      <span v-if="summary.superlink_presence_rate!=null">Superlink 出现率 {{ (summary.superlink_presence_rate*100).toFixed(0) }}%（观察到 {{ summary.superlink_total_observed }} 个）</span>
+      <span v-if="summary.both_count!=null">挂卡与链接同现 {{ summary.both_count }} 条</span>
+      <span v-if="summary.needs_review_count">待人工复核 {{ summary.needs_review_count }} 条</span>
     </div>
     <details class="skill-breakdown" v-if="summary && summary.by_skill && summary.by_skill.overview && summary.by_skill.overview.length" open>
       <summary>📊 按垂域分析（{{ summary.by_skill.overview.length }} 个垂域 · 维度问题阈值 ≤ {{ summary.by_skill.threshold }}）</summary>
@@ -309,14 +317,14 @@
       </div>
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
-        <select v-if="mode!=='compare'" v-model="correctnessFilter" @change="resetResultPage">
+        <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="correctnessFilter" @change="resetResultPage">
           <option value="">全部判定</option>
           <option value="right">正确</option>
           <option value="partial">部分正确</option>
           <option value="wrong">错误</option>
           <option value="unclear">不清楚</option>
         </select>
-        <select v-if="mode!=='compare'" v-model="problemDimFilter" @change="resetResultPage">
+        <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="problemDimFilter" @change="resetResultPage">
           <option value="">全部维度</option>
           <option v-for="d in rubricDims" :key="d" :value="d">{{ d }}存在问题</option>
         </select>
@@ -380,6 +388,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260722_operation_end_user_default"></script>
+  <script type="module" src="/static/app.js?v=20260723_rich_content_v1"></script>
 </body>
 </html>

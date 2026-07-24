@@ -1,0 +1,33 @@
+name: rich_content
+display: 垂域挂卡 / Superlink
+
+card_types:
+  music: 音乐
+  film_tv: 影视
+  lbs: LBS
+  movie_ticket: 电影票
+  calendar: 日历
+  weather: 天气
+  time_management: 时间管理
+  sports: 体育
+  other: 其他
+  unclear: 无法判断
+
+suitability_anchors:
+  5: 挂卡与 query 的垂域、实体及时间地点等关键条件完全匹配，且与正文一致
+  4: 挂卡整体合适，只有不影响使用的轻微信息或呈现不足
+  3: 挂卡与 query 有明显关系，但只满足部分意图、类型不够贴切或存在可接受偏差
+  2: 挂卡关系较弱，关键实体或条件存在明显偏差，帮助有限
+  1: 挂卡与 query 无关、误导，或与正文和关键条件明显冲突
+
+extraction:
+  algorithm_version: rich-content-v1.0.0
+  default_start_time: 0.0
+  max_frames: 16
+  sample_fps: 1.5
+  scene_threshold: 0.03
+  scene_min_gap_s: 0.5
+  state_layout_threshold: 0.025
+  stable_min_duration_s: 0.8
+  max_edge: 1280
+  jpeg_quality: 85

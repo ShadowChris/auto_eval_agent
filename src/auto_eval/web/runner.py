@@ -16,8 +16,15 @@ from pathlib import Path
 from ..paths import RUNS_DIR
 from ..config import AppConfig
 from ..dataset import to_prompt
-from ..judges import (Arbitrator, JudgeClient, PairwiseJudge, RubricJudge, SkillRouter,
-                        ensure_classified)
+from ..judges import (
+    Arbitrator,
+    JudgeClient,
+    PairwiseJudge,
+    RichContentJudge,
+    RubricJudge,
+    SkillRouter,
+    ensure_classified,
+)
 from ..judges.base import flush_web_trace_records
 from ..judges.ensemble import aggregate_pairs, aggregate_scores
 from ..llm_stream import is_retriable_llm_error
@@ -31,7 +38,10 @@ from ..observability import (
 from ..runners import build_runner
 from ..schema import EvalItem
 from .history import save_task
-from .operation_media import prepare_session_operation_item
+from .operation_media import (
+    prepare_session_operation_item,
+    prepare_session_rich_content_item,
+)
 from .tasks import Task
 
 
@@ -114,6 +124,12 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         for c in clients
     ]
     pair_judges = [PairwiseJudge(c, evaluation_time=evaluation_time) for c in clients]
+    rich_profile = cfg.visual_modes.get("rich_content")
+    rich_judges = (
+        [RichContentJudge(client, rich_profile) for client in clients]
+        if rich_profile is not None
+        else []
+    )
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     sem = asyncio.Semaphore(int(task.options.get("concurrency", 4)))
     eval_timeout = float(task.options.get("eval_timeout_s") or task.options.get("eval_timeout") or 300.0)
@@ -183,7 +199,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                 )
                 last_error = None
                 res = None
-                if task.mode == "operation" and not item_dict.get("frames"):
+                if task.mode in ("operation", "rich_content") and not item_dict.get("frames"):
                     try:
                         log_event(
                             "视频准备",
@@ -192,13 +208,22 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                             progress=3,
                             progress_message="正在校验视频并分析场景",
                         )
+                        if task.mode == "rich_content":
+                            if rich_profile is None:
+                                raise ValueError("缺少 rich_content 视觉模式配置")
+                            prepare_call = prepare_session_rich_content_item
+                            prepare_kwargs = {"profile": rich_profile}
+                        else:
+                            prepare_call = prepare_session_operation_item
+                            prepare_kwargs = {}
                         prepared = await asyncio.wait_for(
                             asyncio.to_thread(
-                                prepare_session_operation_item,
+                                prepare_call,
                                 item_dict,
                                 session_name=task.session_name,
                                 item_index=idx,
                                 total_items=len(task.items),
+                                **prepare_kwargs,
                             ),
                             timeout=float(task.options.get("video_prepare_timeout_s") or 300),
                         )
@@ -241,7 +266,9 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                             res = await asyncio.wait_for(
                                 _eval_one(
                                     task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
-                                    online_runner, process_dims, arbitrator, task=task
+                                    online_runner, process_dims, arbitrator,
+                                    rich_judges=rich_judges,
+                                    task=task,
                                 ),
                                 timeout=eval_timeout,
                             )
@@ -362,7 +389,20 @@ def _write_eval_error(
         pass
 
 
-async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, online_runner, process_dims=None, arbitrator=None, task=None) -> dict:
+async def _eval_one(
+    mode,
+    idx,
+    item_dict,
+    rubrics,
+    pair_judges,
+    cfg,
+    scale,
+    online_runner,
+    process_dims=None,
+    arbitrator=None,
+    rich_judges=None,
+    task=None,
+) -> dict:
     t0 = time.perf_counter()
     item = _to_evalitem(item_dict, idx)
     out: dict = {"query": item.question}
@@ -377,7 +417,9 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
                  if cfg.eval_options.classify_api_key_env else None)
     _judge_key = cfg.judges[0].api_key() if cfg.judges else None
     classify_api_key = _env_key or _judge_key or "EMPTY"  # 绝不为 None
-    if classify_model and classify_base_url:
+    # 富内容视觉识别不依赖问答垂域分类；数据有明确垂域时直接使用 category，
+    # 未提供时保留 default，避免每条视频在视觉调用前再多跑一次分类模型。
+    if mode != "rich_content" and classify_model and classify_base_url:
         skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
         try:
             await asyncio.wait_for(
@@ -464,6 +506,37 @@ async def _eval_one(mode, idx, item_dict, rubrics, pair_judges, cfg, scale, onli
                 pass
         _fill_verdict(out, v)
         _maybe_meta(out, item, answer, v)
+
+    elif mode == "rich_content":
+        if not rich_judges:
+            raise ValueError("没有可用的挂卡 / Superlink 视觉裁判")
+        frames = [str(path) for path in (item.metadata.get("frames") or [])]
+        if not frames:
+            raise ValueError("挂卡 / Superlink 视觉评估缺少关键帧")
+        answer_text = str(item_dict.get("answer_text") or "").strip()
+        if answer_text:
+            out["answer_text"] = answer_text
+        out["has_video"] = bool(item_dict.get("media") or frames)
+        # 视觉事实列表不做多裁判模糊合并；使用用户选择顺序中的第一位裁判，
+        # 保证 presence/count/items 始终来自同一份自洽观察。
+        visual = await rich_judges[0].evaluate(
+            question=item.question,
+            context=(item.context or "").strip(),
+            answer_text=answer_text,
+            frames=frames,
+        )
+        out.update(visual)
+        log_event(
+            "结果聚合",
+            "视觉发现已结构化",
+            details={
+                "挂卡数": out.get("card_count"),
+                "Superlink数": out.get("superlink_count"),
+                "需复核": out.get("needs_review"),
+            },
+            progress=90,
+            progress_message="正在整理挂卡与Superlink结果",
+        )
 
     elif mode == "compare":
         aa, ab = item_dict["answer_a"], item_dict["answer_b"]
@@ -556,6 +629,8 @@ def _maybe_meta(out: dict, item: EvalItem, answer: str, v) -> None:
 
 
 def _summarize(task: Task, cfg: AppConfig) -> dict:
+    if task.mode == "rich_content":
+        return _summarize_rich_content(task)
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     res = task.results
     ok = [r for r in res if "error" not in r]
@@ -595,6 +670,78 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
         except Exception:
             summary["by_skill"] = []
     return summary
+
+
+def _summarize_rich_content(task: Task) -> dict:
+    """汇总视觉发现，不使用问答类 correctness/准确率口径。"""
+    results = task.results
+    ok = [row for row in results if "error" not in row]
+    card_cases = [row for row in ok if row.get("card_presence") == "present"]
+    superlink_cases = [
+        row for row in ok if row.get("superlink_presence") == "present"
+    ]
+    complete = [row for row in ok if row.get("answer_coverage") == "complete"]
+    suitable = [
+        row for row in card_cases
+        if row.get("card_suitability") == "suitable"
+    ]
+    both = [
+        row for row in ok
+        if row.get("card_presence") == "present"
+        and row.get("superlink_presence") == "present"
+    ]
+    neither = [
+        row for row in complete
+        if row.get("card_presence") == "absent"
+        and row.get("superlink_presence") == "absent"
+    ]
+
+    by_category: dict[str, dict] = {}
+    for row in ok:
+        category = str(row.get("category") or "default")
+        entry = by_category.setdefault(category, {
+            "category": category,
+            "display": row.get("category_display") or category,
+            "count": 0,
+            "card_cases": 0,
+            "superlink_cases": 0,
+        })
+        entry["count"] += 1
+        entry["card_cases"] += int(row.get("card_presence") == "present")
+        entry["superlink_cases"] += int(
+            row.get("superlink_presence") == "present"
+        )
+
+    return {
+        "total": len(results),
+        "done": len(ok),
+        "failed": len(results) - len(ok),
+        "mode": task.mode,
+        "card_case_count": len(card_cases),
+        "card_presence_rate": (
+            round(len(card_cases) / len(ok), 3) if ok else None
+        ),
+        "card_total": sum(int(row.get("card_count") or 0) for row in ok),
+        "card_suitable_count": len(suitable),
+        "card_suitable_rate": (
+            round(len(suitable) / len(card_cases), 3) if card_cases else None
+        ),
+        "superlink_case_count": len(superlink_cases),
+        "superlink_presence_rate": (
+            round(len(superlink_cases) / len(ok), 3) if ok else None
+        ),
+        "superlink_total_observed": sum(
+            int(row.get("superlink_count") or 0) for row in ok
+        ),
+        "both_count": len(both),
+        "neither_count": len(neither),
+        "needs_review_count": sum(bool(row.get("needs_review")) for row in ok),
+        "complete_coverage_count": len(complete),
+        "by_category": sorted(
+            by_category.values(),
+            key=lambda entry: (-entry["count"], entry["category"]),
+        ),
+    }
 
 def _by_skill(task: Task, cfg: AppConfig) -> list[dict]:
     """把 web 的逐题结果桥接到 domain_report，返回垂域总览 overview（每垂域一行）。

@@ -254,6 +254,78 @@ OPERATION_USER = Template(
 )
 
 
+# ---- 垂域挂卡 / Superlink 视觉评估（视频关键帧 → 结构化内容发现）----
+RICH_CONTENT_SYSTEM = Template(
+    """{{ persona }}
+
+你正在检查一段问答产品录屏。用户消息中附带了按时间顺序排列的关键帧；第一张图片是第1帧，依次编号。
+目标是识别 assistant 当前回答区域中的【结构化挂卡】和【蓝色 Superlink 文字】，并评价已经出现的挂卡是否适合 query。
+这不是答案正确性评测，不要输出 correctness、total 或整体对错。
+
+【对象定义】
+- 挂卡：带结构化信息容器、领域元数据或操作能力的富内容组件。普通内嵌图片、正文截图和纯文本段落不算挂卡。
+- Superlink：assistant 当前回答区域内的蓝色文字。产品规则保证这类蓝色文字可点击，因此按 Superlink 统计。
+- 忽略用户气泡、历史问答、顶部导航、底部输入框、系统按钮、状态栏及其他应用 UI 中的蓝字。
+
+【挂卡类型】
+{% for key, label in card_types.items() -%}
+- {{ key }}：{{ label }}
+{% endfor %}
+
+【跨帧识别与计数】
+- 同一张挂卡或同一处链接随滚动、动画或文本生成出现在多帧中，只记录一次，并合并 evidence_frames。
+- 一个链接换行显示仍计一次。
+- 相同链接文字在回答的两个不同位置分别出现，应记录两次；用 answer_position 区分。
+- 不得按帧数累计数量，也不得编造画面中不可见的链接文字、挂卡字段或真实 URL。
+- cards 和 superlinks 数组必须已经完成跨帧去重；后端将直接用数组长度计算数量。
+
+【回答覆盖度】
+- complete：关键帧足以覆盖当前 assistant 回答的完整内容，可以可靠判断“没有”和精确数量。
+- partial：只看到回答的一部分、滚动范围不完整，但已识别到的对象可信；数量只能视为下界。
+- unclear：画面模糊、严重遮挡或顺序证据不足，无法可靠识别。
+
+【挂卡适配性】
+仅对实际识别到的挂卡逐张判断：
+- 对照 query 和可信 context，检查垂域、核心实体、时间、地点、场次等关键条件。
+- 检查挂卡与回答正文是否一致，以及卡片形态是否适合用户意图。
+- relation_to_query 只能是 direct / supporting / weak / unrelated / unclear。
+- suitability 只能是 suitable / partially_suitable / unsuitable / unclear。
+{% for score, anchor in suitability_anchors.items()|sort(reverse=true) -%}
+- {{ score }}分：{{ anchor }}
+{% endfor %}
+- 无挂卡时 cards 输出空数组，不要虚构 not_applicable 卡片。
+
+【人工复核】
+出现画面模糊、内容被遮挡、回答覆盖不完整、跨帧无法可靠去重、卡片类型或蓝字归属不确定时，needs_review=true 并说明原因。
+
+【输出格式】
+先输出 <analysis>...</analysis>，再输出一行 JSON。不要输出 correctness、rubric 或 total：
+<analysis>
+1. 回答有效区域与覆盖度。
+2. 挂卡跨帧去重、内容和适配性。
+3. Superlink 跨帧去重与可见文字。
+4. 不确定项和人工复核原因。
+</analysis>
+{"answer_coverage":"complete|partial|unclear","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","relation_to_query":"direct|supporting|weak|unrelated|unclear","suitability":"suitable|partially_suitable|unsuitable|unclear","suitability_score":<1-5或null>,"reason":"<判断理由>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","rationale":"<一句话总结发现>"}
+"""
+)
+
+RICH_CONTENT_USER = Template(
+    """用户问题（query）：
+{{ question }}
+{% if context %}
+可信背景条件：
+{{ context }}
+{% endif %}
+{% if answer_text %}
+辅助回答文本（只帮助理解语义；它不能证明画面中存在挂卡、蓝色文字或可点击样式）：
+{{ answer_text }}
+{% endif %}
+
+请检查随后按时间顺序排列的 {{ frame_count }} 张关键帧，只统计当前 assistant 回答区域中的挂卡和蓝色 Superlink。"""
+)
+
+
 # ---- 对比盲评（产品专家：竞品作对比参考，最终评判待评答案本身）----
 RUBRIC_COMPARE_SYSTEM = Template(
     """{{ persona }}

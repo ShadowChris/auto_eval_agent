@@ -1,4 +1,4 @@
-"""操作类录屏路径校验与关键帧准备。"""
+"""视频视觉评估的路径校验、缓存与关键帧准备。"""
 from __future__ import annotations
 
 import hashlib
@@ -13,14 +13,17 @@ from typing import Callable
 from ..media import (
     DEFAULT_TASK_START_TIME,
     KEYFRAME_ALGORITHM_VERSION,
+    KeyframeConfig,
     extract_scene_keyframes,
     probe_duration,
 )
+from ..config import VisualModeProfile
 from ..paths import PROJECT_ROOT, RUNS_DIR
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 _TASK_TIME_FIELDS = ("task_start_time", "task_end_time")
+_CONTENT_TIME_FIELDS = ("content_start_time", "content_end_time")
 
 
 def _safe_name(value: str, fallback: str) -> str:
@@ -152,6 +155,75 @@ def _operation_timing(
     return supplied, cache_key
 
 
+def _rich_content_timing(
+    item: dict,
+    duration: float,
+    profile: VisualModeProfile,
+) -> tuple[dict, str]:
+    """校验富内容视频时间窗，并构造专用抽帧配置和缓存键。"""
+    supplied: dict[str, float] = {}
+    for field in _CONTENT_TIME_FIELDS:
+        value = item.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"{field} 必须是有限数字（单位：秒）")
+        normalized = float(value)
+        if not math.isfinite(normalized):
+            raise ValueError(f"{field} 必须是有限数字（单位：秒）")
+        if normalized < 0:
+            raise ValueError(f"{field} 不能小于 0")
+        if normalized > duration:
+            raise ValueError(f"{field}={normalized:g} 超出视频时长 {duration:g} 秒")
+        supplied[field] = normalized
+
+    extraction = profile.extraction
+    start = supplied.get("content_start_time", extraction.default_start_time)
+    end = supplied.get("content_end_time")
+    if end is not None and end <= start:
+        raise ValueError("content_end_time 必须大于 content_start_time")
+
+    config = KeyframeConfig(
+        task_start_time=start,
+        task_end_time=end,
+        max_frames=extraction.max_frames,
+        sample_fps=extraction.sample_fps,
+        scene_threshold=extraction.scene_threshold,
+        scene_min_gap_s=extraction.scene_min_gap_s,
+        state_layout_threshold=extraction.state_layout_threshold,
+        stable_min_duration_s=extraction.stable_min_duration_s,
+        max_edge=extraction.max_edge,
+        # 问答视频通常不会返回操作助手外壳，禁用操作类的自动结束点推断。
+        auto_task_end_confidence_threshold=2.0,
+        final_dedup_rms_threshold=0.004,
+        final_dedup_changed_fraction_threshold=0.004,
+    )
+    cache_payload = {
+        "algorithm_version": extraction.algorithm_version,
+        "config": {
+            "content_start_time": start,
+            "content_end_time": end,
+            "max_frames": extraction.max_frames,
+            "sample_fps": extraction.sample_fps,
+            "scene_threshold": extraction.scene_threshold,
+            "scene_min_gap_s": extraction.scene_min_gap_s,
+            "state_layout_threshold": extraction.state_layout_threshold,
+            "stable_min_duration_s": extraction.stable_min_duration_s,
+            "max_edge": extraction.max_edge,
+        },
+    }
+    cache_key = json.dumps(
+        cache_payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "config": config,
+        "algorithm_version": extraction.algorithm_version,
+    }, cache_key
+
+
 def _prepared_item(item: dict, video_path: Path, frames: list[Path], duration: float) -> dict:
     prepared = dict(item)
     prepared.update({
@@ -230,6 +302,53 @@ def prepare_session_operation_item(
     item_name = _safe_name(str(item.get("id") or f"q{item_index + 1}"), f"q{item_index + 1}")
     safe_session = _safe_name(session_name, "operation_session")
     frame_dir = runs_dir / "videos" / "imported" / safe_session / f"{sequence}_{item_name}"
+    frames = _extract_frames(
+        video_path,
+        frame_dir,
+        extract_fn=extract_fn,
+        cache_key=cache_key,
+        extract_kwargs=extract_kwargs,
+    )
+    if not frames:
+        raise ValueError(f"视频抽帧失败：{raw_path}")
+    return _prepared_item(item, video_path, frames, duration)
+
+
+def prepare_session_rich_content_item(
+    item: dict,
+    *,
+    profile: VisualModeProfile,
+    session_name: str,
+    item_index: int,
+    total_items: int,
+    base_dir: Path = PROJECT_ROOT,
+    runs_dir: Path = RUNS_DIR,
+    probe_fn: Callable = probe_duration,
+    extract_fn: Callable = extract_scene_keyframes,
+) -> dict:
+    """按 Web 会话准备挂卡 / Superlink 视觉评估关键帧。"""
+    raw_path = str(item.get("video_path") or "").strip()
+    if not raw_path:
+        media = item.get("media") or []
+        raw_path = str(media[0]).strip() if media else ""
+    if not raw_path:
+        raise ValueError("缺少 video_path")
+    video_path = resolve_operation_video_path(raw_path, base_dir=base_dir)
+    duration = float(probe_fn(video_path))
+    if duration <= 0:
+        raise ValueError(f"无法读取视频或视频时长为 0：{raw_path}")
+    extract_kwargs, cache_key = _rich_content_timing(item, duration, profile)
+
+    width = max(3, len(str(max(total_items, 1))))
+    sequence = str(item_index + 1).zfill(width)
+    item_name = _safe_name(
+        str(item.get("id") or f"q{item_index + 1}"),
+        f"q{item_index + 1}",
+    )
+    safe_session = _safe_name(session_name, "rich_content_session")
+    frame_dir = (
+        runs_dir / "videos" / "imported" / safe_session / f"{sequence}_{item_name}"
+    )
     frames = _extract_frames(
         video_path,
         frame_dir,
