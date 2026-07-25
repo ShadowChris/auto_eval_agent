@@ -85,6 +85,55 @@ def rich_content_result_fields(
     }
 
 
+def _format_visual_findings_for_rubric(visual: dict) -> str:
+    """将 RichContentJudge.evaluate() 返回值中的结构化视觉发现转为 rubric 裁判可读的自然语言上下文。
+
+    注意：传入的是 evaluate() 的完整返回值（含 visual_findings 嵌套），
+    本函数从 visual["visual_findings"] 中提取 cards/superlinks 原始数据。"""
+    findings = visual.get("visual_findings") or {}
+    cards = findings.get("cards") or []
+    superlinks = findings.get("superlinks") or []
+    coverage = findings.get("answer_coverage", visual.get("answer_coverage", "unclear"))
+
+    lines = [
+        "【经视觉识别确认的富内容组件】",
+        "以下挂卡和Superlink信息已经过独立视觉识别确认，是此回答完整交付物的一部分。",
+        "评分时请将纯文本回答与所有这些富内容组件视为一个整体来评判——",
+        "文本可能有意简洁，因为卡片已经承载了详细数据。",
+        "不要在\"完整性\"维度上因文本简短而扣分——请检查卡片是否已补充了必要信息。",
+        "如果以下显示\"未识别到\"，则此回答确实没有对应富内容组件，按常规纯文本回答评判。",
+    ]
+
+    if cards:
+        lines.append(f"\n挂卡（共 {len(cards)} 张）：")
+        for i, card in enumerate(cards, 1):
+            lines.append(f"  {i}. 类型：{card.get('type', '未知')}")
+            if card.get("entity"):
+                lines.append(f"     核心实体：{card['entity']}")
+            if card.get("visible_content"):
+                lines.append(f"     可见内容：{card['visible_content']}")
+            lines.append(f"     与query关系：{card.get('relation_to_query', 'unclear')}")
+            lines.append(f"     适配性：{card.get('suitability', 'unclear')}")
+    else:
+        lines.append("\n未识别到挂卡。")
+
+    if superlinks:
+        lines.append(f"\n蓝色Superlink（共 {len(superlinks)} 个）：")
+        for i, link in enumerate(superlinks, 1):
+            lines.append(f"  {i}. 文字：{link.get('text', '')}")
+    else:
+        lines.append("\n未识别到蓝色Superlink。")
+
+    coverage_note = {
+        "complete": "（关键帧覆盖完整回答区域，以上识别结果可靠）",
+        "partial": "（关键帧只覆盖部分回答区域，以上为已识别部分，可能还有未识别内容）",
+        "unclear": "（关键帧覆盖不足，识别结果仅供参考）",
+    }.get(coverage, "")
+    lines.append(f"\n回答覆盖度：{coverage}{coverage_note}")
+
+    return "\n".join(lines)
+
+
 class RichContentJudge:
     """单视觉裁判：识别挂卡和 Superlink，并返回结构化发现。"""
 

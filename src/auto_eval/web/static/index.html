@@ -78,7 +78,7 @@
         </div>
         <textarea v-model="it.query" rows="2" :placeholder="mode==='operation' ? '操作意图(query)，如：设一个明天早上7点的闹钟' : '用户问题(query)，如：北京明天天气怎么样'"></textarea>
         <textarea v-model="it.context" rows="2" placeholder="(可选) 可信背景(context)，如：当前时间为晚上10点；设备时区为北京时间"></textarea>
-        <input v-if="mode==='rich_content'" v-model="it.category" placeholder="(可选) 垂域 category，如 weather / music / sports" style="width:100%;box-sizing:border-box;margin-bottom:8px">
+        <input v-if="mode==='rich_content' || mode==='rich_content_quality'" v-model="it.category" placeholder="(可选) 垂域 category，如 weather / music / sports" style="width:100%;box-sizing:border-box;margin-bottom:8px">
         <div class="op-upload">
           <label class="op-upload-btn">
             <input type="file" accept="video/*" @change="onOpVideo($event, i)" hidden>
@@ -141,6 +141,13 @@
       <label v-for="j in judges" class="chip">
         <input type="checkbox" :value="j.name" v-model="selectedJudges"> {{ j.display || j.name }}
       </label>
+    </div>
+    <div class="row" v-if="mode==='rich_content_quality'">
+      <span class="lbl">挂卡识别裁判：</span>
+      <select v-model="visualJudge">
+        <option v-for="j in judges" :value="j.name">{{ j.display || j.name }}</option>
+      </select>
+      <span class="hint">（与上方回答评测裁判可使用不同模型）</span>
     </div>
     <div class="row" v-if="mode==='online'">
       <span class="lbl">被测模型：</span>
@@ -388,6 +395,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260724_rich_content_v2"></script>
+  <script type="module" src="/static/app.js?v=20260725_rcq_v1"></script>
 </body>
 </html>

@@ -30,6 +30,7 @@ Mode = Literal[
     "process",
     "operation",
     "rich_content",
+    "rich_content_quality",
 ]
 _CONTEXT_PREFIX = "@context:"
 
@@ -89,7 +90,7 @@ def _rich_content_times(obj: dict) -> dict[str, float]:
 
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 ||| 分隔的粘贴文本。返回 (items, errors)。"""
-    if mode in ("operation", "rich_content"):
+    if mode in ("operation", "rich_content", "rich_content_quality"):
         label = "操作类" if mode == "operation" else "挂卡 / Superlink"
         return [], [f"{label}评测请逐题上传视频或导入 JSONL，不支持文本粘贴解析"]
     items: list[dict] = []
@@ -185,7 +186,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 errors.append(f"第 {ln} 行 process 模式缺少 answer/trace")
                 continue
             item["answer"], item["trace"] = a, tr
-        elif mode in ("operation", "rich_content"):
+        elif mode in ("operation", "rich_content", "rich_content_quality"):
             video_path = obj.get("video_path")
             if not isinstance(video_path, str) or not video_path.strip():
                 errors.append(f"第 {ln} 行 {mode} 模式缺少 video_path")
@@ -221,7 +222,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 item["category"] = obj.get("category") or "operation"
                 if statement and statement.strip():
                     item["answer"] = statement.strip()
-            else:
+            else:  # rich_content / rich_content_quality
                 answer_text = obj.get("answer_text")
                 if answer_text is not None and not isinstance(answer_text, str):
                     errors.append(f"第 {ln} 行 answer_text 必须是字符串")
