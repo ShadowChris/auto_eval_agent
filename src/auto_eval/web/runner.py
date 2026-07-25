@@ -619,6 +619,10 @@ def _fill_verdict(out: dict, v) -> None:
     out["arbitrated"] = v.arbitrated
     out["arbitrator_confidence"] = v.arbitrator_confidence
     out["na_dimensions"] = v.na_dimensions
+    out["top_issue_1_dim"] = v.top_issue_1_dim
+    out["top_issue_2_dim"] = v.top_issue_2_dim
+    out["top_issue_3_dim"] = v.top_issue_3_dim
+    out["top_issues_desc"] = v.top_issues_desc
 
 
 def _maybe_meta(out: dict, item: EvalItem, answer: str, v) -> None:

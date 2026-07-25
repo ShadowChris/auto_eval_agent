@@ -395,6 +395,10 @@ createApp({
         { key: "truncated", label: "截断" },
         { key: "arbitrated", label: "仲裁" },
         { key: "agree", label: "与真值" },
+        { key: "top_issue_1_dim", label: "首要问题维度" },
+        { key: "top_issue_2_dim", label: "次要问题维度" },
+        { key: "top_issue_3_dim", label: "第三问题维度" },
+        { key: "top_issues_desc", label: "问题描述" },
         { key: "rationale", label: "理由" },
         { key: "latency_s", label: "耗时" },
       ];
@@ -403,7 +407,7 @@ createApp({
     function columnWidth(c) {
       const compact = c.rubricDim
         || ["correctness", "winner", "total", "used_search", "truncated", "arbitrated", "agree", "latency_s", "bidirectional_consistent"].includes(c.key);
-      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale"].includes(c.key);
+      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc"].includes(c.key);
       const minWidth = compact ? 88 : c.key === "item_id" ? 90 : textColumn ? 180 : 110;
       const maxWidth = compact ? 130 : c.key === "rationale" ? 420 : textColumn ? 360 : 220;
       const visualLength = (value) => Array.from(String(value ?? "")).reduce(
