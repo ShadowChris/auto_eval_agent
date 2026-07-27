@@ -176,7 +176,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             except RuntimeError:
                 loop.call_soon_threadsafe(apply)
 
-        item_id = item_dict.get("id", f"q{idx}")
+        item_id = item_dict.get("id") or f"q{idx}"
 
         def collect_judge_trace(trace_path: str, record: dict) -> None:
             pending_judge_traces.append((trace_path, record))
@@ -318,6 +318,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                 if res is None:
                     res = {
                         "index": idx,
+                        "item_id": item_id,
                         "query": item_dict.get("query", ""),
                         "error": f"{type(last_error).__name__}: {last_error}",
                     }
@@ -381,6 +382,7 @@ def _write_eval_error(
             "task_id": task_id,
             "request_id": request_id,
             "index": idx,
+            "item_id": item.get("id") or f"q{idx}",
             "query": item.get("query", ""),
             "context": item.get("context", ""),
             "error": f"{type(error).__name__}: {error}" if error else "unknown",

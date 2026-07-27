@@ -195,7 +195,7 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     非 compare 模式下仍按垂域分 sheet，便于同垂域内做筛选/分析。
     传入 cfg 时，会按 skill 配置保留完整的维度列，N/A 的维度也会导出并在单元格填"N/A"。
     """
-    results = snapshot.get("results") or []
+    results = _results_with_identity(snapshot)
     summary = snapshot.get("summary") or {}
     by_skill = summary.get("by_skill") if isinstance(summary.get("by_skill"), dict) else {}
     overview = by_skill.get("overview") or []
@@ -215,6 +215,26 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     if summary:
         rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_skill"})]
     return rows
+
+
+def _results_with_identity(snapshot: dict) -> list[dict]:
+    """为历史失败结果回填题号和 query，兼容早期不完整快照。"""
+    items = snapshot.get("items") or []
+    results: list[dict] = []
+    for position, result in enumerate(snapshot.get("results") or []):
+        row = dict(result)
+        raw_index = row.get("index", position)
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            index = position
+        item = items[index] if 0 <= index < len(items) else {}
+        if not row.get("item_id"):
+            row["item_id"] = item.get("id") or f"q{index}"
+        if not row.get("query"):
+            row["query"] = item.get("query") or item.get("question") or ""
+        results.append(row)
+    return results
 
 
 def _skill_dim_names(skill_name: str, cfg: Any | None) -> list[str] | None:
