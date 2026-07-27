@@ -85,6 +85,10 @@ class SingleScore(BaseModel):
     correctness: Correctness = "unclear"
     error_type: str | None = None
     rationale: str = ""
+    top_issue_1_dim: str | None = None  # 首要问题维度
+    top_issue_2_dim: str | None = None  # 次要问题维度
+    top_issue_3_dim: str | None = None  # 第三问题维度
+    top_issues_desc: str | None = None  # 问题描述（按行列出）
     analysis: str = ""  # 裁判深度思考过程（意图理解/理想画像/多角度分析）
     used_search: bool = False
     search_queries: list[str] = Field(default_factory=list)
@@ -122,6 +126,7 @@ class RichContentObservation(BaseModel):
     """一次垂域挂卡 / Superlink 视频视觉识别结果。"""
 
     answer_coverage: AnswerCoverage = "unclear"
+    visual_description: str = ""  # 纯客观视觉描述（Part 1），不包含评价性语言
     cards: list[RichContentCard] = Field(default_factory=list)
     superlinks: list[RichContentSuperlink] = Field(default_factory=list)
     needs_review: bool = False
@@ -161,6 +166,10 @@ class Verdict(BaseModel):
     correctness: Correctness = "unclear"
     error_type: str | None = None
     rationale: str = ""
+    top_issue_1_dim: str | None = None
+    top_issue_2_dim: str | None = None
+    top_issue_3_dim: str | None = None
+    top_issues_desc: str | None = None
     # —— 可靠性信号 —— #
     n_judges: int = 0
     judges_agreement: float | None = None  # 多裁判一致率（0–1）

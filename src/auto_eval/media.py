@@ -51,6 +51,13 @@ class KeyframeConfig:
     final_dedup_rms_threshold: float = 0.008
     final_dedup_changed_fraction_threshold: float = 0.01
     max_edge: int = 720
+    # 受保护采样：在开头和结尾两个时间窗口内，每 interval 秒额外标记一帧，
+    # 仅当画面高度一致时才去重（用于捕获弹窗/横幅/开场状态等开头结尾的小变化）。
+    protected_sample_interval: float = 2.0  # 0 = 禁用；>0 则每 N 秒一帧
+    protected_begin_window: float = 10.0    # 从 task_start_time 起的前 N 秒
+    protected_end_window: float = 5.0       # 从 algorithm_end 止的后 N 秒
+    protected_sample_dedup_rms: float = 0.002    # 受保护帧的去重 RMS 阈值
+    protected_sample_dedup_cf: float = 0.002      # 受保护帧的去重变化比例阈值
 
     def __post_init__(self) -> None:
         """规范化并校验任务时间参数。"""
@@ -79,6 +86,15 @@ class KeyframeConfig:
             raise ValueError("sample_fps 必须大于 0")
         if self.max_edge <= 0:
             raise ValueError("max_edge 必须大于 0")
+        if (
+            self.protected_sample_interval < 0
+            or (self.protected_sample_interval > 0 and self.protected_sample_interval < 0.5)
+        ):
+            raise ValueError("protected_sample_interval 必须为 0 或 >= 0.5")
+        if self.protected_begin_window < 0:
+            raise ValueError("protected_begin_window 不能小于 0")
+        if self.protected_end_window < 0:
+            raise ValueError("protected_end_window 不能小于 0")
 
 
 @dataclass
@@ -366,6 +382,32 @@ def _extract_candidates(
         )
     ]
 
+    # 受保护采样：在开头 [start, start+begin_window] 和结尾 [end-end_window, end]
+    # 两个窗口内，每隔 protected_sample_interval 秒将对应帧标记为 protected，
+    # 使其在后续各阶段优先保留，仅当画面高度一致时才去重
+    # （用于捕获弹窗/横幅/开场状态等开头结尾的小变化）。
+    fps_source = f"{config.sample_fps:g}fps"
+    ps_interval = round(config.protected_sample_interval)
+    if ps_interval > 0 and (config.protected_begin_window > 0 or config.protected_end_window > 0):
+        protected_begin_end = effective_start + config.protected_begin_window
+        protected_end_start = algorithm_end - config.protected_end_window
+        for c in candidates:
+            if c.source != fps_source:
+                continue
+            protected = False
+            # 开头窗口：[effective_start, effective_start + protected_begin_window]
+            # 帧时间相对起点的偏移能被 interval 整除则保留
+            if config.protected_begin_window > 0 and effective_start <= c.time <= protected_begin_end:
+                if round(c.time - effective_start) % ps_interval == 0:
+                    protected = True
+            # 结尾窗口：[algorithm_end - protected_end_window, algorithm_end]
+            # 帧时间相对终点的偏移能被 interval 整除则保留
+            if not protected and config.protected_end_window > 0 and protected_end_start <= c.time <= algorithm_end:
+                if round(algorithm_end - c.time) % ps_interval == 0:
+                    protected = True
+            if protected:
+                c.source = f"protected-{config.protected_sample_interval:g}s"
+
     start_path = output_dir / "start" / f"start_{effective_start:.3f}.jpg"
     if _extract_at(video, effective_start, start_path, max_edge=config.max_edge):
         candidates.append(
@@ -456,11 +498,13 @@ def _canonicalize_timestamps(
     def priority(candidate: _Candidate) -> tuple[int, float]:
         if candidate.source.startswith("start"):
             return (0, candidate.time)
-        if candidate.source == "task-end":
+        if candidate.source.startswith("protected"):
             return (1, candidate.time)
-        if candidate.source.startswith("scene"):
+        if candidate.source == "task-end":
             return (2, candidate.time)
-        return (3, candidate.time)
+        if candidate.source.startswith("scene"):
+            return (3, candidate.time)
+        return (4, candidate.time)
 
     return [min(group, key=priority) for group in groups]
 
@@ -589,6 +633,11 @@ def _deduplicate_states(
             transient_runs.add(run_index)
 
     selected_indices: set[int] = set()
+    # 受保护帧跳过状态聚类去重，始终保留
+    protected_indices = {
+        i for i, c in enumerate(candidates) if c.source.startswith("protected")
+    }
+    selected_indices.update(protected_indices)
     for run_index, run in enumerate(runs):
         first, last = run[0], run[-1]
         if run_index in transient_runs:
@@ -661,6 +710,12 @@ def _limit_candidates(
             "final-frame",
         }
     )
+    # 受保护帧强制保留
+    mandatory_indices.update(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.source.startswith("protected")
+    )
     if len(mandatory_indices) > limit:
         protected = {
             index
@@ -673,6 +728,7 @@ def _limit_candidates(
                 "task-end-auto",
                 "final-frame",
             }
+            or candidates[index].source.startswith("protected")
         }
         remaining = sorted(mandatory_indices - protected)
         slots = max(0, limit - len(protected))
@@ -716,11 +772,22 @@ def _final_deduplicate(
             signatures[id(previous)],
             signatures[id(candidate)],
         )
-        if (
-            rms < config.final_dedup_rms_threshold
-            and changed_fraction
-            < config.final_dedup_changed_fraction_threshold
-        ):
+        # 受保护帧使用更严格的去重阈值（仅高度一致时才合并）
+        is_any_protected = (
+            previous.source.startswith("protected")
+            or candidate.source.startswith("protected")
+        )
+        dedup_rms = (
+            config.protected_sample_dedup_rms
+            if is_any_protected
+            else config.final_dedup_rms_threshold
+        )
+        dedup_cf = (
+            config.protected_sample_dedup_cf
+            if is_any_protected
+            else config.final_dedup_changed_fraction_threshold
+        )
+        if rms < dedup_rms and changed_fraction < dedup_cf:
             groups[-1].append(candidate)
         else:
             groups.append([candidate])

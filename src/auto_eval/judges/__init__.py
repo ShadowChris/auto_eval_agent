@@ -4,7 +4,7 @@ from .base import JudgeClient, JudgeReply
 from .ensemble import aggregate_pairs, aggregate_scores
 from .pairwise_judge import PairwiseJudge
 from .rubric_judge import RubricJudge, ensure_classified
-from .rich_content_judge import RichContentJudge
+from .rich_content_judge import RichContentJudge, _format_visual_findings_for_rubric
 from .skill_router import SkillRouter
 
 __all__ = [

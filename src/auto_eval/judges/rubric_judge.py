@@ -234,6 +234,10 @@ class RubricJudge:
             correctness = "unclear"
         error_type = data.get("error_type")
         rationale = data.get("rationale", "")
+        top_issue_1_dim = data.get("top_issue_1_dim")
+        top_issue_2_dim = data.get("top_issue_2_dim")
+        top_issue_3_dim = data.get("top_issue_3_dim")
+        top_issues_desc = data.get("top_issues_desc")
 
         return SingleScore(
             item_id=item.id,
@@ -248,6 +252,10 @@ class RubricJudge:
             correctness=correctness,
             error_type=error_type,
             rationale=rationale,
+            top_issue_1_dim=top_issue_1_dim,
+            top_issue_2_dim=top_issue_2_dim,
+            top_issue_3_dim=top_issue_3_dim,
+            top_issues_desc=top_issues_desc,
             analysis=analysis,
             used_search=reply.used_search,
             tool_trace=reply.tool_trace,
@@ -389,6 +397,7 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
                     ],
                     "temperature": 0,
                     "max_tokens": 200,
+                    "extra_body": {"enable_thinking": False}
                 },
                 total_timeout_s=15.0,
                 max_attempts=3,

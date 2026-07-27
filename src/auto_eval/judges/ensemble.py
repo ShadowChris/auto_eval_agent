@@ -97,6 +97,9 @@ def aggregate_scores(
         if parts:
             rubric_reasons[k] = " | ".join(parts[:3])
 
+    # 取第一个裁判的 top_issue 字段
+    first = scores[0]
+
     return Verdict(
         item_id=scores[0].item_id,
         model=scores[0].model,
@@ -107,6 +110,10 @@ def aggregate_scores(
         correctness=correctness,
         error_type=error_type,
         rationale=" | ".join(f"[{s.judge}] {s.rationale}" for s in scores[:3]),
+        top_issue_1_dim=first.top_issue_1_dim,
+        top_issue_2_dim=first.top_issue_2_dim,
+        top_issue_3_dim=first.top_issue_3_dim,
+        top_issues_desc=first.top_issues_desc,
         n_judges=len(by_judge),
         judges_agreement=agree,
         repeat_std=repeat_std,

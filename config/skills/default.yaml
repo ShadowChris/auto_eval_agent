@@ -16,6 +16,10 @@ rubrics:
         description: 图片或视频结果需要与Query/Answer中的回答内容相关
       - name: 超链接相关性
         description: 只有Query实体和文字是对应的，才可以出超链接，其他情况误召即为相关性问题
+      - name: Superlink挂载完整性
+        description: 对应该出Superlink的场景（如需要导航、查看详情、跳转服务等），回答中是否挂载了Superlink
+      - name: 文卡一致性
+        description: 文字结果与卡片结果是否一致（内容一致、时间一致、实体一致），不出现文字说A卡片显示B的情况
   - name: 真实性
     description: 判断答案内容、数据、推理和参考来源是否真实可靠，是否存在关键事实错误、虚构、过时信息或引用不支撑结论的问题。
     weight: 1.8
@@ -25,6 +29,8 @@ rubrics:
         description: 内容是否存在关键事实性错误
       - name: 参考来源可靠性
         description: 参考来源是否来自权威站点
+      - name: 计算准确性
+        description: 涉及数字、日期、时间、汇率等计算是否正确，无计算错误
   - name: 安全合规性
     description: 是否避免风险内容和误导。
     weight: 1.0
@@ -55,6 +61,16 @@ rubrics:
         description: 答案对复杂问题是否给出原因、机制、判断依据或关键约束
       - name: 信息密度
         description: 内容需要突出重点、长短适宜
+      - name: 逻辑一致性
+        description: 答案前后是否逻辑一致，无前后矛盾或推理混乱
+      - name: 结果去重
+        description: 文字/卡片结果是否存在无意义的重复出现
+      - name: 思考过程暴露
+        description: 模型的内部思考过程（如工具调用结果、内部推理步骤）是否泄漏到用户可见的回答中
+      - name: 响应时延
+        description: 结果响应速度是否满足用户预期，尤其是简单query是否出现明显延迟
+      - name: 回答完整性
+        description: 回答是否完整输出，无中途截断或内容未出全
   - name: 用户需求闭环
     description: 内容的呈现是否可以直接满足用户需求，包括文字、图片/视频、参考来源、超链接、服务卡片等。
     weight: 1.2
@@ -66,6 +82,12 @@ rubrics:
         description: 对新闻、政策、政务、医疗、法律、金融、强事实核验等场景，是否提供可信参考来源
       - name: 服务卡片闭环
         description: 对天气、路线、日程、购票、外卖、翻译、计算、汇率、本地生活等强服务意图，是否召回或承接合适的服务卡片
+      - name: 需求遵从度
+        description: 是否严格按照用户指定的条件（如风格、版本、集数、时间、数量等）给出结果，不出现要A给B
+      - name: 结果非空
+        description: 是否给出了有效结果（非空回答、非无意义兜底回复）
+      - name: 信息总结准确性
+        description: 需要从应用/页面中提取信息时，返回的总结是否与实际内容一致
   - name: 个性化与一致性
     description: 判断答案是否能正确承接多轮上下文、保持前后结论一致，并结合用户偏好、能力水平和当前场景进行适配。
     weight: 0.8
@@ -75,3 +97,5 @@ rubrics:
         description: 由于未理解多轮上下文，导致无法接续
       - name: 个性化
         description: 答案是否结合用户已表达的偏好、能力水平、设备/地区/业务场景或长期目标进行适配
+      - name: 私域信息合理性
+        description: 是否合理使用私域信息，不过度结合或滥用用户个人信息

@@ -10,9 +10,10 @@ createApp({
       { key: "process", label: "过程盲评(含轨迹)" },
       { key: "operation", label: "操作类(录屏)" },
       { key: "rich_content", label: "垂域挂卡 / Superlink" },
+      { key: "rich_content_quality", label: "垂域挂卡综合评测" },
     ];
     const mode = ref("single");
-    const isVideoMode = computed(() => ["operation", "rich_content"].includes(mode.value));
+    const isVideoMode = computed(() => ["operation", "rich_content", "rich_content_quality"].includes(mode.value));
     const text = ref("");
     const fileText = ref("");
     const isJsonl = ref(false);
@@ -23,6 +24,7 @@ createApp({
     const judges = ref([]);
     const models = ref([]);
     const selectedJudges = ref([]);
+    const visualJudge = ref("");  // rich_content_quality 模式：挂卡识别裁判
     const selectedModel = ref("");
     const concurrency = ref(4);
     const evalTimeout = ref(300);
@@ -66,6 +68,7 @@ createApp({
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
           operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/content_start_time/content_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
+          rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域挂卡相同。",
         }[mode.value])
     );
     const placeholder = computed(
@@ -77,6 +80,7 @@ createApp({
           process: "规划回家路线 ||| @context: 当前位于上海人民广场，目的地徐家汇 ||| 最终回答 ||| 推理轨迹\n某函数是否正确？ ||| 正确 ||| def f(n): return 1 if n<=1 else n*f(n-1)",
           operation: "",
           rich_content: "",
+          rich_content_quality: "",
         }[mode.value])
     );
 
@@ -382,6 +386,37 @@ createApp({
           { key: "rationale", label: "识别结论" },
           { key: "latency_s", label: "耗时" },
         ];
+      if (mode.value === "rich_content_quality")
+        return [
+          { key: "item_id", label: "题号" },
+          { key: "query", label: "Query" },
+          ...contextCols,
+          { key: "category_display", label: "垂域" },
+          { key: "answer", label: "回答" },
+          { key: "card_presence", label: "挂卡" },
+          { key: "card_count", label: "挂卡数" },
+          { key: "card_types", label: "挂卡类型" },
+          { key: "card_contents", label: "挂卡内容" },
+          { key: "card_suitability", label: "挂卡适配性" },
+          { key: "card_suitability_score", label: "适配分" },
+          { key: "superlink_presence", label: "Superlink" },
+          { key: "superlink_count", label: "链接数" },
+          { key: "superlink_texts", label: "链接文字" },
+          { key: "answer_coverage", label: "回答覆盖" },
+          { key: "correctness", label: "判定" },
+          { key: "total", label: "总分" },
+          ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
+          { key: "used_search", label: "联网" },
+          { key: "truncated", label: "截断" },
+          { key: "arbitrated", label: "仲裁" },
+          { key: "top_issue_1_dim", label: "首要问题维度" },
+          { key: "top_issue_2_dim", label: "次要问题维度" },
+          { key: "top_issue_3_dim", label: "第三问题维度" },
+          { key: "top_issues_desc", label: "问题描述" },
+          { key: "needs_review", label: "需人工复核" },
+          { key: "rationale", label: "理由" },
+          { key: "latency_s", label: "耗时" },
+        ];
       const dims = rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d }));
       return [
         { key: "item_id", label: "题号" },
@@ -395,6 +430,10 @@ createApp({
         { key: "truncated", label: "截断" },
         { key: "arbitrated", label: "仲裁" },
         { key: "agree", label: "与真值" },
+        { key: "top_issue_1_dim", label: "首要问题维度" },
+        { key: "top_issue_2_dim", label: "次要问题维度" },
+        { key: "top_issue_3_dim", label: "第三问题维度" },
+        { key: "top_issues_desc", label: "问题描述" },
         { key: "rationale", label: "理由" },
         { key: "latency_s", label: "耗时" },
       ];
@@ -403,7 +442,7 @@ createApp({
     function columnWidth(c) {
       const compact = c.rubricDim
         || ["correctness", "winner", "total", "used_search", "truncated", "arbitrated", "agree", "latency_s", "bidirectional_consistent"].includes(c.key);
-      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale"].includes(c.key);
+      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc"].includes(c.key);
       const minWidth = compact ? 88 : c.key === "item_id" ? 90 : textColumn ? 180 : 110;
       const maxWidth = compact ? 130 : c.key === "rationale" ? 420 : textColumn ? 360 : 220;
       const visualLength = (value) => Array.from(String(value ?? "")).reduce(
@@ -526,6 +565,14 @@ createApp({
         const endUserJudge = judges.value.find((judge) => judge.persona === "end_user");
         if (endUserJudge) return [endUserJudge.name];
       }
+      if (targetMode === "rich_content_quality") {
+        // 综合评测：挂卡识别默认用第一位裁判，回答评测默认选所有非产品专家
+        visualJudge.value = judges.value.length ? judges.value[0].name : "";
+        const rubricJudges = judges.value
+          .filter((j) => j.persona !== "product_expert")
+          .map((j) => j.name);
+        return rubricJudges.length ? rubricJudges : (judges.value.length ? [judges.value[0].name] : []);
+      }
       return judges.value.length ? [judges.value[0].name] : [];
     }
 
@@ -538,7 +585,7 @@ createApp({
       errors.value = [];
       fileText.value = "";
       isJsonl.value = false;
-      if (["operation", "rich_content"].includes(k)) opItems.value = [newOpItem()];
+      if (["operation", "rich_content", "rich_content_quality"].includes(k)) opItems.value = [newOpItem()];
     }
 
     function onFile(e) {
@@ -622,7 +669,7 @@ createApp({
             category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || "",
-            answer: mode.value === "rich_content" ? (item.answer_text || "") : (item.answer || ""),
+            answer: (mode.value === "rich_content" || mode.value === "rich_content_quality") ? (item.answer_text || "") : (item.answer || ""),
             taskStartTime: item.task_start_time ?? null,
             taskEndTime: item.task_end_time ?? null,
             contentStartTime: item.content_start_time ?? null,
@@ -681,6 +728,7 @@ createApp({
             item.category = "operation";
             item.answer = (it.answer || "").trim();
           } else {
+            // rich_content / rich_content_quality
             item.category = (it.category || "").trim() || "default";
             item.answer_text = (it.answer || "").trim();
           }
@@ -733,6 +781,7 @@ createApp({
         items: items.value,
         options: {
           judges: selectedJudges.value,
+          visual_judge: visualJudge.value,
           model: selectedModel.value,
           concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
@@ -1109,7 +1158,7 @@ createApp({
     });
 
     return {
-      modes, mode, isVideoMode, text, items, errors, judges, models, selectedJudges, selectedModel,
+      modes, mode, isVideoMode, text, items, errors, judges, models, selectedJudges, visualJudge, selectedModel,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, loadingHistory, pageSize,

@@ -59,11 +59,26 @@ def rich_content_result_fields(
         if card.get("suitability_score") is not None
     ]
 
+    visual_description = observation.visual_description or ""
+    # Part 2：视觉评测适配性 — 从 cards 提取，独立于单回答盲评的卡片适配性评价
+    visual_suitability = [
+        {
+            "type": card["type"],
+            "entity": card.get("entity", ""),
+            "suitability": card.get("suitability", "unclear"),
+            "suitability_score": card.get("suitability_score"),
+            "reason": card.get("reason", ""),
+        }
+        for card in cards
+    ]
+
     needs_review = bool(
         observation.needs_review or coverage != "complete"
     )
     return {
         "visual_findings": observation.model_dump(),
+        "visual_description": visual_description,
+        "visual_suitability": visual_suitability,
         "answer_coverage": coverage,
         "card_presence": card_presence,
         "card_count": len(cards),
@@ -83,6 +98,78 @@ def rich_content_result_fields(
         "review_reason": observation.review_reason,
         "rationale": observation.rationale,
     }
+
+
+def _format_visual_findings_for_rubric(visual: dict) -> str:
+    """将 RichContentJudge.evaluate() 返回值中的纯客观视觉描述转为 rubric 裁判可读的自然语言上下文。
+
+    重要：只使用 Part 1（visual_description 纯客观描述），不包含 Part 2（suitability 评价），
+    避免视觉评测的结论干扰单回答盲评裁判的独立判断。
+
+    注意：传入的是 evaluate() 的完整返回值（含 visual_findings 嵌套），
+    本函数优先从 visual["visual_findings"]["visual_description"] 提取纯描述；
+    若为空则回退到从 cards/superlinks 构建纯客观描述（兼容旧模型输出）。"""
+    findings = visual.get("visual_findings") or {}
+
+    # 优先使用 Part 1 纯客观描述
+    visual_description = findings.get("visual_description", "")
+    if not visual_description:
+        # 兼容顶层 visual_description
+        visual_description = visual.get("visual_description", "")
+
+    if visual_description:
+        lines = [
+            "【经视觉识别确认的富内容组件】",
+            "以下描述来自独立视觉识别，仅客观描述回答中出现的挂卡和Superlink内容。",
+            "评分时请将纯文本回答与所有这些富内容组件视为一个整体来评判——",
+            "文本可能有意简洁，因为卡片已经承载了详细数据。",
+            "不要在\"完整性\"维度上因文本简短而扣分——请检查卡片是否已补充了必要信息。",
+            "如果以下显示\"未识别到\"，则此回答确实没有对应富内容组件，按常规纯文本回答评判。",
+            "",
+            visual_description,
+        ]
+    else:
+        # 兼容旧格式：从 cards/superlinks 构建纯客观描述（不包含 suitability 评价）
+        cards = findings.get("cards") or []
+        superlinks = findings.get("superlinks") or []
+
+        lines = [
+            "【经视觉识别确认的富内容组件】",
+            "以下信息来自独立视觉识别，仅客观描述回答中出现的挂卡和Superlink内容。",
+            "评分时请将纯文本回答与所有这些富内容组件视为一个整体来评判——",
+            "文本可能有意简洁，因为卡片已经承载了详细数据。",
+            "不要在\"完整性\"维度上因文本简短而扣分——请检查卡片是否已补充了必要信息。",
+            "如果以下显示\"未识别到\"，则此回答确实没有对应富内容组件，按常规纯文本回答评判。",
+        ]
+
+        if cards:
+            lines.append(f"\n挂卡（共 {len(cards)} 张）：")
+            for i, card in enumerate(cards, 1):
+                lines.append(f"  {i}. 类型：{card.get('type', '未知')}")
+                if card.get("entity"):
+                    lines.append(f"     核心实体：{card['entity']}")
+                if card.get("visible_content"):
+                    lines.append(f"     可见内容：{card['visible_content']}")
+                # 注意：不输出 relation_to_query / suitability 等评价字段
+        else:
+            lines.append("\n未识别到挂卡。")
+
+        if superlinks:
+            lines.append(f"\n蓝色Superlink（共 {len(superlinks)} 个）：")
+            for i, link in enumerate(superlinks, 1):
+                lines.append(f"  {i}. 文字：{link.get('text', '')}")
+        else:
+            lines.append("\n未识别到蓝色Superlink。")
+
+    coverage = findings.get("answer_coverage", visual.get("answer_coverage", "unclear"))
+    coverage_note = {
+        "complete": "（关键帧覆盖完整回答区域，以上识别结果可靠）",
+        "partial": "（关键帧只覆盖部分回答区域，以上为已识别部分，可能还有未识别内容）",
+        "unclear": "（关键帧覆盖不足，识别结果仅供参考）",
+    }.get(coverage, "")
+    lines.append(f"\n回答覆盖度：{coverage}{coverage_note}")
+
+    return "\n".join(lines)
 
 
 class RichContentJudge:

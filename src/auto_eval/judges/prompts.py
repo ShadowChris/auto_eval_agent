@@ -53,6 +53,7 @@ RUBRIC_SYSTEM = Template(
 - python_run：执行 Python 代码看输出，核查编程题/逻辑（仅必要时用）。
 
 【基本原则】
+- query 优先：query 是用户真实意图的直接表达；context 只是用户的背景信息（定位/时间/设备等），用于补充理解，绝不替代或覆盖 query。query 明确点名某对象（地名/实体/时间）时，即使 context 背景指向别处，也必须以 query 点名的对象评判答案对错；只有 query 模糊指代时才用 context 消歧。
 - 接受等价表达与合理推导，不要仅因措辞不同就判错。
 - 对答案里的每个事实性断言保持怀疑，主动查证可疑之处，不要凭模糊印象打分。
 - 判定诚实：无法确定答案对错时（信息不足、查证后仍存疑、模棱两可），correctness 必须给 unclear，不要硬猜 right/wrong；partial 仅用于『方向对但不完整/有小错』。
@@ -120,8 +121,9 @@ RUBRIC_SYSTEM = Template(
    - 安全与合规：...
 4. N/A 判断：哪些维度不适用及理由...
 5. 对比锚点：...
+6. 主要问题点：选出问题最严重的前3个**不同维度**（从相关性、时效性、真实性、准确性、完整性、逻辑性、合规性、有用性、结构性、服务闭环、结果重复、思考漏出、未出卡、资源挂载缺失、计算错误、时延高、遵从性、文卡不一致、回答截断、无结果、本机机型不感知、多轮未接续、操作冗余、路径错误、提示无法操作、需求闭环、执行中卡住或中断、执行中循环出不来、没有总结信息或信息总结错误、未取到私域信息、中控规划、私域信息滥用、skill技能实现问题、思考过程暴露中选择，维度必须不同，不足3个则只列出存在的），再为每个维度写具体问题描述...
 </analysis>
-{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }} 或 null>, {% endfor -%} "total": <非null子维度的均值>, "reason": "<该维度为何打这分的简短理由>" }, {%- else -%} "{{ d.name }}": { "total": <1-{{ scale }} 或 null>, "reason": "<该维度为何打这分的简短理由>" }, {%- endif -%} {%- endfor -%} }, "total": <各适用维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因标签，无错误填 null>", "rationale": "<一句话总结>"}
+{"rubric": { {%- for d in dims -%} {%- if d.sub_dimensions -%} "{{ d.name }}": { {%- for s in d.sub_dimensions -%} "{{ s.name }}": <1-{{ scale }} 或 null>, {% endfor -%} "total": <非null子维度的均值>, "reason": "<该维度为何打这分的简短理由>" }, {%- else -%} "{{ d.name }}": { "total": <1-{{ scale }} 或 null>, "reason": "<该维度为何打这分的简短理由>" }, {%- endif -%} {%- endfor -%} }, "total": <各适用维度均值按weight加权>, "correctness": "right|wrong|partial|unclear", "error_type": "<简短归因标签，无错误填 null>", "rationale": "<一句话总结>", "top_issue_1_dim": "<首要问题维度，从相关性/时效性/真实性/准确性/完整性/逻辑性/合规性/有用性/结构性/服务闭环/结果重复/思考漏出/未出卡/资源挂载缺失/计算错误/时延高/遵从性/文卡不一致/回答截断/无结果/本机机型不感知/多轮未接续/操作冗余/路径错误/提示无法操作/需求闭环/执行中卡住或中断/执行中循环出不来/没有总结信息或信息总结错误/未取到私域信息/中控规划/私域信息滥用/skill技能实现问题/思考过程暴露中选；无问题填 N/A>", "top_issue_2_dim": "<次要问题维度，需与top_issue_1_dim不同；不足则填 N/A>", "top_issue_3_dim": "<第三问题维度，需与前两个不同；不足则填 N/A>", "top_issues_desc": "<问题描述，按行列出：top1维度：描述 \\n top2维度：描述 \\n top3维度：描述；无问题填 N/A>"}
 """
 )
 
@@ -129,8 +131,9 @@ RUBRIC_USER = Template(
     """题目：
 {{ question }}
 {% if context %}
-可信背景条件（由评测样本提供，请作为题目前提；不要忽略、改写或质疑）：
+可信背景条件（用户的背景信息：定位/时间/设备等，用于补充理解 query，不是问题的主体）：
 {{ context }}
+注意【query 优先，极其重要】：query 是用户真实意图的直接表达，永远以 query 明确点名的对象为准；背景里的定位/时间只是用户所处环境，不代表用户在问它。例：query 问"新疆天气"，即便背景定位写的是杭州，答案给新疆天气也是正确的，不得因背景定位判错。只有 query 用"本地/这里/当前/今天"等模糊指代时，才用背景信息消歧。
 注意：背景与待评答案是两个隔离的信息区。答案为保证独立完整而复述或引用必要背景，不算机械重复；只在答案自身存在无意义重复时扣分。
 {% endif %}
 待评答案（来自模型 {{ model_name }}）：
@@ -259,7 +262,10 @@ RICH_CONTENT_SYSTEM = Template(
     """{{ persona }}
 
 你正在检查一段问答产品录屏。用户消息中附带了按时间顺序排列的关键帧；第一张图片是第1帧，依次编号。
-目标是识别 assistant 当前回答区域中的【结构化挂卡】和【蓝色 Superlink 文字】，并评价已经出现的挂卡是否适合 query。
+你的任务分为两部分：
+  Part 1：纯客观描述识别到的挂卡和 Superlink。
+  Part 2：评价挂卡对 query 的适配性。
+
 这不是答案正确性评测，不要输出 correctness、total 或整体对错。
 
 【对象定义】
@@ -280,13 +286,28 @@ RICH_CONTENT_SYSTEM = Template(
 - cards 和 superlinks 数组必须已经完成跨帧去重；后端将直接用数组长度计算数量。
 
 【回答覆盖度】
-- complete：关键帧足以覆盖当前 assistant 回答的完整内容，可以可靠判断“没有”和精确数量。
+- complete：关键帧足以覆盖当前 assistant 回答的完整内容，可以可靠判断"没有"和精确数量。
 - partial：只看到回答的一部分、滚动范围不完整，但已识别到的对象可信；数量只能视为下界。
 - unclear：画面模糊、严重遮挡或顺序证据不足，无法可靠识别。
 
-【挂卡适配性】
+【Part 1 — 视觉描述（纯客观，极其重要）】
+你必须输出一段纯客观描述文本到 visual_description 字段。这段描述仅供下游裁判了解"回答里出现了哪些富内容组件"，不得包含任何评价性语言。
+
+描述必须覆盖以下内容：
+- 一共有几张挂卡，分别是什么类型（用中文标签如"音乐""影视""天气"等），每张挂卡的可见关键信息（实体名称、数据、文字等）。
+- 一共有几个 Superlink，分别是什么蓝色文字。
+- 尤其注意：描述那些与用户 query / 可信 context 中的实体、场景、时间、地点等关键条件高度呼应的内容细节，也描述那些看起来与 query 完全不沾边的内容细节。但只用观察语言呈现"挂卡上有什么"，让读者自己判断是否相关。
+
+【严禁以下行为】
+- 严禁在 visual_description 中使用"相关""匹配""适配""对应""贴合""呼应""无关""不相关""偏离"等评价关联度的词。
+- 严禁在 visual_description 中给出"这张卡片很适合这个 query"或"这张卡片与问题不匹配"等结论。
+- 严禁在 visual_description 中输出 relation_to_query / suitability 等 Part 2 的评价字段。
+- 只能写"看到了什么"：挂卡类型、实体、数据、文字、画面位置。例如"挂卡显示周杰伦《七里香》的播放按钮和专辑封面"而非"挂卡与用户问的歌曲完全匹配"。
+- 如果你觉得某些内容和 query 特别有关或特别无关，用观察细节自然带出——描述该内容的具体信息让读者自己判断。
+
+【Part 2 — 挂卡适配性评价】
 仅对实际识别到的挂卡逐张判断：
-- 对照 query 和可信 context，检查垂域、核心实体、时间、地点、场次等关键条件。
+- 对照 query 和可信 context 检查垂域、核心实体、时间、地点、场次等关键条件——但 query 永远优先：query 明确点名的对象（如"新疆天气"）就是用户要的，即便 context 背景定位在别处（如杭州），挂卡匹配 query 即为适配；只有 query 模糊指代"本地/这里/当前"时才用 context 定位消歧。
 - 检查挂卡与回答正文是否一致，以及卡片形态是否适合用户意图。
 - relation_to_query 只能是 direct / supporting / weak / unrelated / unclear。
 - suitability 只能是 suitable / partially_suitable / unsuitable / unclear。
@@ -302,11 +323,13 @@ RICH_CONTENT_SYSTEM = Template(
 先输出 <analysis>...</analysis>，再输出一行 JSON。不要输出 correctness、rubric 或 total：
 <analysis>
 1. 回答有效区域与覆盖度。
-2. 挂卡跨帧去重、内容和适配性。
+2. 挂卡跨帧去重与内容识别。
 3. Superlink 跨帧去重与可见文字。
-4. 不确定项和人工复核原因。
+4. Part 1：纯客观视觉描述（撰写 visual_description 的思考过程）。
+5. Part 2：挂卡适配性评价。
+6. 不确定项和人工复核原因。
 </analysis>
-{"answer_coverage":"complete|partial|unclear","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","relation_to_query":"direct|supporting|weak|unrelated|unclear","suitability":"suitable|partially_suitable|unsuitable|unclear","suitability_score":<1-5或null>,"reason":"<判断理由>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","rationale":"<一句话总结发现>"}
+{"visual_description":"<Part 1：纯客观描述文本，不得包含评价性语言>","answer_coverage":"complete|partial|unclear","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","relation_to_query":"direct|supporting|weak|unrelated|unclear","suitability":"suitable|partially_suitable|unsuitable|unclear","suitability_score":<1-5或null>,"reason":"<判断理由>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","rationale":"<一句话总结发现>"}
 """
 )
 
