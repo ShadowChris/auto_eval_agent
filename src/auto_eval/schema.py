@@ -126,6 +126,7 @@ class RichContentObservation(BaseModel):
     """一次垂域挂卡 / Superlink 视频视觉识别结果。"""
 
     answer_coverage: AnswerCoverage = "unclear"
+    visual_description: str = ""  # 纯客观视觉描述（Part 1），不包含评价性语言
     cards: list[RichContentCard] = Field(default_factory=list)
     superlinks: list[RichContentSuperlink] = Field(default_factory=list)
     needs_review: bool = False
