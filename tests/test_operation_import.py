@@ -39,10 +39,38 @@ def test_operation_jsonl_normalizes_manifest_fields():
         "task_start_time": 0.0,
         "task_end_time": 18.5,
         "answer": "已设置完成",
+        "source_data": {
+            "id": "op_001",
+            "query": "设置早上七点的闹钟",
+            "context": "当前时间22:00",
+            "video_path": "data/videos/alarm.mp4",
+            "task_start_time": 0,
+            "task_end_time": 18.5,
+            "agent_statement": "已设置完成",
+        },
     }
     assert items[1]["category"] == "operation"
     assert "context" not in items[1]
     assert "answer" not in items[1]
+
+
+def test_operation_jsonl_preserves_extra_source_fields_and_normalizes_nan():
+    content = (
+        '{"id":"op_001","query":"打开设置","video_path":"data/a.mp4",'
+        '"分享链接":"https://example.test/share","日志文件":"run.log","first_token":NaN}'
+    )
+
+    items, errors = parse_jsonl(content, "operation")
+
+    assert not errors
+    assert items[0]["source_data"] == {
+        "id": "op_001",
+        "query": "打开设置",
+        "video_path": "data/a.mp4",
+        "分享链接": "https://example.test/share",
+        "日志文件": "run.log",
+        "first_token": None,
+    }
 
 
 def test_operation_jsonl_task_times_are_optional_and_strictly_validated():

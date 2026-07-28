@@ -35,6 +35,17 @@ Mode = Literal[
 _CONTEXT_PREFIX = "@context:"
 
 
+def _json_safe_source(value):
+    """保留原始 JSONL 字段，同时把 NaN/Infinity 归一为空值。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {str(key): _json_safe_source(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_source(item) for item in value]
+    return value
+
+
 def _extract_text_context(parts: list[str]) -> tuple[list[str], str | None]:
     """提取紧跟 query 的可选 ``@context: ...`` 段，并保持旧位置格式兼容。"""
     if len(parts) < 2 or not parts[1].lower().startswith(_CONTEXT_PREFIX):
@@ -242,5 +253,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item["reference"] = obj["reference"]
         if obj.get("category"):
             item["category"] = obj["category"]
+        # 原始字段仅用于历史追溯和导出，不会进入 EvalItem 或裁判 prompt。
+        item["source_data"] = _json_safe_source(obj)
         items.append(item)
     return items, errors

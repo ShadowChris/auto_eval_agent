@@ -14,6 +14,7 @@ def test_new_history_name_is_time_sortable_and_loadable_by_task_id(tmp_path, mon
         mode="operation",
         items=[],
         options={},
+        dataset_name="operation_cases.jsonl",
         session_name=session_name,
         created_at=created_at,
     )
@@ -23,6 +24,7 @@ def test_new_history_name_is_time_sortable_and_loadable_by_task_id(tmp_path, mon
     assert path.exists()
     assert history.load_snapshot(task.id)["session_name"] == session_name
     assert history.list_snapshots()[0]["session_name"] == session_name
+    assert history.list_snapshots()[0]["dataset_name"] == "operation_cases.jsonl"
     assert history.delete_snapshot(task.id)
     assert not path.exists()
 

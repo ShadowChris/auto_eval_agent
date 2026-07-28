@@ -17,6 +17,7 @@ createApp({
     const text = ref("");
     const fileText = ref("");
     const isJsonl = ref(false);
+    const datasetName = ref("");
     const items = ref([]);
     const opItems = ref([newOpItem()]);
     const opPreparing = ref(false);
@@ -587,12 +588,14 @@ createApp({
       errors.value = [];
       fileText.value = "";
       isJsonl.value = false;
+      datasetName.value = "";
       if (["operation", "rich_content", "rich_content_quality"].includes(k)) opItems.value = [newOpItem()];
     }
 
     function onFile(e) {
       const f = e.target.files[0];
       if (!f) return;
+      datasetName.value = f.name || "";
       const r = new FileReader();
       r.onload = () => {
         fileText.value = r.result;
@@ -604,7 +607,7 @@ createApp({
 
     // —— 操作类评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
     function newOpItem() {
-      return { id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, contentStartTime: null, contentEndTime: null, uploading: false, uploadError: "" };
+      return { id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, contentStartTime: null, contentEndTime: null, sourceLine: null, sourceData: null, uploading: false, uploadError: "" };
     }
     function addOpItem() { opItems.value.push(newOpItem()); }
     function removeOpItem(i) { if (opItems.value.length > 1) opItems.value.splice(i, 1); }
@@ -640,6 +643,7 @@ createApp({
       const file = e.target.files && e.target.files[0];
       e.target.value = "";
       if (!file) return;
+      datasetName.value = file.name || "";
       opPreparing.value = true;
       errors.value = [];
       items.value = [];
@@ -676,6 +680,8 @@ createApp({
             taskEndTime: item.task_end_time ?? null,
             contentStartTime: item.content_start_time ?? null,
             contentEndTime: item.content_end_time ?? null,
+            sourceLine: item.source_line ?? null,
+            sourceData: item.source_data || null,
           }));
         }
       } catch (error) {
@@ -742,6 +748,8 @@ createApp({
           if (Number.isFinite(it.taskEndTime)) item.task_end_time = it.taskEndTime;
           if (Number.isFinite(it.contentStartTime)) item.content_start_time = it.contentStartTime;
           if (Number.isFinite(it.contentEndTime)) item.content_end_time = it.contentEndTime;
+          if (Number.isFinite(it.sourceLine)) item.source_line = it.sourceLine;
+          if (it.sourceData) item.source_data = it.sourceData;
           return item;
         });
         errors.value = [];
@@ -781,6 +789,7 @@ createApp({
       const body = {
         mode: mode.value,
         items: items.value,
+        dataset_name: datasetName.value || (isVideoMode.value ? "手动录入" : (isJsonl.value ? "未命名数据集.jsonl" : "文本输入")),
         options: {
           judges: selectedJudges.value,
           visual_judge: visualJudge.value,
@@ -1113,6 +1122,7 @@ createApp({
       const d = await r.json();
       taskId.value = d.task_id || id;
       mode.value = d.mode || mode.value;
+      datasetName.value = d.dataset_name || "";
       items.value = d.items || [];
       results.value = d.results || [];
       itemProgress.value = d.item_progress || {};
@@ -1142,6 +1152,9 @@ createApp({
     function exportXlsx() {
       window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
     }
+    function exportFrames() {
+      window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
+    }
 
     onMounted(async () => {
       progressClockTimer = window.setInterval(() => {
@@ -1161,7 +1174,7 @@ createApp({
     });
 
     return {
-      modes, mode, isVideoMode, text, items, errors, judges, models, selectedJudges, visualJudge, selectedModel,
+      modes, mode, isVideoMode, text, items, errors, judges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, loadingHistory, pageSize,
@@ -1172,7 +1185,7 @@ createApp({
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, opPreparing, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
       changePreviewPage, changeProgressPage, paginationPages, setTablePage, jumpTablePage,

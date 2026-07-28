@@ -15,12 +15,23 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from ..config import load_config
 from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
 from .parse_input import Mode, parse_jsonl, parse_text
-from .history import build_xlsx, delete_snapshot, export_rows, list_snapshots, load_snapshot, rows_to_csv, snapshot_payload, task_to_snapshot
+from .history import (
+    build_xlsx,
+    delete_snapshot,
+    export_rows,
+    list_snapshots,
+    load_snapshot,
+    rows_to_csv,
+    snapshot_payload,
+    task_to_snapshot,
+    write_frames_zip,
+)
 from .operation_media import (
     VIDEO_EXTENSIONS,
     operation_video_roots,
@@ -60,6 +71,7 @@ class EvalReq(BaseModel):
     mode: Mode
     items: list[dict]
     options: dict = {}
+    dataset_name: str = ""
 
 
 class OperationPrepareReq(BaseModel):
@@ -151,7 +163,12 @@ async def api_eval(req: EvalReq):
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
     _validate_eval_request(req, app_cfg)
-    task = new_task(req.mode, req.items, req.options)
+    task = new_task(
+        req.mode,
+        req.items,
+        req.options,
+        dataset_name=req.dataset_name.strip(),
+    )
     async def _start_later():
         # 先把 task_id 响应给前端，再启动可能较重的评估任务；
         # 避免后台裁判/工具调用抢占事件循环，导致 /api/eval 本身迟迟不返回。
@@ -308,6 +325,23 @@ def api_export(task_id: str, format: str = "json"):
             content,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.xlsx"},
+        )
+
+    if format in {"frames", "frames_zip"}:
+        export_dir = RUNS_DIR / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = export_dir / f".{task_id}.{uuid.uuid4().hex}.zip"
+        write_frames_zip(data, archive_path)
+        raw_name = Path(str(data.get("dataset_name") or f"eval_{task_id}")).stem
+        safe_name = "".join(
+            char if char.isalnum() or char in "-_. " else "_"
+            for char in raw_name
+        ).strip(" ._") or f"eval_{task_id}"
+        return FileResponse(
+            archive_path,
+            media_type="application/zip",
+            filename=f"{safe_name}_frames.zip",
+            background=BackgroundTask(archive_path.unlink, missing_ok=True),
         )
 
     sheets = export_rows(data, cfg())

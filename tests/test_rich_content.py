@@ -40,6 +40,7 @@ def test_rich_content_jsonl_parses_video_manifest() -> None:
     items, errors = parse_jsonl(content, "rich_content")
 
     assert errors == []
+    source_data = items[0].pop("source_data")
     assert items[0] == {
         "query": "北京明天天气",
         "context": "当前地点北京",
@@ -51,6 +52,11 @@ def test_rich_content_jsonl_parses_video_manifest() -> None:
         "category": "weather",
         "answer_text": "北京明天晴",
         "expected_visual": {"card_count": 1, "superlink_count": 2},
+    }
+    assert source_data["video_path"] == "data/weather.mp4"
+    assert source_data["expected_visual"] == {
+        "card_count": 1,
+        "superlink_count": 2,
     }
     assert items[1]["category"] == "default"
 

@@ -17,6 +17,7 @@ class Task:
     items: list[dict]
     options: dict
     session_name: str = ""
+    dataset_name: str = ""
     status: str = "pending"  # pending | running | done | error
     results: list[dict] = field(default_factory=list)
     item_progress: dict[str, dict] = field(default_factory=dict)
@@ -34,7 +35,12 @@ class Task:
 TASKS: dict[str, Task] = {}
 
 
-def new_task(mode: str, items: list[dict], options: dict) -> Task:
+def new_task(
+    mode: str,
+    items: list[dict],
+    options: dict,
+    dataset_name: str = "",
+) -> Task:
     task_id = uuid.uuid4().hex[:12]
     created_at = time.time()
     t = Task(
@@ -42,6 +48,7 @@ def new_task(mode: str, items: list[dict], options: dict) -> Task:
         mode=mode,
         items=items,
         options=options,
+        dataset_name=dataset_name,
         session_name=make_session_name(created_at, mode, task_id),
         created_at=created_at,
     )
@@ -67,6 +74,7 @@ def get_task(task_id: str) -> Task | None:
         mode=snapshot.get("mode") or "single",
         items=snapshot.get("items") or [],
         options=snapshot.get("options") or {},
+        dataset_name=snapshot.get("dataset_name") or "",
         session_name=snapshot.get("session_name") or "",
         status=status,
         results=snapshot.get("results") or [],

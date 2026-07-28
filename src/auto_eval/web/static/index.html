@@ -33,10 +33,11 @@
     <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
-        <thead><tr><th>时间</th><th>模式</th><th>状态</th><th>进度</th><th>预览</th><th>操作</th></tr></thead>
+        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th>进度</th><th>预览</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="h in historyItems" :key="h.task_id">
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
+            <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ h.mode }}</td>
             <td>{{ h.status }}</td>
             <td>{{ h.done }}/{{ h.total }}</td>
@@ -64,6 +65,7 @@
           </label>
           <span v-if="opPreparing" class="running">正在解析 JSONL…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
+          <span v-if="datasetName" class="hint">数据集：{{ datasetName }}</span>
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
         <p v-if="mode==='operation'" class="hint">示例：{"id":"op_001","query":"设置7点闹钟","context":"当前时间22:00","video_path":"data/videos/alarm.mp4","task_start_time":7,"task_end_time":28.5,"agent_statement":"已设置完成"}</p>
@@ -258,6 +260,7 @@
       <button @click="exportCsv" :disabled="!taskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId">导出 JSON</button>
       <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
+      <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId">导出抽帧 ZIP</button>
     </h2>
     <div class="summary" v-if="summary">
       <span>样本量 {{ summary.total }}</span>
@@ -395,6 +398,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260727_operation_strict_v3"></script>
+  <script type="module" src="/static/app.js?v=20260728_dataset_export"></script>
 </body>
 </html>

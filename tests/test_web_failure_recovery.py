@@ -234,7 +234,11 @@ def test_export_backfills_identity_for_historical_failed_results():
     assert sheets["评估失败"][0]["query"] == "设置为静音"
     assert sheets["评估失败"][1]["item_id"] == "q1"
     assert sheets["评估失败"][1]["query"] == "打开24小时制"
-    assert sheets["逐题结果"] == sheets["评估失败"]
+    assert [row["数据集序号"] for row in sheets["逐题结果"]] == [1, 2]
+    assert [
+        {key: value for key, value in row.items() if key != "数据集序号"}
+        for row in sheets["逐题结果"]
+    ] == sheets["评估失败"]
 
 
 @pytest.mark.asyncio
