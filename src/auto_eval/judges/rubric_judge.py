@@ -15,6 +15,7 @@ from ..schema import EvalItem, SingleScore
 
 logger = logging.getLogger("auto_eval.classify")
 from .base import JudgeClient, JudgeOutputParseError
+from .operation_fields import normalize_operation_fields
 from .prompts import (
     OPERATION_SYSTEM,
     OPERATION_USER,
@@ -233,6 +234,17 @@ class RubricJudge:
         if correctness not in _VALID:
             correctness = "unclear"
         error_type = data.get("error_type")
+        is_low_level = data.get("is_low_level", "no")
+        if eval_mode == "operation":
+            task_type = data.get("task_type")
+            if "复杂多任务" in analysis:
+                task_type = "complex"
+            error_type, is_low_level = normalize_operation_fields(
+                correctness,
+                error_type,
+                is_low_level,
+                task_type,
+            )
         rationale = data.get("rationale", "")
         top_issue_1_dim = data.get("top_issue_1_dim")
         top_issue_2_dim = data.get("top_issue_2_dim")
@@ -251,6 +263,7 @@ class RubricJudge:
             total=total,
             correctness=correctness,
             error_type=error_type,
+            is_low_level=is_low_level,
             rationale=rationale,
             top_issue_1_dim=top_issue_1_dim,
             top_issue_2_dim=top_issue_2_dim,

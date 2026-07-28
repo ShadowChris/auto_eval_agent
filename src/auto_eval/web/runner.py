@@ -514,8 +514,16 @@ async def _eval_one(
         # 多裁判分歧 → 主席仲裁（纯文本，不带帧；兜底）
         if v and v.low_agreement and len(scores) >= 2 and arbitrator:
             try:
-                arb = await arbitrator.arbitrate(item, answer, list(scores))
+                arb = await arbitrator.arbitrate(
+                    item,
+                    answer,
+                    list(scores),
+                    eval_mode="operation",
+                    dims=op_dims,
+                )
                 v.correctness, v.total, v.rubric = arb["correctness"], arb["total"], arb["rubric"]
+                v.error_type = arb["error_type"]
+                v.is_low_level = arb["is_low_level"]
                 v.arbitrated = True
                 v.arbitrator_confidence = arb["confidence"]
                 v.arbitrator_rationale = arb["rationale"]
@@ -703,6 +711,7 @@ def _fill_verdict(out: dict, v) -> None:
     out["rubric"] = {k: round(val, 2) for k, val in v.rubric.items()}
     out["rubric_reasons"] = v.rubric_reasons or {}
     out["error_type"] = v.error_type
+    out["is_low_level"] = v.is_low_level
     # 各维度打分理由拼到"理由"末尾，前端"理由"列与导出可直接看到
     _rat = v.rationale or ""
     _reasons = v.rubric_reasons or {}

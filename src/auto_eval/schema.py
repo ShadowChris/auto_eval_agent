@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 Correctness = Literal["right", "wrong", "partial", "unclear"]
+LowLevel = Literal["yes", "no"]
 Winner = Literal["a", "b", "tie"]
 Difficulty = Literal["easy", "medium", "hard"]
 AnswerCoverage = Literal["complete", "partial", "unclear"]
@@ -84,6 +85,7 @@ class SingleScore(BaseModel):
     total: float = 0.0
     correctness: Correctness = "unclear"
     error_type: str | None = None
+    is_low_level: LowLevel = "no"  # 操作类：意图简单清晰但发生可归责的低级错误
     rationale: str = ""
     top_issue_1_dim: str | None = None  # 首要问题维度
     top_issue_2_dim: str | None = None  # 次要问题维度
@@ -165,6 +167,7 @@ class Verdict(BaseModel):
     total: float = 0.0
     correctness: Correctness = "unclear"
     error_type: str | None = None
+    is_low_level: LowLevel = "no"
     rationale: str = ""
     top_issue_1_dim: str | None = None
     top_issue_2_dim: str | None = None

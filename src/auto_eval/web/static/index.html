@@ -326,10 +326,10 @@
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="correctnessFilter" @change="resetResultPage">
           <option value="">全部判定</option>
-          <option value="right">正确</option>
-          <option value="partial">部分正确</option>
-          <option value="wrong">错误</option>
-          <option value="unclear">不清楚</option>
+          <option value="right">{{ mode==='operation' ? '完成' : '正确' }}</option>
+          <option value="partial">{{ mode==='operation' ? '完成但有瑕疵' : '部分正确' }}</option>
+          <option value="wrong">{{ mode==='operation' ? '未完成' : '错误' }}</option>
+          <option value="unclear">{{ mode==='operation' ? '无法判断' : '不清楚' }}</option>
         </select>
         <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="problemDimFilter" @change="resetResultPage">
           <option value="">全部维度</option>
@@ -395,6 +395,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260725_rcq_v1"></script>
+  <script type="module" src="/static/app.js?v=20260727_operation_strict_v3"></script>
 </body>
 </html>

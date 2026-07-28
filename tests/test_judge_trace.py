@@ -99,6 +99,8 @@ def test_web_trace_is_buffered_until_full_result_is_available(tmp_path):
         "query": "打开设置",
         "context": "手机已解锁",
         "correctness": "right",
+        "error_type": None,
+        "is_low_level": "no",
         "total": 4.5,
         "rubric": {"操作完成度": 5.0, "步骤正确性": 4.0},
         "rubric_reasons": {"步骤正确性": "有一次重试"},
@@ -114,6 +116,8 @@ def test_web_trace_is_buffered_until_full_result_is_available(tmp_path):
     assert record["model_raw_output"] == "<analysis>raw</analysis>\n{\"total\":4}"
     assert record["query"] == "打开设置"
     assert record["correctness"] == "right"
+    assert record["error_type"] is None
+    assert record["is_low_level"] == "no"
     assert record["total"] == 4.5
     assert record["rubric"]["操作完成度"] == 5.0
     assert record["rubric_reasons"]["步骤正确性"] == "有一次重试"

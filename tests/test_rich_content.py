@@ -243,7 +243,10 @@ def test_rich_content_runner_skips_extra_domain_classification() -> None:
         PROJECT_ROOT / "src/auto_eval/web/runner.py"
     ).read_text(encoding="utf-8")
 
-    assert 'mode != "rich_content" and classify_model and classify_base_url' in runner_source
+    assert (
+        'mode not in ("rich_content", "rich_content_quality") '
+        "and classify_model and classify_base_url"
+    ) in runner_source
 
 
 def test_web_exposes_rich_content_mode_and_columns() -> None:

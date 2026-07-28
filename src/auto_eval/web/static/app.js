@@ -359,6 +359,8 @@ createApp({
           { key: "query", label: "操作意图" },
           ...contextCols,
           { key: "correctness", label: "完成判定" },
+          { key: "error_type", label: "错误类型" },
+          { key: "is_low_level", label: "是否低级" },
           { key: "total", label: "总分" },
           ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
           { key: "arbitrated", label: "仲裁" },
@@ -933,6 +935,7 @@ createApp({
         return v === true ? "✓ 一致" : v === false ? "✗ 不一致" : "?";
       }
       if (c.key === "used_search") return v ? "是" : "否";
+      if (c.key === "is_low_level") return v === "yes" ? "是" : "否";
       if (c.key === "latency_s") return v != null ? v + "秒" : "";
       if (c.key === "truncated") return v ? "⚠️是(强制判定)" : "";
       if (c.key === "arbitrated") return v ? `⚖️是(${r.arbitrator_confidence ?? "-"})` : "";
@@ -940,7 +943,7 @@ createApp({
       if (c.key === "winner") return v === "a" ? "A" : v === "b" ? "B" : "平";
       if (c.key === "correctness") {
         if (mode.value === "operation")
-          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 部分/非完美", unclear: "? 无法判断" }[v] || v) || "";
+          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 完成但有瑕疵", unclear: "? 无法判断" }[v] || v) || "";
         return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
       }
       if (["card_types", "card_contents", "superlink_texts"].includes(c.key)) {

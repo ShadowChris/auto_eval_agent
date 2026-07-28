@@ -35,6 +35,68 @@ def test_aggregate_scores_weighted():
     assert abs(v.total - 4.0) < 1e-6
 
 
+def test_aggregate_operation_fields_follow_final_correctness():
+    dims = [RubricDim(name="操作完成度", description="d", scale=5)]
+    scores = [
+        SingleScore(
+            item_id="i",
+            model="m",
+            judge="j1",
+            rubric={"操作完成度": 2},
+            total=2,
+            correctness="wrong",
+            error_type="单任务未完成",
+            is_low_level="yes",
+        ),
+        SingleScore(
+            item_id="i",
+            model="m",
+            judge="j2",
+            rubric={"操作完成度": 2},
+            total=2,
+            correctness="wrong",
+            error_type="仅文字无状态证据",
+            is_low_level="yes",
+        ),
+    ]
+
+    verdict = aggregate_scores(scores, dims, EnsembleConfig(), 0.6)
+
+    assert verdict.correctness == "wrong"
+    assert verdict.error_type == "单任务未完成"
+    assert verdict.is_low_level == "yes"
+
+
+def test_aggregate_operation_tie_keeps_non_right_error_type():
+    dims = [RubricDim(name="操作完成度", description="d", scale=5)]
+    scores = [
+        SingleScore(
+            item_id="i",
+            model="m",
+            judge="j1",
+            rubric={"操作完成度": 5},
+            total=5,
+            correctness="right",
+        ),
+        SingleScore(
+            item_id="i",
+            model="m",
+            judge="j2",
+            rubric={"操作完成度": 1},
+            total=1,
+            correctness="wrong",
+            error_type="仅文字无状态证据",
+            is_low_level="yes",
+        ),
+    ]
+
+    verdict = aggregate_scores(scores, dims, EnsembleConfig(), 0.6)
+
+    assert verdict.correctness == "unclear"
+    assert verdict.error_type == "证据冲突"
+    assert verdict.is_low_level == "no"
+
+
 def test_aggregate_pairs_winrate():
     # 3 个已归一化的比较：A 胜 2 次，B 胜 1 次
     pairs = [

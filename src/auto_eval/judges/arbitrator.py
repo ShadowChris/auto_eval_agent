@@ -9,6 +9,7 @@ from datetime import datetime
 
 from ..schema import EvalItem, SingleScore
 from .base import JudgeClient, JudgeOutputParseError
+from .operation_fields import normalize_operation_fields
 from .prompts import (
     ARBITRATOR_SYSTEM,
     ARBITRATOR_USER,
@@ -25,13 +26,28 @@ class Arbitrator:
         self.client = client
         self.evaluation_time = evaluation_time
 
-    async def arbitrate(self, item: EvalItem, answer: str, single_scores: list[SingleScore]) -> dict:
-        system = ARBITRATOR_SYSTEM.render()
+    async def arbitrate(
+        self,
+        item: EvalItem,
+        answer: str,
+        single_scores: list[SingleScore],
+        *,
+        eval_mode: str | None = None,
+        dims=None,
+    ) -> dict:
+        operation_mode = eval_mode == "operation"
+        system = ARBITRATOR_SYSTEM.render(
+            operation_mode=operation_mode,
+            dims=dims or [],
+        )
         judges_summary = [
             {
                 "name": s.judge,
                 "correctness": s.correctness,
                 "total": round(s.total, 2),
+                "rubric": s.rubric,
+                "error_type": s.error_type,
+                "is_low_level": s.is_low_level,
                 "rationale": s.rationale,
                 "tool_trace": s.tool_trace,
             }
@@ -42,6 +58,7 @@ class Arbitrator:
             context=resolve_prompt_context(item.context, self.evaluation_time),
             answer=answer,
             judges=judges_summary,
+            operation_mode=operation_mode,
         )
         reply = await self.client.complete(system, user)
         data = parse_json_loose(reply.content)
@@ -73,10 +90,21 @@ class Arbitrator:
             confidence = float(data["confidence"]) if data.get("confidence") is not None else None
         except (TypeError, ValueError):
             confidence = None
+        error_type = data.get("error_type")
+        is_low_level = data.get("is_low_level", "no")
+        if operation_mode:
+            error_type, is_low_level = normalize_operation_fields(
+                correctness,
+                error_type,
+                is_low_level,
+                data.get("task_type"),
+            )
         return {
             "correctness": correctness,
             "rubric": {k: round(float(v), 2) for k, v in rubric.items()},
             "total": round(float(total), 2),
+            "error_type": error_type,
+            "is_low_level": is_low_level,
             "confidence": confidence,
             "rationale": data.get("rationale", ""),
             "used_search": reply.used_search,
