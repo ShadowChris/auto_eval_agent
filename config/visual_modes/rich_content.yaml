@@ -21,9 +21,9 @@ suitability_anchors:
   1: 挂卡与 query 无关、误导，或与正文和关键条件明显冲突
 
 extraction:
-  algorithm_version: rich-content-v1.0.0
+  algorithm_version: rich-content-v1.1.0
   default_start_time: 0.0
-  max_frames: 16
+  max_frames: 20
   sample_fps: 1.5
   scene_threshold: 0.03
   scene_min_gap_s: 0.5

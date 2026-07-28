@@ -24,7 +24,7 @@ def test_rich_content_profile_is_separate_from_domain_skills() -> None:
     assert "rich_content" not in config.domain_skills
     assert profile.display == "垂域挂卡 / Superlink"
     assert profile.card_types["music"] == "音乐"
-    assert profile.extraction.algorithm_version == "rich-content-v1.0.0"
+    assert profile.extraction.algorithm_version == "rich-content-v1.1.0"
     assert profile.extraction.max_edge == 1280
 
 
@@ -193,7 +193,7 @@ def test_prepare_rich_content_item_uses_profile_and_session_directory(
     assert config.task_start_time == 1
     assert config.task_end_time == 9
     assert config.max_edge == 1280
-    assert calls[0][2]["algorithm_version"] == "rich-content-v1.0.0"
+    assert calls[0][2]["algorithm_version"] == "rich-content-v1.1.0"
 
 
 def test_rich_content_summary_uses_presence_and_suitability_not_accuracy() -> None:

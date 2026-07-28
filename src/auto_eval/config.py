@@ -139,7 +139,7 @@ class VisualExtractionConfig(BaseModel):
 
     algorithm_version: str
     default_start_time: float = 0.0
-    max_frames: int = 16
+    max_frames: int = 20
     sample_fps: float = 1.5
     scene_threshold: float = 0.03
     scene_min_gap_s: float = 0.5

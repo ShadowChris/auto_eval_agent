@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 
-KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.0.0"
+KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.1.0"
 DEFAULT_TASK_START_TIME = 7.0
 
 
@@ -32,7 +32,7 @@ class KeyframeConfig:
 
     task_start_time: float = DEFAULT_TASK_START_TIME
     task_end_time: float | None = None
-    max_frames: int = 16
+    max_frames: int = 20
     sample_fps: float = 1.0
     scene_threshold: float = 0.06
     scene_min_gap_s: float = 0.8
@@ -54,7 +54,7 @@ class KeyframeConfig:
     # 受保护采样：在开头和结尾两个时间窗口内，每 interval 秒额外标记一帧，
     # 仅当画面高度一致时才去重（用于捕获弹窗/横幅/开场状态等开头结尾的小变化）。
     protected_sample_interval: float = 2.0  # 0 = 禁用；>0 则每 N 秒一帧
-    protected_begin_window: float = 10.0    # 从 task_start_time 起的前 N 秒
+    protected_begin_window: float = 20.0    # 从 task_start_time 起的前 N 秒
     protected_end_window: float = 5.0       # 从 algorithm_end 止的后 N 秒
     protected_sample_dedup_rms: float = 0.002    # 受保护帧的去重 RMS 阈值
     protected_sample_dedup_cf: float = 0.002      # 受保护帧的去重变化比例阈值
@@ -185,7 +185,7 @@ def _even_sample(times: list[float], count: int) -> list[float]:
 
 def select_keyframe_times(
     video: Path | str,
-    max_frames: int = 16,
+    max_frames: int = 20,
     min_frames: int = 4,
     threshold: float = 0.06,
     min_gap_s: float = 0.8,
@@ -927,7 +927,7 @@ def _hybrid_keyframes(
 def extract_scene_keyframes(
     video: Path | str,
     out_dir: Path | str,
-    max_frames: int = 16,
+    max_frames: int = 20,
     min_frames: int = 4,
     threshold: float = 0.06,
     min_gap_s: float = 0.8,
@@ -1054,7 +1054,7 @@ def encode_frame(
 def video_to_frame_urls(
     video: Path | str,
     out_dir: Path | str | None = None,
-    max_frames: int = 16,
+    max_frames: int = 20,
     min_frames: int = 4,
     threshold: float = 0.06,
     min_gap_s: float = 0.8,

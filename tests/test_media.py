@@ -73,7 +73,14 @@ def test_keyframe_config_rejects_invalid_sampling_values():
 
 
 def test_keyframe_algorithm_version_is_frozen_baseline():
-    assert KEYFRAME_ALGORITHM_VERSION == "hybrid-state-v3.0.0"
+    assert KEYFRAME_ALGORITHM_VERSION == "hybrid-state-v3.1.0"
+
+
+def test_keyframe_config_uses_expanded_protected_window_and_frame_limit():
+    config = KeyframeConfig()
+
+    assert config.protected_begin_window == 20.0
+    assert config.max_frames == 20
 
 
 def test_keyframe_config_uses_unified_task_time_names():
@@ -156,3 +163,61 @@ def test_extract_scene_keyframes_preserves_popup_task_end_and_final_frame(
 
     final_mean = float(np.mean(np.asarray(Image.open(frames[-1]).convert("L"))))
     assert 90 < final_mean < 180
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="requires local ffmpeg and ffprobe",
+)
+def test_expanded_begin_window_preserves_late_local_popup(tmp_path: Path):
+    video = tmp_path / "late_popup.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:s=240x400:r=10:d=30",
+            "-vf",
+            "drawbox=x=20:y=20:w=200:h=100:color=black:t=fill:"
+            "enable='gte(t,18)*lt(t,20)'",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "2",
+            str(video),
+        ],
+        check=True,
+    )
+
+    out_dir = tmp_path / "frames"
+    frames = extract_scene_keyframes(
+        video,
+        out_dir,
+        config=KeyframeConfig(
+            task_start_time=7.0,
+            task_end_time=27.0,
+            scene_threshold=1.0,
+            state_layout_threshold=1.0,
+            max_edge=240,
+        ),
+    )
+    metadata = json.loads(
+        (out_dir / "keyframes.json").read_text(encoding="utf-8")
+    )
+
+    popup_indices = [
+        index
+        for index, row in enumerate(metadata["selected"])
+        if 18.0 <= row["time"] <= 20.0
+    ]
+    assert popup_indices
+    assert any(
+        float(np.mean(np.asarray(Image.open(frames[index]).convert("L")) < 40))
+        > 0.15
+        for index in popup_indices
+    )
