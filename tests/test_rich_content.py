@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from auto_eval.config import load_config
-from auto_eval.judges.prompts import RICH_CONTENT_SYSTEM
-from auto_eval.judges.rich_content_judge import rich_content_result_fields
+from auto_eval.judges.prompts import RICH_CONTENT_QUALITY_SYSTEM, RICH_CONTENT_SYSTEM
+from auto_eval.judges.rich_content_judge import RichContentJudge, rich_content_result_fields
 from auto_eval.schema import RichContentObservation
 from auto_eval.web.operation_media import prepare_session_rich_content_item
 from auto_eval.web.parse_input import parse_jsonl, parse_text
@@ -93,7 +93,7 @@ def test_rich_content_prompt_defines_visual_counting_contract() -> None:
     )
 
     assert "普通内嵌图片、正文截图和纯文本段落不算挂卡" in prompt
-    assert "产品规则保证这类蓝色文字可点击" in prompt
+    assert "产品规则保证这类蓝色文字或图标可点击" in prompt
     assert "同一张挂卡或同一处链接" in prompt
     assert "不得按帧数累计数量" in prompt
     assert "不要输出 correctness、rubric 或 total" in prompt
@@ -194,7 +194,8 @@ def test_prepare_rich_content_item_uses_profile_and_session_directory(
     )
 
     assert prepared["frame_count"] == 1
-    assert "20260723_120000_rich_content_abc/001_rich_001" in prepared["frames"][0]
+    assert "20260723_120000_rich_content_abc" in prepared["frames"][0]
+    assert "001_rich_001" in prepared["frames"][0]
     config = calls[0][2]["config"]
     assert config.task_start_time == 1
     assert config.task_end_time == 9
@@ -269,3 +270,41 @@ def test_web_exposes_rich_content_mode_and_columns() -> None:
     assert '{ key: "needs_review", label: "需人工复核" }' in app_js
     assert "需人工复核 {{ summary.needs_review_count }} 条" in index_html
     assert "mode!=='rich_content'" in index_html
+
+
+def test_quality_variant_prompt_is_independent() -> None:
+    """RICH_CONTENT_QUALITY_SYSTEM 与 RICH_CONTENT_SYSTEM 是两个独立对象，修改互不影响。"""
+    assert RICH_CONTENT_QUALITY_SYSTEM is not RICH_CONTENT_SYSTEM
+    profile = _profile()
+    quality_prompt = RICH_CONTENT_QUALITY_SYSTEM.render(
+        persona="视觉裁判",
+        card_types=profile.card_types,
+        suitability_anchors=profile.suitability_anchors,
+    )
+    original_prompt = RICH_CONTENT_SYSTEM.render(
+        persona="视觉裁判",
+        card_types=profile.card_types,
+        suitability_anchors=profile.suitability_anchors,
+    )
+    # 初始内容一致
+    assert quality_prompt == original_prompt
+    # 但两个 Template 对象是独立的
+    assert "不要输出 correctness、rubric 或 total" in quality_prompt
+    assert "【Part 1 — 视觉描述（纯客观，极其重要）】" in quality_prompt
+
+
+def test_rich_content_judge_uses_quality_prompts_when_variant_is_quality() -> None:
+    """RichContentJudge(prompt_variant='rich_content_quality') 使用独立 prompt。"""
+    from unittest.mock import MagicMock
+
+    profile = _profile()
+    client = MagicMock()
+
+    # 默认 variant → 使用原 prompt
+    default_judge = RichContentJudge(client, profile)
+    assert default_judge._system_template is RICH_CONTENT_SYSTEM
+
+    # quality variant → 使用独立 prompt
+    quality_judge = RichContentJudge(client, profile, prompt_variant="rich_content_quality")
+    assert quality_judge._system_template is RICH_CONTENT_QUALITY_SYSTEM
+    assert quality_judge._system_template is not RICH_CONTENT_SYSTEM

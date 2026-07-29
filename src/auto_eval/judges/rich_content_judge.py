@@ -12,6 +12,8 @@ from ..media import encode_frame
 from ..schema import RichContentObservation
 from .base import JudgeClient, JudgeOutputParseError
 from .prompts import (
+    RICH_CONTENT_QUALITY_SYSTEM,
+    RICH_CONTENT_QUALITY_USER,
     RICH_CONTENT_SYSTEM,
     RICH_CONTENT_USER,
     parse_json_loose,
@@ -173,11 +175,27 @@ def _format_visual_findings_for_rubric(visual: dict) -> str:
 
 
 class RichContentJudge:
-    """单视觉裁判：识别挂卡和 Superlink，并返回结构化发现。"""
+    """单视觉裁判：识别挂卡和 Superlink，并返回结构化发现。
 
-    def __init__(self, client: JudgeClient, profile: VisualModeProfile):
+    prompt_variant 可选值：
+    - "rich_content"（默认）：使用 RICH_CONTENT_SYSTEM / RICH_CONTENT_USER
+    - "rich_content_quality"：使用独立的 RICH_CONTENT_QUALITY_SYSTEM / RICH_CONTENT_QUALITY_USER
+    """
+
+    def __init__(
+        self,
+        client: JudgeClient,
+        profile: VisualModeProfile,
+        prompt_variant: str = "rich_content",
+    ):
         self.client = client
         self.profile = profile
+        if prompt_variant == "rich_content_quality":
+            self._system_template = RICH_CONTENT_QUALITY_SYSTEM
+            self._user_template = RICH_CONTENT_QUALITY_USER
+        else:
+            self._system_template = RICH_CONTENT_SYSTEM
+            self._user_template = RICH_CONTENT_USER
 
     async def evaluate(
         self,
@@ -189,12 +207,12 @@ class RichContentJudge:
         stream_callback=None,
     ) -> dict[str, Any]:
         extraction = self.profile.extraction
-        system = RICH_CONTENT_SYSTEM.render(
+        system = self._system_template.render(
             persona=self.client.persona,
             card_types=self.profile.card_types,
             suitability_anchors=self.profile.suitability_anchors,
         )
-        user = RICH_CONTENT_USER.render(
+        user = self._user_template.render(
             question=question,
             context=context,
             answer_text=answer_text,

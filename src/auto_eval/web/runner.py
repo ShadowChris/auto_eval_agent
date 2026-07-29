@@ -143,7 +143,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             visual_client = JudgeClient(
                 visual_judge_cfg, _providers, cfg.eval_options.search_topk,
             )
-            visual_judge = RichContentJudge(visual_client, rich_profile)
+            visual_judge = RichContentJudge(visual_client, rich_profile, prompt_variant="rich_content_quality")
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     sem = asyncio.Semaphore(int(task.options.get("concurrency", 4)))
     eval_timeout = float(task.options.get("eval_timeout_s") or task.options.get("eval_timeout") or 300.0)
