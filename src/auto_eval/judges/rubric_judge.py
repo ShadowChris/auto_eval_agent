@@ -152,7 +152,7 @@ class RubricJudge:
             item.metadata.setdefault("category_source", "dataset")
         skill_dims, skill_rules, _ = (self.skill_router.match(item) if self.skill_router else (None, "", []))
         is_product_compare = (self.client.cfg.persona == "product_expert") and bool(competitor)
-        user_images: list[str] | None = None  # 操作类评测：关键帧 data_url 列表，其余模式为 None
+        user_images: list[str] | None = None  # 任务类评测：关键帧 data_url 列表，其余模式为 None
         user_image_refs: list[str] | None = None  # 关键帧本地路径（仅写入 trace 供回溯，不展示前端）
         if eval_mode == "operation":
             op_skill = self.skill_router.domain.get("operation") if self.skill_router else None

@@ -58,6 +58,7 @@ def task_to_snapshot(task) -> dict:
         "session_name": task.session_name,
         "mode": task.mode,
         "dataset_name": getattr(task, "dataset_name", ""),
+        "note": getattr(task, "note", ""),
         "items": task.items,
         "options": task.options,
         "status": task.status,
@@ -153,6 +154,7 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "task_id": task_id,
             "session_name": session_name,
             "dataset_name": data.get("dataset_name") or "",
+            "note": data.get("note") or "",
             "mode": data.get("mode"),
             "status": status,
             "total": len(data.get("items") or []),
@@ -178,6 +180,7 @@ def snapshot_payload(data: dict) -> dict:
         "task_id": data.get("task_id"),
         "session_name": data.get("session_name"),
         "dataset_name": data.get("dataset_name") or "",
+        "note": data.get("note") or "",
         "mode": data.get("mode"),
         "items": data.get("items") or [],
         "options": data.get("options") or {},
@@ -480,6 +483,7 @@ def _run_info(snapshot: dict) -> dict:
     return {
         "task_id": snapshot.get("task_id"),
         "dataset_name": snapshot.get("dataset_name") or "",
+        "note": snapshot.get("note") or "",
         "mode": snapshot.get("mode"),
         "status": snapshot.get("status"),
         "total": len(snapshot.get("items") or []),
@@ -625,6 +629,7 @@ def write_frames_zip(
     destination: str | Path,
     *,
     project_root: Path = PROJECT_ROOT,
+    item_indexes: set[int] | None = None,
 ) -> Path:
     """将已有关键帧和映射清单打包到磁盘，避免大批量导出占用内存。"""
     target = Path(destination)
@@ -635,6 +640,8 @@ def write_frames_zip(
 
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item_index, item in enumerate(items):
+            if item_indexes is not None and item_index not in item_indexes:
+                continue
             sequence = str(item_index + 1).zfill(width)
             raw_id = str(item.get("id") or f"q{item_index + 1}")
             safe_id = _safe_name(raw_id).strip("_")[:100] or f"q{item_index + 1}"
@@ -708,6 +715,113 @@ def write_frames_zip(
         )
         zf.writestr("manifest.jsonl", manifest_text)
     return target
+
+
+def load_item_judge_calls(
+    snapshot: dict,
+    item_index: int,
+    *,
+    runs_dir: Path = RUNS_DIR,
+    project_root: Path = PROJECT_ROOT,
+    trace_paths: list[Path] | None = None,
+) -> dict:
+    """查找单条 case 对应的全部 judge_calls，并组装为可下载 JSON。
+
+    以 task_id + item_index 为主键，item_id 仅作兼容校验，避免 query 重复时
+    错配。候选日志包含当前环境配置的 trace 路径和 runs 下所有
+    ``judge_calls*.jsonl``，因此加载历史任务后仍可导出。
+    """
+    items = snapshot.get("items") or []
+    if item_index < 0 or item_index >= len(items):
+        raise IndexError("item_index 超出数据集范围")
+    item = items[item_index]
+    task_id = str(snapshot.get("task_id") or "")
+    session_name = str(snapshot.get("session_name") or "")
+    item_id = str(item.get("id") or f"q{item_index}")
+
+    candidates: list[Path] = []
+    if trace_paths is not None:
+        candidates.extend(Path(path) for path in trace_paths)
+    else:
+        configured = str(os.getenv("AUTO_EVAL_JUDGE_TRACE") or "").strip()
+        if configured:
+            configured_path = Path(configured).expanduser()
+            if not configured_path.is_absolute():
+                configured_path = project_root / configured_path
+            candidates.append(configured_path)
+        candidates.extend(sorted(runs_dir.rglob("judge_calls*.jsonl")))
+
+    unique_candidates: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        if resolved not in seen:
+            seen.add(resolved)
+            unique_candidates.append(candidate)
+
+    records: list[dict] = []
+    task_needle = f'"{task_id}"' if task_id else ""
+    for path in unique_candidates:
+        if not path.is_file():
+            continue
+        try:
+            with path.open(encoding="utf-8-sig") as file:
+                for line in file:
+                    if task_needle and task_needle not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if task_id and str(record.get("task_id") or "") != task_id:
+                        continue
+                    if not task_id and session_name:
+                        if str(record.get("session_name") or "") != session_name:
+                            continue
+                    try:
+                        record_index = int(record.get("item_index"))
+                    except (TypeError, ValueError):
+                        record_index = -1
+                    if record_index != item_index:
+                        continue
+                    record_item_id = str(record.get("item_id") or "")
+                    if record_item_id and record_item_id != item_id:
+                        continue
+                    exported = dict(record)
+                    exported["_trace_file"] = _project_relative_path(
+                        path,
+                        project_root,
+                    ) or path.name
+                    records.append(exported)
+        except OSError:
+            continue
+
+    def record_sort_key(row: dict) -> tuple[str, str, int]:
+        try:
+            round_index = int(row.get("round") or 0)
+        except (TypeError, ValueError):
+            round_index = 0
+        return (
+            str(row.get("ts") or ""),
+            str(row.get("judge") or ""),
+            round_index,
+        )
+
+    records.sort(key=record_sort_key)
+    return {
+        "task_id": snapshot.get("task_id"),
+        "session_name": snapshot.get("session_name"),
+        "dataset_name": snapshot.get("dataset_name") or "",
+        "dataset_index": item_index + 1,
+        "item_index": item_index,
+        "item_id": item_id,
+        "query": item.get("query") or item.get("question") or "",
+        "judge_call_count": len(records),
+        "judge_calls": records,
+    }
 
 
 def build_xlsx(snapshot: dict, cfg: Any | None = None) -> bytes:

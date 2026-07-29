@@ -55,7 +55,7 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502
 
 看到 `Uvicorn running on http://0.0.0.0:8501` 后，浏览器打开 **http://localhost:8501** 。
 
-界面支持三种模式（Tab 切换）：单回答盲评 / 两回答对比 / 接模型在线评估；粘贴（`|||` 分隔）或上传 jsonl 批量输入，SSE 实时出结果，可导出 CSV/JSON。
+界面支持多种模式（Tab 切换），包括垂域问答类、两回答对比、接模型在线评估、过程盲评和任务类（录屏）等；粘贴（`|||` 分隔）或上传 jsonl 批量输入，SSE 实时出结果，可导出 CSV/JSON。
 
 **终止**：在该终端按 `Ctrl+C`。
 

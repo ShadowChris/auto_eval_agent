@@ -151,7 +151,7 @@ def _safe_json(s: str | None):
 def _redact_image_urls(messages: list[dict], refs: list[str] | None) -> list[dict]:
     """把 messages 里 image_url 的 base64 data url 替换成帧路径引用，避免 trace 文件膨胀。
 
-    操作类评测每帧 base64 约 30KB，N 帧会让 judge_calls.jsonl 单行膨胀到 MB 级。
+    任务类评测每帧 base64 约 30KB，N 帧会让 judge_calls.jsonl 单行膨胀到 MB 级。
     refs 与 complete 的 user_images 一一对应（通常是关键帧本地路径）；
     无 refs 对应时标记 data url 已省略。仅影响 trace 落盘，不影响发给模型的消息。
     """
@@ -264,7 +264,7 @@ class JudgeClient:
                        stream_callback: Callable[[str], None] | None = None,
                        user_images: list[str] | None = None,
                        user_image_refs: list[str] | None = None) -> JudgeReply:
-        # 多模态：操作类评测传入关键帧 data_url 时，user content 变成 [text, image_url...] 列表。
+        # 多模态：任务类评测传入关键帧 data_url 时，user content 变成 [text, image_url...] 列表。
         # agent-loop 内追加的 assistant/tool/强制判定消息仍为字符串，不受影响。
         user_content: Any = user
         if user_images:

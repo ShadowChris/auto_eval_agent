@@ -16,7 +16,7 @@ EXPECTED = {
     "meta_service": "元服务",
     "music": "音乐",
     "news": "新闻",
-    "operation": "操作类",
+    "operation": "任务类",
     "phone_tips": "玩机技巧",
     "professional_tech": "专业技术",
     "search": "搜索",

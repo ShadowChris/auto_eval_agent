@@ -193,7 +193,7 @@ def _rich_content_timing(
         state_layout_threshold=extraction.state_layout_threshold,
         stable_min_duration_s=extraction.stable_min_duration_s,
         max_edge=extraction.max_edge,
-        # 问答视频通常不会返回操作助手外壳，禁用操作类的自动结束点推断。
+        # 问答视频通常不会返回操作助手外壳，禁用任务类（录屏）的自动结束点推断。
         auto_task_end_confidence_threshold=2.0,
         final_dedup_rms_threshold=0.004,
         final_dedup_changed_fraction_threshold=0.004,

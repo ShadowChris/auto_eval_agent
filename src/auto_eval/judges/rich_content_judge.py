@@ -60,7 +60,7 @@ def rich_content_result_fields(
     ]
 
     visual_description = observation.visual_description or ""
-    # Part 2：视觉评测适配性 — 从 cards 提取，独立于单回答盲评的卡片适配性评价
+    # Part 2：视觉评测适配性 — 从 cards 提取，独立于垂域问答类的卡片适配性评价
     visual_suitability = [
         {
             "type": card["type"],
@@ -104,7 +104,7 @@ def _format_visual_findings_for_rubric(visual: dict) -> str:
     """将 RichContentJudge.evaluate() 返回值中的纯客观视觉描述转为 rubric 裁判可读的自然语言上下文。
 
     重要：只使用 Part 1（visual_description 纯客观描述），不包含 Part 2（suitability 评价），
-    避免视觉评测的结论干扰单回答盲评裁判的独立判断。
+    避免视觉评测的结论干扰垂域问答类裁判的独立判断。
 
     注意：传入的是 evaluate() 的完整返回值（含 visual_findings 嵌套），
     本函数优先从 visual["visual_findings"]["visual_description"] 提取纯描述；

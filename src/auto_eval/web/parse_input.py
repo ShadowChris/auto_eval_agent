@@ -55,7 +55,7 @@ def _extract_text_context(parts: list[str]) -> tuple[list[str], str | None]:
 
 
 def _operation_times(obj: dict) -> dict[str, float]:
-    """读取操作类 JSONL 的可选任务起止时间（单位：秒）。"""
+    """读取任务类（录屏）JSONL 的可选任务起止时间（单位：秒）。"""
     times: dict[str, float] = {}
     for field in ("task_start_time", "task_end_time"):
         value = obj.get(field)
@@ -102,7 +102,7 @@ def _rich_content_times(obj: dict) -> dict[str, float]:
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 ||| 分隔的粘贴文本。返回 (items, errors)。"""
     if mode in ("operation", "rich_content", "rich_content_quality"):
-        label = "操作类" if mode == "operation" else "挂卡 / Superlink"
+        label = "任务类" if mode == "operation" else "挂卡 / Superlink"
         return [], [f"{label}评测请逐题上传视频或导入 JSONL，不支持文本粘贴解析"]
     items: list[dict] = []
     errors: list[str] = []
@@ -148,7 +148,7 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
 
 
 def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
-    """解析 jsonl；操作类任务起止时间为可选的秒数，空值使用默认策略。"""
+    """解析 jsonl；任务类（录屏）的任务起止时间为可选秒数，空值使用默认策略。"""
     items: list[dict] = []
     errors: list[str] = []
     video_item_ids: set[str] = set()

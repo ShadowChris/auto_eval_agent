@@ -4,14 +4,17 @@ import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 createApp({
   setup() {
     const modes = [
-      { key: "single", label: "单回答盲评" },
+      { key: "single", label: "垂域问答类" },
       { key: "compare", label: "两回答对比" },
       { key: "online", label: "接模型在线评估" },
       { key: "process", label: "过程盲评(含轨迹)" },
-      { key: "operation", label: "操作类(录屏)" },
+      { key: "operation", label: "任务类（录屏）" },
       { key: "rich_content", label: "垂域挂卡 / Superlink" },
       { key: "rich_content_quality", label: "垂域挂卡综合评测" },
     ];
+    function modeLabel(key) {
+      return modes.find((item) => item.key === key)?.label || key;
+    }
     const mode = ref("single");
     const isVideoMode = computed(() => ["operation", "rich_content", "rich_content_quality"].includes(mode.value));
     const text = ref("");
@@ -19,12 +22,20 @@ createApp({
     const isJsonl = ref(false);
     const datasetName = ref("");
     const items = ref([]);
+    let opItemSequence = 0;
     const opItems = ref([newOpItem()]);
+    const opPage = ref(1);
+    const opJumpPage = ref("");
     const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
     const models = ref([]);
     const selectedJudges = ref([]);
+    const visibleJudges = computed(() => {
+      if (mode.value !== "operation") return judges.value;
+      const judge = terminalUserJudge();
+      return judge ? [judge] : [];
+    });
     const visualJudge = ref("");  // rich_content_quality 模式：挂卡识别裁判
     const selectedModel = ref("");
     const concurrency = ref(4);
@@ -46,6 +57,7 @@ createApp({
     const correctnessFilter = ref("");
     const problemDimFilter = ref("");
     const resultPage = ref(1);
+    const resultPageSize = ref(10);
     const previewPage = ref(1);
     const progressPage = ref(1);
     const resultJumpPage = ref("");
@@ -53,11 +65,14 @@ createApp({
     const progressJumpPage = ref("");
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
+    const historyNoteDrafts = ref({});
+    const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
     const pageSize = 10;
+    const opPageSize = 10;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
 
     const formatHint = computed(
@@ -93,6 +108,15 @@ createApp({
       else if (mode.value === "process") keys.push("answer", "trace", "reference");
       else keys.push("reference");
       return keys.filter((k) => items.value.some((it) => it[k] != null && it[k] !== ""));
+    });
+    const opPageCount = computed(() => Math.max(1, Math.ceil(opItems.value.length / opPageSize)));
+    const pagedOpItems = computed(() => {
+      const page = Math.min(opPage.value, opPageCount.value);
+      const start = (page - 1) * opPageSize;
+      return opItems.value.slice(start, start + opPageSize).map((item, offset) => ({
+        item,
+        index: start + offset,
+      }));
     });
     const previewPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
     const pagedPreviewItems = computed(() => {
@@ -308,7 +332,8 @@ createApp({
         }
         if (!r.category) return;
         const key = r.category;
-        const current = map.get(key) || { key, label: r.category_display || key, count: 0 };
+        const displayLabel = key === "operation" ? "任务类" : (r.category_display || key);
+        const current = map.get(key) || { key, label: displayLabel, count: 0 };
         current.count += 1;
         map.set(key, current);
       });
@@ -444,22 +469,51 @@ createApp({
 
     function columnWidth(c) {
       const compact = c.rubricDim
-        || ["correctness", "winner", "total", "used_search", "truncated", "arbitrated", "agree", "latency_s", "bidirectional_consistent"].includes(c.key);
+        || [
+          "correctness", "winner", "total", "used_search", "truncated", "arbitrated",
+          "agree", "latency_s", "bidirectional_consistent", "is_low_level",
+          "card_presence", "card_count", "card_suitability_score", "superlink_presence",
+          "superlink_count", "answer_coverage", "needs_review",
+        ].includes(c.key);
       const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc"].includes(c.key);
-      const minWidth = compact ? 88 : c.key === "item_id" ? 90 : textColumn ? 180 : 110;
-      const maxWidth = compact ? 130 : c.key === "rationale" ? 420 : textColumn ? 360 : 220;
+      let minWidth = compact ? 80 : textColumn ? 150 : 96;
+      let maxWidth = compact ? 120 : c.key === "rationale" ? 380 : textColumn ? 320 : 200;
+      if (c.key === "item_id") {
+        minWidth = 110;
+        maxWidth = 160;
+      } else if (c.key === "query" && mode.value === "operation") {
+        minWidth = 140;
+        maxWidth = 240;
+      }
       const visualLength = (value) => Array.from(String(value ?? "")).reduce(
         (sum, char) => sum + (char.charCodeAt(0) > 255 ? 2 : 1),
         0,
       );
-      const sampleLengths = results.value.slice(0, 100).map((result) => visualLength(cell(result, c)));
-      const desired = (Math.max(visualLength(c.label), ...sampleLengths, 1) * 7) + 28;
+      const sampleLengths = skillResults.value
+        .slice(0, 200)
+        .map((result) => visualLength(cell(result, c)))
+        .sort((a, b) => a - b);
+      const representativeIndex = Math.max(0, Math.ceil(sampleLengths.length * 0.8) - 1);
+      const representativeLength = sampleLengths[representativeIndex] || 1;
+      const desired = (Math.max(visualLength(c.label), representativeLength) * 7) + 28;
       return Math.max(minWidth, Math.min(maxWidth, desired));
     }
 
     const resultTableWidth = computed(
-      () => 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0)
+      () => 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0)
     );
+
+    function isFrozenResultColumn(column) {
+      return mode.value === "operation" && ["item_id", "query"].includes(column.key);
+    }
+
+    function frozenResultColumnStyle(column, columnIndex) {
+      if (!isFrozenResultColumn(column)) return {};
+      const left = 48 + resultCols.value
+        .slice(0, columnIndex)
+        .reduce((sum, previous) => sum + columnWidth(previous), 0);
+      return { left: `${left}px` };
+    }
 
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
@@ -473,11 +527,11 @@ createApp({
       });
     });
 
-    const pageCount = computed(() => Math.max(1, Math.ceil(filteredResults.value.length / pageSize)));
+    const pageCount = computed(() => Math.max(1, Math.ceil(filteredResults.value.length / resultPageSize.value)));
     const pagedResults = computed(() => {
       const safePage = Math.min(resultPage.value, pageCount.value);
-      const start = (safePage - 1) * pageSize;
-      return filteredResults.value.slice(start, start + pageSize);
+      const start = (safePage - 1) * resultPageSize.value;
+      return filteredResults.value.slice(start, start + resultPageSize.value);
     });
 
     const fallbackStat = computed(() => {
@@ -527,6 +581,7 @@ createApp({
     function setTablePage(kind, requestedPage) {
       const configs = {
         result: [resultPage, pageCount, resultJumpPage],
+        operation: [opPage, opPageCount, opJumpPage],
         preview: [previewPage, previewPageCount, previewJumpPage],
         progress: [progressPage, progressPageCount, progressJumpPage],
       };
@@ -542,6 +597,9 @@ createApp({
     function changePage(delta) {
       setTablePage("result", resultPage.value + delta);
     }
+    function changeOpPage(delta) {
+      setTablePage("operation", opPage.value + delta);
+    }
     function changePreviewPage(delta) {
       setTablePage("preview", previewPage.value + delta);
     }
@@ -551,10 +609,17 @@ createApp({
     function jumpTablePage(kind) {
       const jumpValues = {
         result: resultJumpPage.value,
+        operation: opJumpPage.value,
         preview: previewJumpPage.value,
         progress: progressJumpPage.value,
       };
       setTablePage(kind, jumpValues[kind]);
+    }
+
+    function changeResultPageSize() {
+      if (![10, 20, 50].includes(resultPageSize.value)) resultPageSize.value = 10;
+      resultPage.value = 1;
+      resultJumpPage.value = "";
     }
 
     function trunc(v) {
@@ -564,8 +629,8 @@ createApp({
     }
 
     function defaultJudgeSelection(targetMode) {
-      if (["operation", "rich_content"].includes(targetMode)) {
-        const endUserJudge = judges.value.find((judge) => judge.persona === "end_user");
+      if (["single", "operation", "rich_content"].includes(targetMode)) {
+        const endUserJudge = terminalUserJudge();
         if (endUserJudge) return [endUserJudge.name];
       }
       if (targetMode === "rich_content_quality") {
@@ -579,6 +644,12 @@ createApp({
       return judges.value.length ? [judges.value[0].name] : [];
     }
 
+    function terminalUserJudge() {
+      return judges.value.find(
+        (judge) => String(judge.display || "").trim() === "终端用户",
+      ) || judges.value.find((judge) => judge.persona === "end_user");
+    }
+
     function switchMode(k) {
       mode.value = k;
       selectedJudges.value = defaultJudgeSelection(k);
@@ -589,7 +660,11 @@ createApp({
       fileText.value = "";
       isJsonl.value = false;
       datasetName.value = "";
-      if (["operation", "rich_content", "rich_content_quality"].includes(k)) opItems.value = [newOpItem()];
+      if (["operation", "rich_content", "rich_content_quality"].includes(k)) {
+        opItems.value = [newOpItem()];
+        opPage.value = 1;
+        opJumpPage.value = "";
+      }
     }
 
     function onFile(e) {
@@ -605,12 +680,21 @@ createApp({
       r.readAsText(f, "utf-8");
     }
 
-    // —— 操作类评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
+    // —— 任务类（录屏）评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
     function newOpItem() {
-      return { id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, contentStartTime: null, contentEndTime: null, sourceLine: null, sourceData: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, contentStartTime: null, contentEndTime: null, sourceLine: null, sourceData: null, uploading: false, uploadError: "" };
     }
-    function addOpItem() { opItems.value.push(newOpItem()); }
-    function removeOpItem(i) { if (opItems.value.length > 1) opItems.value.splice(i, 1); }
+    function addOpItem() {
+      opItems.value.push(newOpItem());
+      opPage.value = Math.ceil(opItems.value.length / opPageSize);
+      opJumpPage.value = "";
+    }
+    function removeOpItem(i) {
+      if (opItems.value.length <= 1) return;
+      opItems.value.splice(i, 1);
+      opPage.value = Math.min(opPage.value, Math.max(1, Math.ceil(opItems.value.length / opPageSize)));
+      opJumpPage.value = "";
+    }
     async function uploadVideo(i, file) {
       const it = opItems.value[i];
       if (!file) return;
@@ -648,6 +732,8 @@ createApp({
       errors.value = [];
       items.value = [];
       opItems.value = [newOpItem()];
+      opPage.value = 1;
+      opJumpPage.value = "";
       try {
         const content = await file.text();
         const parseResponse = await fetch("/api/parse", {
@@ -683,6 +769,7 @@ createApp({
             sourceLine: item.source_line ?? null,
             sourceData: item.source_data || null,
           }));
+          opPage.value = 1;
         }
       } catch (error) {
         errors.value = ["批量导入失败：" + (error?.message || String(error))];
@@ -791,7 +878,9 @@ createApp({
         items: items.value,
         dataset_name: datasetName.value || (isVideoMode.value ? "手动录入" : (isJsonl.value ? "未命名数据集.jsonl" : "文本输入")),
         options: {
-          judges: selectedJudges.value,
+          judges: mode.value === "operation"
+            ? defaultJudgeSelection("operation")
+            : selectedJudges.value,
           visual_judge: visualJudge.value,
           model: selectedModel.value,
           concurrency: concurrency.value,
@@ -1093,9 +1182,40 @@ createApp({
         const r = await fetch("/api/history?limit=50");
         const d = await r.json();
         historyItems.value = d.items || [];
+        historyNoteDrafts.value = Object.fromEntries(
+          historyItems.value.map((item) => [item.task_id, item.note || ""]),
+        );
+        historyNoteEditing.value = {};
       } finally {
         loadingHistory.value = false;
       }
+    }
+
+    function editHistoryNote(item) {
+      historyNoteDrafts.value[item.task_id] = item.note || "";
+      historyNoteEditing.value[item.task_id] = true;
+    }
+
+    function cancelHistoryNote(item) {
+      historyNoteDrafts.value[item.task_id] = item.note || "";
+      historyNoteEditing.value[item.task_id] = false;
+    }
+
+    async function saveHistoryNote(item) {
+      const note = String(historyNoteDrafts.value[item.task_id] || "").trim();
+      const response = await fetch(`/api/history/${item.task_id}/note`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert("备注保存失败：" + (data.detail || "未知错误"));
+        return;
+      }
+      item.note = data.note || "";
+      historyNoteDrafts.value[item.task_id] = item.note;
+      historyNoteEditing.value[item.task_id] = false;
     }
 
     async function delHistory(id) {
@@ -1155,6 +1275,11 @@ createApp({
     function exportFrames() {
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
+    function itemArtifactUrl(result, format) {
+      const index = Number(result && result.index);
+      if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
+      return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
+    }
 
     onMounted(async () => {
       progressClockTimer = window.setInterval(() => {
@@ -1174,21 +1299,22 @@ createApp({
     });
 
     return {
-      modes, mode, isVideoMode, text, items, errors, judges, models, selectedJudges, visualJudge, selectedModel, datasetName,
+      modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
-      historyItems, loadingHistory, pageSize,
+      historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      opPage, opPageSize, opPageCount, opJumpPage,
       previewPage, previewPageCount, previewJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
-      activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage,
+      activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
-      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, opPreparing, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, addOpItem, removeOpItem, onOpVideo, onOpDrop,
-      loadHistory, loadHistoryTask, delHistory, formatTime,
+      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
+      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
-      changePreviewPage, changeProgressPage, paginationPages, setTablePage, jumpTablePage,
+      changePreviewPage, changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,

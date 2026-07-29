@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260705_progress_width">
+  <link rel="stylesheet" href="/static/style.css?v=20260729_page_sizes">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -33,18 +33,37 @@
     <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
-        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th>进度</th><th>预览</th><th>操作</th></tr></thead>
+        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th class="history-progress-cell">进度</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
           <tr v-for="h in historyItems" :key="h.task_id">
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
             <td>{{ h.dataset_name || '未记录' }}</td>
-            <td>{{ h.mode }}</td>
+            <td>{{ modeLabel(h.mode) }}</td>
             <td>{{ h.status }}</td>
-            <td>{{ h.done }}/{{ h.total }}</td>
+            <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
             <td>{{ h.preview }}</td>
             <td style="white-space:nowrap">
               <button @click="loadHistoryTask(h.task_id)">加载</button>
               <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
+            </td>
+            <td class="history-note-cell">
+              <div v-if="historyNoteEditing[h.task_id]" class="history-note-editor">
+                <input
+                  v-model="historyNoteDrafts[h.task_id]"
+                  maxlength="1000"
+                  placeholder="填写批跑备注"
+                  @keyup.enter="saveHistoryNote(h)"
+                  @keyup.escape="cancelHistoryNote(h)"
+                  autofocus
+                >
+                <a href="#" class="history-text-link" @click.prevent="saveHistoryNote(h)">保存</a>
+                <a href="#" class="history-text-link history-cancel-link" @click.prevent="cancelHistoryNote(h)">取消</a>
+              </div>
+              <div v-else class="history-note-display">
+                <span v-if="h.note" class="history-note-text" :title="h.note">{{ h.note }}</span>
+                <span v-else class="history-note-empty">未备注</span>
+                <a href="#" class="history-text-link" @click.prevent="editHistoryNote(h)">编辑</a>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -61,7 +80,7 @@
         <div class="op-import-row">
           <label class="op-upload-btn">
             <input type="file" accept=".jsonl,application/json" @change="onOpManifestFile" hidden>
-            导入{{ mode==='operation' ? '操作类' : '挂卡 / Superlink' }} JSONL
+            导入{{ mode==='operation' ? '任务类' : '挂卡 / Superlink' }} JSONL
           </label>
           <span v-if="opPreparing" class="running">正在解析 JSONL…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
@@ -72,28 +91,41 @@
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","content_start_time":0,"content_end_time":18.5}</p>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
       </div>
-      <div v-for="(it,i) in opItems" :key="i" class="op-card"
-           @dragover.prevent @drop="onOpDrop($event, i)">
+      <div v-for="entry in pagedOpItems" :key="entry.item._uiKey" class="op-card"
+           @dragover.prevent @drop="onOpDrop($event, entry.index)">
         <div class="op-card-head">
-          <span class="op-idx">题目 {{ i+1 }}<template v-if="it.id"> · {{ it.id }}</template></span>
-          <button v-if="opItems.length>1" @click="removeOpItem(i)" class="btn-danger op-del">删除</button>
+          <span class="op-idx">题目 {{ entry.index+1 }}<template v-if="entry.item.id"> · {{ entry.item.id }}</template></span>
+          <button v-if="opItems.length>1" @click="removeOpItem(entry.index)" class="btn-danger op-del">删除</button>
         </div>
-        <textarea v-model="it.query" rows="2" :placeholder="mode==='operation' ? '操作意图(query)，如：设一个明天早上7点的闹钟' : '用户问题(query)，如：北京明天天气怎么样'"></textarea>
-        <textarea v-model="it.context" rows="2" placeholder="(可选) 可信背景(context)，如：当前时间为晚上10点；设备时区为北京时间"></textarea>
-        <input v-if="mode==='rich_content' || mode==='rich_content_quality'" v-model="it.category" placeholder="(可选) 垂域 category，如 weather / music / sports" style="width:100%;box-sizing:border-box;margin-bottom:8px">
+        <textarea v-model="entry.item.query" rows="2" :placeholder="mode==='operation' ? '操作意图(query)，如：设一个明天早上7点的闹钟' : '用户问题(query)，如：北京明天天气怎么样'"></textarea>
+        <textarea v-model="entry.item.context" rows="2" placeholder="(可选) 可信背景(context)，如：当前时间为晚上10点；设备时区为北京时间"></textarea>
+        <input v-if="mode==='rich_content' || mode==='rich_content_quality'" v-model="entry.item.category" placeholder="(可选) 垂域 category，如 weather / music / sports" style="width:100%;box-sizing:border-box;margin-bottom:8px">
         <div class="op-upload">
           <label class="op-upload-btn">
-            <input type="file" accept="video/*" @change="onOpVideo($event, i)" hidden>
-            {{ it.videoName ? '更换视频' : '选择 / 拖拽上传录屏(mp4 ≤20MB)' }}
+            <input type="file" accept="video/*" @change="onOpVideo($event, entry.index)" hidden>
+            {{ entry.item.videoName ? '更换视频' : '选择 / 拖拽上传录屏(mp4 ≤20MB)' }}
           </label>
-          <span v-if="it.uploading" class="hint">上传中…</span>
-          <span v-if="it.videoName && it.frameCount" class="ok">📹 {{ it.videoName }} · {{ it.frameCount }} 帧<template v-if="it.duration"> · {{ it.duration }} 秒</template> ✓</span>
-          <span v-else-if="it.videoName" class="hint">📄 {{ it.videoName }} · 待开始评估时抽帧</span>
-          <span v-if="it.uploadError" class="err">{{ it.uploadError }}</span>
+          <span v-if="entry.item.uploading" class="hint">上传中…</span>
+          <span v-if="entry.item.videoName && entry.item.frameCount" class="ok">📹 {{ entry.item.videoName }} · {{ entry.item.frameCount }} 帧<template v-if="entry.item.duration"> · {{ entry.item.duration }} 秒</template> ✓</span>
+          <span v-else-if="entry.item.videoName" class="hint">📄 {{ entry.item.videoName }} · 待开始评估时抽帧</span>
+          <span v-if="entry.item.uploadError" class="err">{{ entry.item.uploadError }}</span>
         </div>
-        <div v-if="it.videoPath" class="op-path">{{ it.videoPath }}</div>
-        <textarea v-if="mode==='operation'" v-model="it.answer" rows="1" placeholder="(可选) agent 自述，如「我已设好7点闹钟」—— 用于交叉验证是否只说不做"></textarea>
-        <textarea v-else v-model="it.answer" rows="2" placeholder="(可选) answer_text，只辅助理解回答语义，不能证明画面中存在挂卡或蓝色链接"></textarea>
+        <div v-if="entry.item.videoPath" class="op-path">{{ entry.item.videoPath }}</div>
+        <textarea v-if="mode==='operation'" v-model="entry.item.answer" rows="1" placeholder="(可选) agent 自述，如「我已设好7点闹钟」—— 用于交叉验证是否只说不做"></textarea>
+        <textarea v-else v-model="entry.item.answer" rows="2" placeholder="(可选) answer_text，只辅助理解回答语义，不能证明画面中存在挂卡或蓝色链接"></textarea>
+      </div>
+      <div class="pagination" v-if="opPageCount>1">
+        <span class="page-size page-size-fixed">每页 {{ opPageSize }} 条</span>
+        <button @click="changeOpPage(-1)" :disabled="opPage<=1">上一页</button>
+        <template v-for="page in paginationPages(opPage, opPageCount)" :key="'operation-page-'+page">
+          <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
+          <button v-else class="page-number" :class="{active:page===opPage}" @click="setTablePage('operation', page)">{{ page }}</button>
+        </template>
+        <button @click="changeOpPage(1)" :disabled="opPage>=opPageCount">下一页</button>
+        <span class="page-jump">
+          跳至 <input v-model="opJumpPage" type="number" min="1" :max="opPageCount" @keyup.enter="jumpTablePage('operation')"> 页
+          <button @click="jumpTablePage('operation')">确定</button>
+        </span>
       </div>
       <button @click="addOpItem" class="op-add">+ 添加题目</button>
     </div>
@@ -140,9 +172,10 @@
     <h2>② 评估配置</h2>
     <div class="row">
       <span class="lbl">裁判：</span>
-      <label v-for="j in judges" class="chip">
-        <input type="checkbox" :value="j.name" v-model="selectedJudges"> {{ j.display || j.name }}
+      <label v-for="j in visibleJudges" class="chip">
+        <input type="checkbox" :value="j.name" v-model="selectedJudges" :disabled="mode==='operation'"> {{ j.display || j.name }}
       </label>
+      <span v-if="mode==='operation'" class="hint">任务类固定使用终端用户裁判</span>
     </div>
     <div class="row" v-if="mode==='rich_content_quality'">
       <span class="lbl">挂卡识别裁判：</span>
@@ -349,15 +382,33 @@
           <colgroup>
             <col style="width:48px">
             <col v-for="c in resultCols" :key="'col-'+c.key" :style="{ width: columnWidth(c) + 'px' }">
+            <col v-if="isVideoMode" style="width:100px">
+            <col v-if="isVideoMode" style="width:100px">
+            <col v-if="isVideoMode" style="width:100px">
           </colgroup>
-          <thead><tr><th>#</th><th v-for="c in resultCols" :key="c.key">{{ c.label }}</th></tr></thead>
+          <thead>
+            <tr>
+              <th :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}">#</th>
+              <th
+                v-for="(c,columnIndex) in resultCols"
+                :key="c.key"
+                :class="{'result-frozen-column':isFrozenResultColumn(c),'result-frozen-edge':mode==='operation' && c.key==='query'}"
+                :style="frozenResultColumnStyle(c,columnIndex)"
+              >{{ c.label }}</th>
+              <th v-if="isVideoMode">原视频（MP4）</th>
+              <th v-if="isVideoMode">抽帧结果（ZIP）</th>
+              <th v-if="isVideoMode">轨迹数据（JSON）</th>
+            </tr>
+          </thead>
           <tbody>
             <template v-for="(r,i) in pagedResults" :key="r.index ?? i">
               <tr :class="{'result-error':r.error}">
-                <td><div class="cell-clamp cell-center">{{ (resultPage-1)*pageSize+i+1 }}</div></td>
+                <td :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}"><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
                 <td
-                  v-for="c in resultCols"
+                  v-for="(c,columnIndex) in resultCols"
                   :key="c.key"
+                  :class="{'result-frozen-column':isFrozenResultColumn(c),'result-frozen-edge':mode==='operation' && c.key==='query'}"
+                  :style="frozenResultColumnStyle(c,columnIndex)"
                   @mouseenter="showCellTooltip($event, cellTitle(r, c) || cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
@@ -365,6 +416,18 @@
                     class="cell-clamp"
                     :class="{'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
                   >{{ cell(r, c) }}</div>
+                </td>
+                <td v-if="isVideoMode" class="row-export-cell">
+                  <a v-if="itemArtifactUrl(r, 'video')" :href="itemArtifactUrl(r, 'video')" class="row-export-link">下载</a>
+                  <span v-else>—</span>
+                </td>
+                <td v-if="isVideoMode" class="row-export-cell">
+                  <a v-if="itemArtifactUrl(r, 'frames_zip')" :href="itemArtifactUrl(r, 'frames_zip')" class="row-export-link">下载</a>
+                  <span v-else>—</span>
+                </td>
+                <td v-if="isVideoMode" class="row-export-cell">
+                  <a v-if="itemArtifactUrl(r, 'judge_calls')" :href="itemArtifactUrl(r, 'judge_calls')" class="row-export-link">下载</a>
+                  <span v-else>—</span>
                 </td>
               </tr>
               <tr v-if="r.error" class="result-error-detail"><td colspan="99">评估失败：{{ r.error }}</td></tr>
@@ -375,17 +438,28 @@
           </tbody>
         </table>
       </div>
-      <div class="pagination" v-if="pageCount>1">
-        <button @click="changePage(-1)" :disabled="resultPage<=1">上一页</button>
-        <template v-for="page in paginationPages(resultPage, pageCount)" :key="'result-page-'+page">
-          <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
-          <button v-else class="page-number" :class="{active:page===resultPage}" @click="setTablePage('result', page)">{{ page }}</button>
-        </template>
-        <button @click="changePage(1)" :disabled="resultPage>=pageCount">下一页</button>
-        <span class="page-jump">
-          跳至 <input v-model="resultJumpPage" type="number" min="1" :max="pageCount" @keyup.enter="jumpTablePage('result')"> 页
-          <button @click="jumpTablePage('result')">确定</button>
+      <div class="pagination" v-if="filteredResults.length">
+        <span class="page-size">
+          每页
+          <select v-model.number="resultPageSize" @change="changeResultPageSize">
+            <option :value="10">10</option>
+            <option :value="20">20</option>
+            <option :value="50">50</option>
+          </select>
+          条
         </span>
+        <template v-if="pageCount>1">
+          <button @click="changePage(-1)" :disabled="resultPage<=1">上一页</button>
+          <template v-for="page in paginationPages(resultPage, pageCount)" :key="'result-page-'+page">
+            <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
+            <button v-else class="page-number" :class="{active:page===resultPage}" @click="setTablePage('result', page)">{{ page }}</button>
+          </template>
+          <button @click="changePage(1)" :disabled="resultPage>=pageCount">下一页</button>
+          <span class="page-jump">
+            跳至 <input v-model="resultJumpPage" type="number" min="1" :max="pageCount" @keyup.enter="jumpTablePage('result')"> 页
+            <button @click="jumpTablePage('result')">确定</button>
+          </span>
+        </template>
       </div>
     </div>
     <div
@@ -398,6 +472,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260728_dataset_export"></script>
+  <script type="module" src="/static/app.js?v=20260729_operation_fixed_judge"></script>
 </body>
 </html>

@@ -143,7 +143,7 @@ RUBRIC_USER = Template(
 )
 
 
-# ---- 操作类盲评（录屏关键帧 → 判断操作是否完成意图；eval_mode="operation"）----
+# ---- 任务类（录屏）盲评（关键帧 → 判断操作是否完成意图；eval_mode="operation"）----
 # 维度定义、检查项、评分锚点从 config/skills/operation.yaml 动态渲染。
 # 输出结构与问答类 rubric 统一为一级维度 total + reason。
 OPERATION_SYSTEM = Template(
@@ -539,7 +539,7 @@ ARBITRATOR_SYSTEM = Template(
 - 阅读题目、被评答案，以及各裁判的判定/打分/理由/查证证据。
 - 综合各方观点，识别分歧焦点；对关键争议点主动用 web_search/fetch_page/calculate 重新核查（你是最后一道把关）。
 {% if operation_mode %}
-- 当前是操作类录屏仲裁。必须沿用操作类严格口径：任一目标未完成或只有文字无状态证据为 wrong；所有结果完成但存在重复或路径冗余才是 partial；真正缺权限、信息、硬件或录屏数据时才是 unclear。
+- 当前是任务类（录屏）仲裁。必须沿用任务类严格口径：任一目标未完成或只有文字无状态证据为 wrong；所有结果完成但存在重复或路径冗余才是 partial；真正缺权限、信息、硬件或录屏数据时才是 unclear。
 - 非 right 必须输出非空 error_type；right 和 unclear 的 is_low_level 必须为 no。
 {% endif %}
 - 输出：最终判定（right/wrong/partial/unclear）+ 各维度分（1-5）+ 总分 + 置信度（0-1）+ 理由。

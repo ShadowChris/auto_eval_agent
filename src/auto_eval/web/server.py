@@ -9,6 +9,7 @@ import json
 import uuid
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File
@@ -26,8 +27,10 @@ from .history import (
     delete_snapshot,
     export_rows,
     list_snapshots,
+    load_item_judge_calls,
     load_snapshot,
     rows_to_csv,
+    save_task,
     snapshot_payload,
     task_to_snapshot,
     write_frames_zip,
@@ -77,6 +80,10 @@ class EvalReq(BaseModel):
 class OperationPrepareReq(BaseModel):
     items: list[dict]
     concurrency: int = 2
+
+
+class HistoryNoteReq(BaseModel):
+    note: str = ""
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
@@ -309,6 +316,20 @@ def api_history_delete(task_id: str):
     return {"ok": True}
 
 
+@app.patch("/api/history/{task_id}/note")
+def api_history_note(task_id: str, req: HistoryNoteReq):
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "task not found")
+    note = req.note.strip()
+    if len(note) > 1000:
+        raise HTTPException(422, "备注不能超过 1000 个字符")
+    task.note = note
+    if not save_task(task):
+        raise HTTPException(500, "备注保存失败")
+    return {"ok": True, "task_id": task.id, "note": task.note}
+
+
 @app.get("/api/eval/{task_id}/export")
 def api_export(task_id: str, format: str = "json"):
     task = get_task(task_id)
@@ -351,6 +372,79 @@ def api_export(task_id: str, format: str = "json"):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.csv"},
     )
+
+
+def _download_stem(value: str, fallback: str) -> str:
+    safe = "".join(
+        char if char.isalnum() or char in "-_. " else "_"
+        for char in value
+    ).strip(" ._")
+    return safe[:120] or fallback
+
+
+@app.get("/api/eval/{task_id}/items/{item_index}/export")
+def api_export_item(task_id: str, item_index: int, format: str):
+    """导出单条结果关联的原视频、关键帧或裁判调用 JSON。"""
+    task = get_task(task_id)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "task not found")
+    items = data.get("items") or []
+    if item_index < 0 or item_index >= len(items):
+        raise HTTPException(404, "item not found")
+    item = items[item_index]
+    raw_id = str(item.get("id") or f"q{item_index + 1}")
+    stem = _download_stem(
+        f"{item_index + 1:03d}_{raw_id}",
+        f"{item_index + 1:03d}_item",
+    )
+
+    if format == "video":
+        raw_path = str(item.get("video_path") or "").strip()
+        if not raw_path:
+            media = item.get("media") or []
+            raw_path = str(media[0]).strip() if media else ""
+        if not raw_path:
+            raise HTTPException(404, "该条结果没有原始视频路径")
+        try:
+            video_path = _resolve_operation_video_path(raw_path)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return FileResponse(
+            video_path,
+            filename=f"{stem}{video_path.suffix.lower()}",
+        )
+
+    if format in {"frames", "frames_zip"}:
+        export_dir = RUNS_DIR / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = export_dir / (
+            f".{task_id}.{item_index}.{uuid.uuid4().hex}.zip"
+        )
+        write_frames_zip(data, archive_path, item_indexes={item_index})
+        return FileResponse(
+            archive_path,
+            media_type="application/zip",
+            filename=f"{stem}_frames.zip",
+            background=BackgroundTask(archive_path.unlink, missing_ok=True),
+        )
+
+    if format in {"judge", "judge_calls"}:
+        payload = load_item_judge_calls(data, item_index)
+        content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        return Response(
+            content,
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename*=UTF-8''"
+                    f"{quote(f'{stem}_judge_calls.json')}"
+                ),
+            },
+        )
+
+    raise HTTPException(400, "format 必须是 video、frames_zip 或 judge_calls")
+
 
 @app.get("/")
 def index():

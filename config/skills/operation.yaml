@@ -1,7 +1,7 @@
 name: operation
-display: 操作类
+display: 任务类
 matching_categories: []
-rules: "操作类评测：看录屏关键帧判断操作是否完成意图。务必区分「真的执行」与「只给口头指导/教程而未执行」。"
+rules: "任务类（录屏）评测：看录屏关键帧判断操作是否完成意图。务必区分「真的执行」与「只给口头指导/教程而未执行」。"
 rubrics:
   - name: 操作完成度
     description: 基于整个 query 判断用户目标是否完整闭环。

@@ -2,7 +2,7 @@ import json
 import zipfile
 from pathlib import Path
 
-from auto_eval.web import history
+from auto_eval.web import history, server
 
 
 def _snapshot(project: Path) -> dict:
@@ -156,3 +156,114 @@ def test_write_frames_zip_contains_images_and_manifest(tmp_path: Path):
         )
         metadata = json.loads(zf.read("001_op_1/keyframes.json"))
         assert metadata["video"] == "data/videos/one.mp4"
+
+
+def test_write_frames_zip_can_export_one_dataset_item(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    archive = tmp_path / "single-item.zip"
+
+    history.write_frames_zip(
+        snapshot,
+        archive,
+        project_root=tmp_path,
+        item_indexes={0},
+    )
+
+    with zipfile.ZipFile(archive) as zf:
+        assert "001_op_1/kf_001.jpg" in zf.namelist()
+        assert not any(name.startswith("002_") for name in zf.namelist())
+        manifest = [
+            json.loads(line)
+            for line in zf.read("manifest.jsonl").decode("utf-8").splitlines()
+        ]
+        assert {row["id"] for row in manifest} == {"op_1"}
+
+
+def test_load_item_judge_calls_matches_task_and_item_index(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    snapshot.update({
+        "task_id": "task-1",
+        "session_name": "session-1",
+    })
+    trace = tmp_path / "runs" / "judge_calls_operation.jsonl"
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "task_id": "task-1",
+            "session_name": "session-1",
+            "item_index": 0,
+            "item_id": "op_1",
+            "judge": "judge_2",
+            "model_raw_output": "raw-2",
+        },
+        {
+            "task_id": "task-1",
+            "session_name": "session-1",
+            "item_index": 0,
+            "item_id": "op_1",
+            "judge": "judge_1",
+            "model_raw_output": "raw-1",
+        },
+        {
+            "task_id": "task-1",
+            "session_name": "session-1",
+            "item_index": 1,
+            "item_id": "op_2",
+            "judge": "judge_2",
+        },
+        {
+            "task_id": "other-task",
+            "item_index": 0,
+            "item_id": "op_1",
+            "judge": "judge_2",
+        },
+    ]
+    trace.write_text(
+        "".join(json.dumps(row) + "\n" for row in records),
+        encoding="utf-8",
+    )
+
+    payload = history.load_item_judge_calls(
+        snapshot,
+        0,
+        runs_dir=trace.parent,
+        project_root=tmp_path,
+        trace_paths=[trace],
+    )
+
+    assert payload["item_id"] == "op_1"
+    assert payload["judge_call_count"] == 2
+    assert {
+        row["model_raw_output"] for row in payload["judge_calls"]
+    } == {"raw-1", "raw-2"}
+    assert payload["judge_calls"][0]["_trace_file"] == (
+        "runs/judge_calls_operation.jsonl"
+    )
+
+
+def test_item_judge_export_supports_chinese_download_filename(monkeypatch):
+    snapshot = {
+        "task_id": "task-1",
+        "mode": "operation",
+        "items": [{"id": "众测_001", "query": "打开设置"}],
+        "results": [],
+    }
+    monkeypatch.setattr(server, "get_task", lambda _: None)
+    monkeypatch.setattr(server, "load_snapshot", lambda _: snapshot)
+    monkeypatch.setattr(
+        server,
+        "load_item_judge_calls",
+        lambda _snapshot, _index: {
+            "item_id": "众测_001",
+            "judge_call_count": 1,
+            "judge_calls": [{"model_raw_output": "raw"}],
+        },
+    )
+
+    response = server.api_export_item("task-1", 0, "judge_calls")
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["judge_call_count"] == 1
+    disposition = response.headers["content-disposition"]
+    assert "filename*=UTF-8''" in disposition
+    disposition.encode("latin-1")

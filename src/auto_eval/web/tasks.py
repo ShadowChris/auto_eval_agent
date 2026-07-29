@@ -18,6 +18,7 @@ class Task:
     options: dict
     session_name: str = ""
     dataset_name: str = ""
+    note: str = ""
     status: str = "pending"  # pending | running | done | error
     results: list[dict] = field(default_factory=list)
     item_progress: dict[str, dict] = field(default_factory=dict)
@@ -75,6 +76,7 @@ def get_task(task_id: str) -> Task | None:
         items=snapshot.get("items") or [],
         options=snapshot.get("options") or {},
         dataset_name=snapshot.get("dataset_name") or "",
+        note=snapshot.get("note") or "",
         session_name=snapshot.get("session_name") or "",
         status=status,
         results=snapshot.get("results") or [],

@@ -40,7 +40,7 @@ class EvalItem(BaseModel):
     difficulty: Difficulty = "medium"
     tags: list[str] = Field(default_factory=list)
     trace: str | None = None  # 被测 agent 的推理/工具轨迹（仅过程盲评使用）
-    media: list[str] = Field(default_factory=list)  # 操作类评测：录屏/图片本地路径（裁判抽帧后以 image_url 多图盲评）
+    media: list[str] = Field(default_factory=list)  # 任务类评测：录屏/图片本地路径（裁判抽帧后以 image_url 多图盲评）
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def categories(self) -> list[str]:
@@ -85,7 +85,7 @@ class SingleScore(BaseModel):
     total: float = 0.0
     correctness: Correctness = "unclear"
     error_type: str | None = None
-    is_low_level: LowLevel = "no"  # 操作类：意图简单清晰但发生可归责的低级错误
+    is_low_level: LowLevel = "no"  # 任务类：意图简单清晰但发生可归责的低级错误
     rationale: str = ""
     top_issue_1_dim: str | None = None  # 首要问题维度
     top_issue_2_dim: str | None = None  # 次要问题维度
