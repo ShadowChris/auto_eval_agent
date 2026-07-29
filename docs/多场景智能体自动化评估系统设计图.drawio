@@ -7,7 +7,7 @@
         <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=28;fontStyle=1;fontColor=#172033;" value="多场景智能体自动化评估系统" vertex="1">
           <mxGeometry height="45" width="1000" x="400" y="18" as="geometry" />
         </mxCell>
-        <mxCell id="subtitle" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=14;fontColor=#64748B;" value="当前默认：单个终端用户裁判（end_user）｜垂域类综合评估（含挂卡 / Superlink）+ 任务类评估" vertex="1">
+        <mxCell id="subtitle" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=14;fontColor=#64748B;" value="当前默认：单个终端用户裁判（end_user）｜垂域类综合评估（含垂域视觉评测）+ 任务类评估" vertex="1">
           <mxGeometry height="28" width="1000" x="400" y="62" as="geometry" />
         </mxCell>
         <mxCell id="entry_lane" parent="1" style="swimlane;html=1;rounded=1;startSize=34;horizontal=1;fillColor=#F8FAFC;strokeColor=#64748B;strokeWidth=2;fontStyle=1;fontSize=15;swimlaneFillColor=#FFFFFF;" value="统一接入与任务调度" vertex="1">
@@ -75,7 +75,7 @@
         <mxCell id="e_d4_result" edge="1" parent="domain_lane" source="d_tools" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#16A34A;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.75;entryY=0;" target="d_result">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="rc_group" parent="domain_lane" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFEFF;fillOpacity=18;strokeColor=#0891B2;strokeWidth=2;dashed=1;dashPattern=8 8;verticalAlign=top;align=left;spacingTop=5;spacingLeft=10;fontStyle=1;fontSize=12;fontColor=#155E75;pointerEvents=0;" value="挂卡 / Superlink 视觉评估支路" vertex="1">
+        <mxCell id="rc_group" parent="domain_lane" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFEFF;fillOpacity=18;strokeColor=#0891B2;strokeWidth=2;dashed=1;dashPattern=8 8;verticalAlign=top;align=left;spacingTop=5;spacingLeft=10;fontStyle=1;fontSize=12;fontColor=#155E75;pointerEvents=0;" value="垂域视觉评测支路" vertex="1">
           <mxGeometry height="122" width="870" x="10" y="154" as="geometry" />
         </mxCell>
         <mxCell id="e_d1_rc1" edge="1" parent="domain_lane" source="d1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#0891B2;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="rc1">
@@ -168,7 +168,7 @@
         <mxCell id="e_task_summary" edge="1" parent="output_lane" source="task_normalize" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;strokeColor=#EA580C;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.75;entryY=0;" target="summary">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="legend" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CBD5E1;fontSize=12;fontColor=#475569;" value="蓝色：垂域综合评估　　青色：挂卡 / Superlink视觉证据支路　　橙色：任务类评估　　紫色：终端用户裁判　　绿色：结果与交付" vertex="1">
+        <mxCell id="legend" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CBD5E1;fontSize=12;fontColor=#475569;" value="蓝色：垂域综合评估　　青色：垂域视觉评测支路　　橙色：任务类评估　　紫色：终端用户裁判　　绿色：结果与交付" vertex="1">
           <mxGeometry height="45" width="1020" x="390" y="1090" as="geometry" />
         </mxCell>
         <mxCell id="e_schedule_domain" edge="1" parent="1" source="schedule" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;html=1;endArrow=block;endFill=1;strokeColor=#2563EB;strokeWidth=2;fontSize=11;exitX=0.35;exitY=1;entryX=0.5;entryY=0;" target="d1" value="垂域类">
@@ -196,12 +196,12 @@
       </root>
     </mxGraphModel>
   </diagram>
-  <diagram id="rich-content-current" name="挂卡与Superlink实现">
+  <diagram id="rich-content-current" name="垂域视觉评测实现">
     <mxGraphModel dx="1800" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1200" math="0" shadow="0">
       <root>
         <mxCell id="r0" />
         <mxCell id="r1" parent="r0" />
-        <mxCell id="r_title" value="Superlink / 挂卡评估：当前实现与垂域类整合规划" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=27;fontStyle=1;fontColor=#172033;" vertex="1" parent="r1">
+        <mxCell id="r_title" value="垂域视觉评测：当前实现与垂域类整合规划" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=27;fontStyle=1;fontColor=#172033;" vertex="1" parent="r1">
           <mxGeometry x="300" y="18" width="1200" height="46" as="geometry" />
         </mxCell>
         <mxCell id="r_subtitle" value="当前为独立视频视觉模式；综合模式已实现“两阶段评估”，后续计划作为垂域类评估的视觉证据能力" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=14;fontColor=#64748B;" vertex="1" parent="r1">
@@ -249,7 +249,7 @@
         <mxCell id="r_v_note" value="关键约束：普通图片不算挂卡；只统计 assistant 当前回答区域中的蓝色 Superlink；同一对象跨帧只计一次。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#67E8F9;dashed=1;fontSize=12;fontColor=#155E75;" vertex="1" parent="r_visual_lane">
           <mxGeometry x="520" y="205" width="765" height="48" as="geometry" />
         </mxCell>
-        <mxCell id="r_standalone_lane" value="当前模式 A：独立挂卡 / Superlink 视觉评估（rich_content）" style="swimlane;html=1;rounded=1;startSize=38;horizontal=1;fillColor=#F0FDF4;strokeColor=#16A34A;strokeWidth=2;fontStyle=1;fontSize=15;swimlaneFillColor=#FAFFFB;" vertex="1" parent="r1">
+        <mxCell id="r_standalone_lane" value="当前模式 A：独立垂域视觉评测（rich_content）" style="swimlane;html=1;rounded=1;startSize=38;horizontal=1;fillColor=#F0FDF4;strokeColor=#16A34A;strokeWidth=2;fontStyle=1;fontSize=15;swimlaneFillColor=#FAFFFB;" vertex="1" parent="r1">
           <mxGeometry x="70" y="625" width="650" height="175" as="geometry" />
         </mxCell>
         <mxCell id="r_s1" value="结构化视觉发现&lt;br&gt;不输出回答 correctness / total" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCFCE7;strokeColor=#16A34A;strokeWidth=2;fontSize=13;" vertex="1" parent="r_standalone_lane">
@@ -258,7 +258,7 @@
         <mxCell id="r_s2" value="视觉统计与交付&lt;br&gt;presence · count · items&lt;br&gt;适配性 · needs_review" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCFCE7;strokeColor=#16A34A;strokeWidth=2;fontSize=13;" vertex="1" parent="r_standalone_lane">
           <mxGeometry x="350" y="62" width="265" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="r_quality_lane" value="当前模式 B：挂卡综合评测（rich_content_quality）" style="swimlane;html=1;rounded=1;startSize=38;horizontal=1;fillColor=#EFF6FF;strokeColor=#2563EB;strokeWidth=2;fontStyle=1;fontSize=15;swimlaneFillColor=#F8FBFF;" vertex="1" parent="r1">
+        <mxCell id="r_quality_lane" value="当前模式 B：垂域视觉综合评测（rich_content_quality）" style="swimlane;html=1;rounded=1;startSize=38;horizontal=1;fillColor=#EFF6FF;strokeColor=#2563EB;strokeWidth=2;fontStyle=1;fontSize=15;swimlaneFillColor=#F8FBFF;" vertex="1" parent="r1">
           <mxGeometry x="760" y="625" width="970" height="175" as="geometry" />
         </mxCell>
         <mxCell id="r_q1" value="阶段 1 结果过滤&lt;br&gt;只取客观 visual_description&lt;br&gt;不注入 suitability 结论" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=2;fontSize=12;" vertex="1" parent="r_quality_lane">
@@ -279,13 +279,13 @@
         <mxCell id="r_p1" value="垂域评估样本&lt;br&gt;Query + Answer&lt;br&gt;可选回答录屏" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#2563EB;strokeWidth=2;dashed=1;fontSize=13;" vertex="1" parent="r_plan_lane">
           <mxGeometry x="35" y="68" width="230" height="82" as="geometry" />
         </mxCell>
-        <mxCell id="r_p2" value="复用挂卡视觉链路&lt;br&gt;视频预处理 + RichContentJudge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFEFF;strokeColor=#0891B2;strokeWidth=2;dashed=1;fontSize=13;" vertex="1" parent="r_plan_lane">
+        <mxCell id="r_p2" value="复用垂域视觉评测链路&lt;br&gt;视频预处理 + RichContentJudge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFEFF;strokeColor=#0891B2;strokeWidth=2;dashed=1;fontSize=13;" vertex="1" parent="r_plan_lane">
           <mxGeometry x="330" y="68" width="260" height="82" as="geometry" />
         </mxCell>
         <mxCell id="r_p3" value="视觉证据标准化&lt;br&gt;仅将客观 visual_description&lt;br&gt;加入垂域评估 Context" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EFF6FF;strokeColor=#2563EB;strokeWidth=2;dashed=1;fontSize=13;" vertex="1" parent="r_plan_lane">
           <mxGeometry x="655" y="68" width="260" height="82" as="geometry" />
         </mxCell>
-        <mxCell id="r_p4" value="统一垂域盲评 Prompt&lt;br&gt;文字答案 + 可见挂卡/Superlink&lt;br&gt;共同判断回答质量" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE9FE;strokeColor=#7C3AED;strokeWidth=2;dashed=1;fontSize=13;" vertex="1" parent="r_plan_lane">
+        <mxCell id="r_p4" value="统一垂域盲评 Prompt&lt;br&gt;文字答案 + 可见视觉内容&lt;br&gt;共同判断回答质量" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE9FE;strokeColor=#7C3AED;strokeWidth=2;dashed=1;fontSize=13;" vertex="1" parent="r_plan_lane">
           <mxGeometry x="980" y="68" width="280" height="82" as="geometry" />
         </mxCell>
         <mxCell id="r_p5" value="垂域统一结果&lt;br&gt;文字与富内容统一评分&lt;br&gt;保留视觉明细供回溯" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCFCE7;strokeColor=#16A34A;strokeWidth=2;dashed=1;fontSize=13;" vertex="1" parent="r_plan_lane">

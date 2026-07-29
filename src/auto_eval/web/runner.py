@@ -535,10 +535,10 @@ async def _eval_one(
 
     elif mode == "rich_content":
         if not rich_judges:
-            raise ValueError("没有可用的挂卡 / Superlink 视觉裁判")
+            raise ValueError("没有可用的垂域视觉评测裁判")
         frames = [str(path) for path in (item.metadata.get("frames") or [])]
         if not frames:
-            raise ValueError("挂卡 / Superlink 视觉评估缺少关键帧")
+            raise ValueError("垂域视觉评测缺少关键帧")
         answer_text = str(item_dict.get("answer_text") or "").strip()
         if answer_text:
             out["answer_text"] = answer_text
@@ -561,15 +561,15 @@ async def _eval_one(
                 "需复核": out.get("needs_review"),
             },
             progress=90,
-            progress_message="正在整理挂卡与Superlink结果",
+            progress_message="正在整理垂域视觉评测结果",
         )
 
     elif mode == "rich_content_quality":
         if visual_judge is None:
-            raise ValueError("缺少挂卡 / Superlink 视觉识别裁判（请选择 visual_judge）")
+            raise ValueError("缺少垂域视觉评测识别裁判（请选择 visual_judge）")
         frames = [str(path) for path in (item.metadata.get("frames") or [])]
         if not frames:
-            raise ValueError("挂卡 / Superlink 综合评测缺少关键帧")
+            raise ValueError("垂域视觉综合评测缺少关键帧")
         answer_text = str(item_dict.get("answer_text") or "").strip()
         if answer_text:
             out["answer_text"] = answer_text
@@ -581,7 +581,7 @@ async def _eval_one(
             "视觉识别阶段",
             details={"裁判": visual_judge.client.cfg.name, "模型": visual_judge.client.model},
             progress=30,
-            progress_message="正在进行挂卡与Superlink视觉识别",
+            progress_message="正在进行垂域视觉评测识别",
         )
         visual = await visual_judge.evaluate(
             question=item.question,
@@ -609,7 +609,7 @@ async def _eval_one(
         )
         # 更新 item.context 供 RubricJudge 使用
         item.context = enriched_context
-        enriched_answer = answer_text or "[此回答以挂卡/Superlink为主要交付物，纯文本部分为空]"
+        enriched_answer = answer_text or "[此回答以视觉内容为主要交付物，纯文本部分为空]"
         out["answer"] = enriched_answer
 
         async def _score_rcq(r):
@@ -858,7 +858,7 @@ def _summarize_rich_content(task: Task) -> dict:
     }
 
 def _summarize_rich_content_quality(task: Task, cfg: AppConfig) -> dict:
-    """综合汇总：挂卡/Superlink 视觉发现 + 回答质量评测。"""
+    """综合汇总：垂域视觉评测发现 + 回答质量评测。"""
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     results = task.results
     ok = [row for row in results if "error" not in row]

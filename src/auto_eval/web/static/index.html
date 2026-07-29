@@ -80,7 +80,7 @@
         <div class="op-import-row">
           <label class="op-upload-btn">
             <input type="file" accept=".jsonl,application/json" @change="onOpManifestFile" hidden>
-            导入{{ mode==='operation' ? '任务类' : '挂卡 / Superlink' }} JSONL
+            导入{{ mode==='operation' ? '任务类' : '垂域视觉评测' }} JSONL
           </label>
           <span v-if="opPreparing" class="running">正在解析 JSONL…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>

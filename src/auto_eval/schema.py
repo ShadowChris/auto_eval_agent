@@ -125,7 +125,7 @@ class RichContentSuperlink(BaseModel):
 
 
 class RichContentObservation(BaseModel):
-    """一次垂域挂卡 / Superlink 视频视觉识别结果。"""
+    """一次垂域视觉评测视频识别结果。"""
 
     answer_coverage: AnswerCoverage = "unclear"
     visual_description: str = ""  # 纯客观视觉描述（Part 1），不包含评价性语言

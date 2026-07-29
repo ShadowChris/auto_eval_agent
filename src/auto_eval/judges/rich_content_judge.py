@@ -1,4 +1,4 @@
-"""垂域挂卡 / Superlink 视频视觉识别裁判。"""
+"""垂域视觉评测视频识别裁判。"""
 from __future__ import annotations
 
 import time
@@ -221,13 +221,13 @@ class RichContentJudge:
         if data is None:
             repaired = await self.client.repair_json(
                 reply.content,
-                label="挂卡与Superlink视觉识别输出",
+                label="垂域视觉评测识别输出",
                 round_no=reply.rounds + 1,
             )
             data = parse_json_loose(repaired)
         if data is None:
             raise JudgeOutputParseError(
-                "挂卡与Superlink视觉识别输出无法解析为 JSON",
+                "垂域视觉评测识别输出无法解析为 JSON",
                 raw_output=reply.content,
                 repair_output=repaired,
                 judge=self.client.cfg.name,
@@ -237,7 +237,7 @@ class RichContentJudge:
             observation = RichContentObservation.model_validate(data)
         except ValidationError as exc:
             raise JudgeOutputParseError(
-                f"挂卡与Superlink视觉识别字段不合法：{exc}",
+                f"垂域视觉评测识别字段不合法：{exc}",
                 raw_output=reply.content,
                 repair_output=repaired,
                 judge=self.client.cfg.name,

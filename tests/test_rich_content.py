@@ -22,7 +22,7 @@ def test_rich_content_profile_is_separate_from_domain_skills() -> None:
     profile = config.visual_modes["rich_content"]
 
     assert "rich_content" not in config.domain_skills
-    assert profile.display == "垂域挂卡 / Superlink"
+    assert profile.display == "垂域视觉评测"
     assert profile.card_types["music"] == "音乐"
     assert profile.extraction.algorithm_version == "rich-content-v1.1.0"
     assert profile.extraction.max_edge == 1280
@@ -263,7 +263,7 @@ def test_web_exposes_rich_content_mode_and_columns() -> None:
         PROJECT_ROOT / "src/auto_eval/web/static/index.html"
     ).read_text(encoding="utf-8")
 
-    assert '{ key: "rich_content", label: "垂域挂卡 / Superlink" }' in app_js
+    assert '{ key: "rich_content", label: "垂域视觉评测" }' in app_js
     assert '{ key: "card_presence", label: "挂卡" }' in app_js
     assert '{ key: "superlink_count", label: "链接数" }' in app_js
     assert '{ key: "needs_review", label: "需人工复核" }' in app_js

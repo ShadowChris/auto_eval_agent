@@ -9,8 +9,8 @@ createApp({
       { key: "online", label: "接模型在线评估" },
       { key: "process", label: "过程盲评(含轨迹)" },
       { key: "operation", label: "任务类（录屏）" },
-      { key: "rich_content", label: "垂域挂卡 / Superlink" },
-      { key: "rich_content_quality", label: "垂域挂卡综合评测" },
+      { key: "rich_content", label: "垂域视觉评测" },
+      { key: "rich_content_quality", label: "垂域视觉综合评测" },
     ];
     function modeLabel(key) {
       return modes.find((item) => item.key === key)?.label || key;
@@ -84,7 +84,7 @@ createApp({
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
           operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/content_start_time/content_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
-          rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域挂卡相同。",
+          rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域视觉评测相同。",
         }[mode.value])
     );
     const placeholder = computed(

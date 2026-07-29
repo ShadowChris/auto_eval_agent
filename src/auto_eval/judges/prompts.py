@@ -270,7 +270,7 @@ OPERATION_USER = Template(
 )
 
 
-# ---- 垂域挂卡 / Superlink 视觉评估（视频关键帧 → 结构化内容发现）----
+# ---- 垂域视觉评测（视频关键帧 → 结构化内容发现）----
 RICH_CONTENT_SYSTEM = Template(
     """{{ persona }}
 
