@@ -4,23 +4,39 @@ import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 createApp({
   setup() {
     const modes = [
-      { key: "single", label: "单回答盲评" },
+      { key: "single", label: "垂域问答类" },
       { key: "compare", label: "两回答对比" },
       { key: "online", label: "接模型在线评估" },
       { key: "process", label: "过程盲评(含轨迹)" },
-      { key: "operation", label: "操作类(录屏)" },
+      { key: "operation", label: "任务类（录屏）" },
+      { key: "rich_content", label: "垂域挂卡 / Superlink" },
+      { key: "rich_content_quality", label: "垂域挂卡综合评测" },
     ];
+    function modeLabel(key) {
+      return modes.find((item) => item.key === key)?.label || key;
+    }
     const mode = ref("single");
+    const isVideoMode = computed(() => ["operation", "rich_content", "rich_content_quality"].includes(mode.value));
     const text = ref("");
     const fileText = ref("");
     const isJsonl = ref(false);
+    const datasetName = ref("");
     const items = ref([]);
-    const opItems = ref([{ query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, answer: "", taskStartTime: null, taskEndTime: null, uploading: false, uploadError: "" }]);
+    let opItemSequence = 0;
+    const opItems = ref([newOpItem()]);
+    const opPage = ref(1);
+    const opJumpPage = ref("");
     const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
     const models = ref([]);
     const selectedJudges = ref([]);
+    const visibleJudges = computed(() => {
+      if (mode.value !== "operation") return judges.value;
+      const judge = terminalUserJudge();
+      return judge ? [judge] : [];
+    });
+    const visualJudge = ref("");  // rich_content_quality 模式：挂卡识别裁判
     const selectedModel = ref("");
     const concurrency = ref(4);
     const evalTimeout = ref(300);
@@ -41,6 +57,7 @@ createApp({
     const correctnessFilter = ref("");
     const problemDimFilter = ref("");
     const resultPage = ref(1);
+    const resultPageSize = ref(10);
     const previewPage = ref(1);
     const progressPage = ref(1);
     const resultJumpPage = ref("");
@@ -48,11 +65,14 @@ createApp({
     const progressJumpPage = ref("");
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
+    const historyNoteDrafts = ref({});
+    const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
     const pageSize = 10;
+    const opPageSize = 10;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
 
     const formatHint = computed(
@@ -63,6 +83,8 @@ createApp({
           online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
           operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
+          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/content_start_time/content_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
+          rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域挂卡相同。",
         }[mode.value])
     );
     const placeholder = computed(
@@ -73,6 +95,8 @@ createApp({
           online: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场\n计算 17 × 24 等于多少？",
           process: "规划回家路线 ||| @context: 当前位于上海人民广场，目的地徐家汇 ||| 最终回答 ||| 推理轨迹\n某函数是否正确？ ||| 正确 ||| def f(n): return 1 if n<=1 else n*f(n-1)",
           operation: "",
+          rich_content: "",
+          rich_content_quality: "",
         }[mode.value])
     );
 
@@ -84,6 +108,15 @@ createApp({
       else if (mode.value === "process") keys.push("answer", "trace", "reference");
       else keys.push("reference");
       return keys.filter((k) => items.value.some((it) => it[k] != null && it[k] !== ""));
+    });
+    const opPageCount = computed(() => Math.max(1, Math.ceil(opItems.value.length / opPageSize)));
+    const pagedOpItems = computed(() => {
+      const page = Math.min(opPage.value, opPageCount.value);
+      const start = (page - 1) * opPageSize;
+      return opItems.value.slice(start, start + opPageSize).map((item, offset) => ({
+        item,
+        index: start + offset,
+      }));
     });
     const previewPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
     const pagedPreviewItems = computed(() => {
@@ -299,7 +332,8 @@ createApp({
         }
         if (!r.category) return;
         const key = r.category;
-        const current = map.get(key) || { key, label: r.category_display || key, count: 0 };
+        const displayLabel = key === "operation" ? "任务类" : (r.category_display || key);
+        const current = map.get(key) || { key, label: displayLabel, count: 0 };
         current.count += 1;
         map.set(key, current);
       });
@@ -351,10 +385,64 @@ createApp({
           { key: "query", label: "操作意图" },
           ...contextCols,
           { key: "correctness", label: "完成判定" },
+          { key: "error_type", label: "错误类型" },
+          { key: "is_low_level", label: "是否低级" },
           { key: "total", label: "总分" },
           ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
           { key: "arbitrated", label: "仲裁" },
           { key: "rationale", label: "步骤与证据" },
+          { key: "latency_s", label: "耗时" },
+        ];
+      if (mode.value === "rich_content")
+        return [
+          { key: "item_id", label: "题号" },
+          { key: "query", label: "Query" },
+          ...contextCols,
+          { key: "category_display", label: "垂域" },
+          { key: "card_presence", label: "挂卡" },
+          { key: "card_count", label: "挂卡数" },
+          { key: "card_types", label: "挂卡类型" },
+          { key: "card_contents", label: "挂卡内容" },
+          { key: "card_suitability", label: "挂卡适配性" },
+          { key: "card_suitability_score", label: "适配分" },
+          { key: "superlink_presence", label: "Superlink" },
+          { key: "superlink_count", label: "链接数" },
+          { key: "superlink_count_type", label: "计数类型" },
+          { key: "superlink_texts", label: "链接文字" },
+          { key: "answer_coverage", label: "回答覆盖" },
+          { key: "needs_review", label: "需人工复核" },
+          { key: "rationale", label: "识别结论" },
+          { key: "latency_s", label: "耗时" },
+        ];
+      if (mode.value === "rich_content_quality")
+        return [
+          { key: "item_id", label: "题号" },
+          { key: "query", label: "Query" },
+          ...contextCols,
+          { key: "category_display", label: "垂域" },
+          { key: "answer", label: "回答" },
+          { key: "card_presence", label: "挂卡" },
+          { key: "card_count", label: "挂卡数" },
+          { key: "card_types", label: "挂卡类型" },
+          { key: "card_contents", label: "挂卡内容" },
+          { key: "card_suitability", label: "挂卡适配性" },
+          { key: "card_suitability_score", label: "适配分" },
+          { key: "superlink_presence", label: "Superlink" },
+          { key: "superlink_count", label: "链接数" },
+          { key: "superlink_texts", label: "链接文字" },
+          { key: "answer_coverage", label: "回答覆盖" },
+          { key: "correctness", label: "判定" },
+          { key: "total", label: "总分" },
+          ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
+          { key: "used_search", label: "联网" },
+          { key: "truncated", label: "截断" },
+          { key: "arbitrated", label: "仲裁" },
+          { key: "top_issue_1_dim", label: "首要问题维度" },
+          { key: "top_issue_2_dim", label: "次要问题维度" },
+          { key: "top_issue_3_dim", label: "第三问题维度" },
+          { key: "top_issues_desc", label: "问题描述" },
+          { key: "needs_review", label: "需人工复核" },
+          { key: "rationale", label: "理由" },
           { key: "latency_s", label: "耗时" },
         ];
       const dims = rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d }));
@@ -370,6 +458,10 @@ createApp({
         { key: "truncated", label: "截断" },
         { key: "arbitrated", label: "仲裁" },
         { key: "agree", label: "与真值" },
+        { key: "top_issue_1_dim", label: "首要问题维度" },
+        { key: "top_issue_2_dim", label: "次要问题维度" },
+        { key: "top_issue_3_dim", label: "第三问题维度" },
+        { key: "top_issues_desc", label: "问题描述" },
         { key: "rationale", label: "理由" },
         { key: "latency_s", label: "耗时" },
       ];
@@ -377,22 +469,51 @@ createApp({
 
     function columnWidth(c) {
       const compact = c.rubricDim
-        || ["correctness", "winner", "total", "used_search", "truncated", "arbitrated", "agree", "latency_s", "bidirectional_consistent"].includes(c.key);
-      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale"].includes(c.key);
-      const minWidth = compact ? 88 : c.key === "item_id" ? 90 : textColumn ? 180 : 110;
-      const maxWidth = compact ? 130 : c.key === "rationale" ? 420 : textColumn ? 360 : 220;
+        || [
+          "correctness", "winner", "total", "used_search", "truncated", "arbitrated",
+          "agree", "latency_s", "bidirectional_consistent", "is_low_level",
+          "card_presence", "card_count", "card_suitability_score", "superlink_presence",
+          "superlink_count", "answer_coverage", "needs_review",
+        ].includes(c.key);
+      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc"].includes(c.key);
+      let minWidth = compact ? 80 : textColumn ? 150 : 96;
+      let maxWidth = compact ? 120 : c.key === "rationale" ? 380 : textColumn ? 320 : 200;
+      if (c.key === "item_id") {
+        minWidth = 110;
+        maxWidth = 160;
+      } else if (c.key === "query" && mode.value === "operation") {
+        minWidth = 140;
+        maxWidth = 240;
+      }
       const visualLength = (value) => Array.from(String(value ?? "")).reduce(
         (sum, char) => sum + (char.charCodeAt(0) > 255 ? 2 : 1),
         0,
       );
-      const sampleLengths = results.value.slice(0, 100).map((result) => visualLength(cell(result, c)));
-      const desired = (Math.max(visualLength(c.label), ...sampleLengths, 1) * 7) + 28;
+      const sampleLengths = skillResults.value
+        .slice(0, 200)
+        .map((result) => visualLength(cell(result, c)))
+        .sort((a, b) => a - b);
+      const representativeIndex = Math.max(0, Math.ceil(sampleLengths.length * 0.8) - 1);
+      const representativeLength = sampleLengths[representativeIndex] || 1;
+      const desired = (Math.max(visualLength(c.label), representativeLength) * 7) + 28;
       return Math.max(minWidth, Math.min(maxWidth, desired));
     }
 
     const resultTableWidth = computed(
-      () => 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0)
+      () => 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0)
     );
+
+    function isFrozenResultColumn(column) {
+      return mode.value === "operation" && ["item_id", "query"].includes(column.key);
+    }
+
+    function frozenResultColumnStyle(column, columnIndex) {
+      if (!isFrozenResultColumn(column)) return {};
+      const left = 48 + resultCols.value
+        .slice(0, columnIndex)
+        .reduce((sum, previous) => sum + columnWidth(previous), 0);
+      return { left: `${left}px` };
+    }
 
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
@@ -401,16 +522,16 @@ createApp({
         if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
 
-    const pageCount = computed(() => Math.max(1, Math.ceil(filteredResults.value.length / pageSize)));
+    const pageCount = computed(() => Math.max(1, Math.ceil(filteredResults.value.length / resultPageSize.value)));
     const pagedResults = computed(() => {
       const safePage = Math.min(resultPage.value, pageCount.value);
-      const start = (safePage - 1) * pageSize;
-      return filteredResults.value.slice(start, start + pageSize);
+      const start = (safePage - 1) * resultPageSize.value;
+      return filteredResults.value.slice(start, start + resultPageSize.value);
     });
 
     const fallbackStat = computed(() => {
@@ -460,6 +581,7 @@ createApp({
     function setTablePage(kind, requestedPage) {
       const configs = {
         result: [resultPage, pageCount, resultJumpPage],
+        operation: [opPage, opPageCount, opJumpPage],
         preview: [previewPage, previewPageCount, previewJumpPage],
         progress: [progressPage, progressPageCount, progressJumpPage],
       };
@@ -475,6 +597,9 @@ createApp({
     function changePage(delta) {
       setTablePage("result", resultPage.value + delta);
     }
+    function changeOpPage(delta) {
+      setTablePage("operation", opPage.value + delta);
+    }
     function changePreviewPage(delta) {
       setTablePage("preview", previewPage.value + delta);
     }
@@ -484,10 +609,17 @@ createApp({
     function jumpTablePage(kind) {
       const jumpValues = {
         result: resultJumpPage.value,
+        operation: opJumpPage.value,
         preview: previewJumpPage.value,
         progress: progressJumpPage.value,
       };
       setTablePage(kind, jumpValues[kind]);
+    }
+
+    function changeResultPageSize() {
+      if (![10, 20, 50].includes(resultPageSize.value)) resultPageSize.value = 10;
+      resultPage.value = 1;
+      resultJumpPage.value = "";
     }
 
     function trunc(v) {
@@ -497,11 +629,25 @@ createApp({
     }
 
     function defaultJudgeSelection(targetMode) {
-      if (targetMode === "operation") {
-        const endUserJudge = judges.value.find((judge) => judge.persona === "end_user");
+      if (["single", "operation", "rich_content"].includes(targetMode)) {
+        const endUserJudge = terminalUserJudge();
         if (endUserJudge) return [endUserJudge.name];
       }
+      if (targetMode === "rich_content_quality") {
+        // 综合评测：挂卡识别默认用第一位裁判，回答评测默认选所有非产品专家
+        visualJudge.value = judges.value.length ? judges.value[0].name : "";
+        const rubricJudges = judges.value
+          .filter((j) => j.persona !== "product_expert")
+          .map((j) => j.name);
+        return rubricJudges.length ? rubricJudges : (judges.value.length ? [judges.value[0].name] : []);
+      }
       return judges.value.length ? [judges.value[0].name] : [];
+    }
+
+    function terminalUserJudge() {
+      return judges.value.find(
+        (judge) => String(judge.display || "").trim() === "终端用户",
+      ) || judges.value.find((judge) => judge.persona === "end_user");
     }
 
     function switchMode(k) {
@@ -513,11 +659,18 @@ createApp({
       errors.value = [];
       fileText.value = "";
       isJsonl.value = false;
+      datasetName.value = "";
+      if (["operation", "rich_content", "rich_content_quality"].includes(k)) {
+        opItems.value = [newOpItem()];
+        opPage.value = 1;
+        opJumpPage.value = "";
+      }
     }
 
     function onFile(e) {
       const f = e.target.files[0];
       if (!f) return;
+      datasetName.value = f.name || "";
       const r = new FileReader();
       r.onload = () => {
         fileText.value = r.result;
@@ -527,12 +680,21 @@ createApp({
       r.readAsText(f, "utf-8");
     }
 
-    // —— 操作类评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
+    // —— 任务类（录屏）评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
     function newOpItem() {
-      return { id: "", query: "", context: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, contentStartTime: null, contentEndTime: null, sourceLine: null, sourceData: null, uploading: false, uploadError: "" };
     }
-    function addOpItem() { opItems.value.push(newOpItem()); }
-    function removeOpItem(i) { if (opItems.value.length > 1) opItems.value.splice(i, 1); }
+    function addOpItem() {
+      opItems.value.push(newOpItem());
+      opPage.value = Math.ceil(opItems.value.length / opPageSize);
+      opJumpPage.value = "";
+    }
+    function removeOpItem(i) {
+      if (opItems.value.length <= 1) return;
+      opItems.value.splice(i, 1);
+      opPage.value = Math.min(opPage.value, Math.max(1, Math.ceil(opItems.value.length / opPageSize)));
+      opJumpPage.value = "";
+    }
     async function uploadVideo(i, file) {
       const it = opItems.value[i];
       if (!file) return;
@@ -540,7 +702,7 @@ createApp({
       it.uploading = true; it.uploadError = "";
       const fd = new FormData(); fd.append("file", file);
       try {
-        const r = await fetch("/api/upload/video", { method: "POST", body: fd });
+        const r = await fetch(`/api/upload/video?mode=${encodeURIComponent(mode.value)}`, { method: "POST", body: fd });
         if (!r.ok) { it.uploadError = "上传失败 " + r.status; return; }
         const d = await r.json();
         it.videoName = file.name;
@@ -565,16 +727,19 @@ createApp({
       const file = e.target.files && e.target.files[0];
       e.target.value = "";
       if (!file) return;
+      datasetName.value = file.name || "";
       opPreparing.value = true;
       errors.value = [];
       items.value = [];
       opItems.value = [newOpItem()];
+      opPage.value = 1;
+      opJumpPage.value = "";
       try {
         const content = await file.text();
         const parseResponse = await fetch("/api/parse", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "operation", jsonl: content }),
+          body: JSON.stringify({ mode: mode.value, jsonl: content }),
         });
         const parsed = await parseResponse.json().catch(() => ({}));
         if (!parseResponse.ok) throw new Error(parsed.detail || "JSONL 解析请求失败");
@@ -593,12 +758,18 @@ createApp({
             id: item.id || "",
             query: item.query || "",
             context: item.context || "",
+            category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || "",
-            answer: item.answer || "",
+            answer: (mode.value === "rich_content" || mode.value === "rich_content_quality") ? (item.answer_text || "") : (item.answer || ""),
             taskStartTime: item.task_start_time ?? null,
             taskEndTime: item.task_end_time ?? null,
+            contentStartTime: item.content_start_time ?? null,
+            contentEndTime: item.content_end_time ?? null,
+            sourceLine: item.source_line ?? null,
+            sourceData: item.source_data || null,
           }));
+          opPage.value = 1;
         }
       } catch (error) {
         errors.value = ["批量导入失败：" + (error?.message || String(error))];
@@ -608,7 +779,7 @@ createApp({
     }
 
     const canSubmit = computed(() => {
-      if (mode.value === "operation")
+      if (isVideoMode.value)
         return !opPreparing.value && opItems.value.some(
           (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
         );
@@ -633,29 +804,39 @@ createApp({
 
     async function submit() {
       runError.value = "";
-      if (mode.value === "operation") {
+      if (isVideoMode.value) {
         const valid = opItems.value.filter(
           (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
         );
         if (!valid.length) {
-          alert("请为每题填写操作意图(query)，并提供视频路径或上传视频后再评估。");
+          alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
           return;
         }
         items.value = valid.map((it, idx) => {
           const item = {
-            id: it.id || `op${idx + 1}`,
+            id: it.id || `${mode.value === "operation" ? "op" : "rich"}${idx + 1}`,
             query: it.query.trim(),
             context: (it.context || "").trim(),
-            answer: (it.answer || "").trim(),
-            category: "operation",
             video_path: it.videoPath,
           };
+          if (mode.value === "operation") {
+            item.category = "operation";
+            item.answer = (it.answer || "").trim();
+          } else {
+            // rich_content / rich_content_quality
+            item.category = (it.category || "").trim() || "default";
+            item.answer_text = (it.answer || "").trim();
+          }
           if ((it.frames || []).length) {
             item.media = [it.videoPath];
             item.frames = it.frames;
           }
           if (Number.isFinite(it.taskStartTime)) item.task_start_time = it.taskStartTime;
           if (Number.isFinite(it.taskEndTime)) item.task_end_time = it.taskEndTime;
+          if (Number.isFinite(it.contentStartTime)) item.content_start_time = it.contentStartTime;
+          if (Number.isFinite(it.contentEndTime)) item.content_end_time = it.contentEndTime;
+          if (Number.isFinite(it.sourceLine)) item.source_line = it.sourceLine;
+          if (it.sourceData) item.source_data = it.sourceData;
           return item;
         });
         errors.value = [];
@@ -695,8 +876,12 @@ createApp({
       const body = {
         mode: mode.value,
         items: items.value,
+        dataset_name: datasetName.value || (isVideoMode.value ? "手动录入" : (isJsonl.value ? "未命名数据集.jsonl" : "文本输入")),
         options: {
-          judges: selectedJudges.value,
+          judges: mode.value === "operation"
+            ? defaultJudgeSelection("operation")
+            : selectedJudges.value,
+          visual_judge: visualJudge.value,
           model: selectedModel.value,
           concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
@@ -848,6 +1033,7 @@ createApp({
         return v === true ? "✓ 一致" : v === false ? "✗ 不一致" : "?";
       }
       if (c.key === "used_search") return v ? "是" : "否";
+      if (c.key === "is_low_level") return v === "yes" ? "是" : "否";
       if (c.key === "latency_s") return v != null ? v + "秒" : "";
       if (c.key === "truncated") return v ? "⚠️是(强制判定)" : "";
       if (c.key === "arbitrated") return v ? `⚖️是(${r.arbitrator_confidence ?? "-"})` : "";
@@ -855,9 +1041,31 @@ createApp({
       if (c.key === "winner") return v === "a" ? "A" : v === "b" ? "B" : "平";
       if (c.key === "correctness") {
         if (mode.value === "operation")
-          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 部分/非完美", unclear: "? 无法判断" }[v] || v) || "";
+          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 完成但有瑕疵", unclear: "? 无法判断" }[v] || v) || "";
         return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
       }
+      if (["card_types", "card_contents", "superlink_texts"].includes(c.key)) {
+        return Array.isArray(v) ? v.join("；") : (v || "");
+      }
+      if (c.key === "card_presence" || c.key === "superlink_presence") {
+        return ({ present: "有", absent: "无", unclear: "不确定" }[v] || v) || "";
+      }
+      if (c.key === "card_suitability") {
+        return ({
+          suitable: "合适",
+          partially_suitable: "部分合适",
+          unsuitable: "不合适",
+          unclear: "不确定",
+          not_applicable: "N/A",
+        }[v] || v) || "";
+      }
+      if (c.key === "answer_coverage") {
+        return ({ complete: "完整", partial: "部分", unclear: "不确定" }[v] || v) || "";
+      }
+      if (c.key === "superlink_count_type") {
+        return ({ exact: "精确", lower_bound: "至少", unknown: "未知" }[v] || v) || "";
+      }
+      if (c.key === "needs_review") return v ? "是" : "否";
       if (v == null) return "";
       return v;
     }
@@ -974,9 +1182,40 @@ createApp({
         const r = await fetch("/api/history?limit=50");
         const d = await r.json();
         historyItems.value = d.items || [];
+        historyNoteDrafts.value = Object.fromEntries(
+          historyItems.value.map((item) => [item.task_id, item.note || ""]),
+        );
+        historyNoteEditing.value = {};
       } finally {
         loadingHistory.value = false;
       }
+    }
+
+    function editHistoryNote(item) {
+      historyNoteDrafts.value[item.task_id] = item.note || "";
+      historyNoteEditing.value[item.task_id] = true;
+    }
+
+    function cancelHistoryNote(item) {
+      historyNoteDrafts.value[item.task_id] = item.note || "";
+      historyNoteEditing.value[item.task_id] = false;
+    }
+
+    async function saveHistoryNote(item) {
+      const note = String(historyNoteDrafts.value[item.task_id] || "").trim();
+      const response = await fetch(`/api/history/${item.task_id}/note`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert("备注保存失败：" + (data.detail || "未知错误"));
+        return;
+      }
+      item.note = data.note || "";
+      historyNoteDrafts.value[item.task_id] = item.note;
+      historyNoteEditing.value[item.task_id] = false;
     }
 
     async function delHistory(id) {
@@ -1003,6 +1242,7 @@ createApp({
       const d = await r.json();
       taskId.value = d.task_id || id;
       mode.value = d.mode || mode.value;
+      datasetName.value = d.dataset_name || "";
       items.value = d.items || [];
       results.value = d.results || [];
       itemProgress.value = d.item_progress || {};
@@ -1032,6 +1272,14 @@ createApp({
     function exportXlsx() {
       window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
     }
+    function exportFrames() {
+      window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
+    }
+    function itemArtifactUrl(result, format) {
+      const index = Number(result && result.index);
+      if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
+      return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
+    }
 
     onMounted(async () => {
       progressClockTimer = window.setInterval(() => {
@@ -1051,21 +1299,22 @@ createApp({
     });
 
     return {
-      modes, mode, text, items, errors, judges, models, selectedJudges, selectedModel,
+      modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
-      historyItems, loadingHistory, pageSize,
+      historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      opPage, opPageSize, opPageCount, opJumpPage,
       previewPage, previewPageCount, previewJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
-      activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage,
+      activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
-      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, opPreparing, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, exportCsv, exportJson, exportXlsx, addOpItem, removeOpItem, onOpVideo, onOpDrop,
-      loadHistory, loadHistoryTask, delHistory, formatTime,
+      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
+      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
-      changePreviewPage, changeProgressPage, paginationPages, setTablePage, jumpTablePage,
+      changePreviewPage, changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,

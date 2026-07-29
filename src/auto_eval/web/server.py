@@ -9,18 +9,32 @@ import json
 import uuid
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from ..config import load_config
 from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
 from .parse_input import Mode, parse_jsonl, parse_text
-from .history import build_xlsx, delete_snapshot, export_rows, list_snapshots, load_snapshot, rows_to_csv, snapshot_payload, task_to_snapshot
+from .history import (
+    build_xlsx,
+    delete_snapshot,
+    export_rows,
+    list_snapshots,
+    load_item_judge_calls,
+    load_snapshot,
+    rows_to_csv,
+    save_task,
+    snapshot_payload,
+    task_to_snapshot,
+    write_frames_zip,
+)
 from .operation_media import (
     VIDEO_EXTENSIONS,
     operation_video_roots,
@@ -60,11 +74,16 @@ class EvalReq(BaseModel):
     mode: Mode
     items: list[dict]
     options: dict = {}
+    dataset_name: str = ""
 
 
 class OperationPrepareReq(BaseModel):
     items: list[dict]
     concurrency: int = 2
+
+
+class HistoryNoteReq(BaseModel):
+    note: str = ""
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
@@ -151,7 +170,12 @@ async def api_eval(req: EvalReq):
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
     _validate_eval_request(req, app_cfg)
-    task = new_task(req.mode, req.items, req.options)
+    task = new_task(
+        req.mode,
+        req.items,
+        req.options,
+        dataset_name=req.dataset_name.strip(),
+    )
     async def _start_later():
         # 先把 task_id 响应给前端，再启动可能较重的评估任务；
         # 避免后台裁判/工具调用抢占事件循环，导致 /api/eval 本身迟迟不返回。
@@ -198,8 +222,8 @@ async def api_prepare_operation(req: OperationPrepareReq):
     }
 
 @app.post("/api/upload/video")
-async def api_upload_video(file: UploadFile = File(...)):
-    """操作类评测：上传录屏 → 存盘 → 场景抽帧 → 返回帧路径列表（供 /api/eval 的 item 引用）。"""
+async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation"):
+    """上传视觉评估录屏；富内容模式延迟到开始评估时使用专用参数抽帧。"""
     data = await file.read()
     if len(data) > 20 * 1024 * 1024:
         raise HTTPException(413, "视频过大，限制 ≤20MB")
@@ -209,9 +233,17 @@ async def api_upload_video(file: UploadFile = File(...)):
     suffix = Path(file.filename or "v.mp4").suffix.lower() or ".mp4"
     video_path = video_dir / f"{video_id}{suffix}"
     video_path.write_bytes(data)
+    duration = probe_duration(video_path)
+    if mode == "rich_content":
+        return {
+            "video_id": video_id,
+            "video_path": str(video_path),
+            "frames": [],
+            "frame_count": 0,
+            "duration": round(duration, 2),
+        }
     frame_dir = video_dir / f"{video_id}_frames"
     frames = extract_scene_keyframes(video_path, frame_dir)
-    duration = probe_duration(video_path)
     return {
         "video_id": video_id,
         "video_path": str(video_path),
@@ -284,6 +316,20 @@ def api_history_delete(task_id: str):
     return {"ok": True}
 
 
+@app.patch("/api/history/{task_id}/note")
+def api_history_note(task_id: str, req: HistoryNoteReq):
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "task not found")
+    note = req.note.strip()
+    if len(note) > 1000:
+        raise HTTPException(422, "备注不能超过 1000 个字符")
+    task.note = note
+    if not save_task(task):
+        raise HTTPException(500, "备注保存失败")
+    return {"ok": True, "task_id": task.id, "note": task.note}
+
+
 @app.get("/api/eval/{task_id}/export")
 def api_export(task_id: str, format: str = "json"):
     task = get_task(task_id)
@@ -302,6 +348,23 @@ def api_export(task_id: str, format: str = "json"):
             headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.xlsx"},
         )
 
+    if format in {"frames", "frames_zip"}:
+        export_dir = RUNS_DIR / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = export_dir / f".{task_id}.{uuid.uuid4().hex}.zip"
+        write_frames_zip(data, archive_path)
+        raw_name = Path(str(data.get("dataset_name") or f"eval_{task_id}")).stem
+        safe_name = "".join(
+            char if char.isalnum() or char in "-_. " else "_"
+            for char in raw_name
+        ).strip(" ._") or f"eval_{task_id}"
+        return FileResponse(
+            archive_path,
+            media_type="application/zip",
+            filename=f"{safe_name}_frames.zip",
+            background=BackgroundTask(archive_path.unlink, missing_ok=True),
+        )
+
     sheets = export_rows(data, cfg())
     csv_text = rows_to_csv(sheets.get("逐题结果") or [])
     return StreamingResponse(
@@ -309,6 +372,79 @@ def api_export(task_id: str, format: str = "json"):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.csv"},
     )
+
+
+def _download_stem(value: str, fallback: str) -> str:
+    safe = "".join(
+        char if char.isalnum() or char in "-_. " else "_"
+        for char in value
+    ).strip(" ._")
+    return safe[:120] or fallback
+
+
+@app.get("/api/eval/{task_id}/items/{item_index}/export")
+def api_export_item(task_id: str, item_index: int, format: str):
+    """导出单条结果关联的原视频、关键帧或裁判调用 JSON。"""
+    task = get_task(task_id)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "task not found")
+    items = data.get("items") or []
+    if item_index < 0 or item_index >= len(items):
+        raise HTTPException(404, "item not found")
+    item = items[item_index]
+    raw_id = str(item.get("id") or f"q{item_index + 1}")
+    stem = _download_stem(
+        f"{item_index + 1:03d}_{raw_id}",
+        f"{item_index + 1:03d}_item",
+    )
+
+    if format == "video":
+        raw_path = str(item.get("video_path") or "").strip()
+        if not raw_path:
+            media = item.get("media") or []
+            raw_path = str(media[0]).strip() if media else ""
+        if not raw_path:
+            raise HTTPException(404, "该条结果没有原始视频路径")
+        try:
+            video_path = _resolve_operation_video_path(raw_path)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return FileResponse(
+            video_path,
+            filename=f"{stem}{video_path.suffix.lower()}",
+        )
+
+    if format in {"frames", "frames_zip"}:
+        export_dir = RUNS_DIR / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = export_dir / (
+            f".{task_id}.{item_index}.{uuid.uuid4().hex}.zip"
+        )
+        write_frames_zip(data, archive_path, item_indexes={item_index})
+        return FileResponse(
+            archive_path,
+            media_type="application/zip",
+            filename=f"{stem}_frames.zip",
+            background=BackgroundTask(archive_path.unlink, missing_ok=True),
+        )
+
+    if format in {"judge", "judge_calls"}:
+        payload = load_item_judge_calls(data, item_index)
+        content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        return Response(
+            content,
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename*=UTF-8''"
+                    f"{quote(f'{stem}_judge_calls.json')}"
+                ),
+            },
+        )
+
+    raise HTTPException(400, "format 必须是 video、frames_zip 或 judge_calls")
+
 
 @app.get("/")
 def index():

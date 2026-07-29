@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from auto_eval.config import load_config
+from auto_eval.judges.operation_fields import normalize_operation_fields
 from auto_eval.judges.rubric_judge import _flatten_rubric
 from auto_eval.judges.prompts import OPERATION_SYSTEM, OPERATION_USER
 
@@ -48,21 +49,23 @@ def test_operation_prompt_distinguishes_simple_and_complex_tasks() -> None:
     assert "复杂多任务" in prompt
     assert "简单单任务" not in prompt
     assert "不要把 query 拆成多个独立评测 case" in prompt
-    assert "复杂多任务中至少一项 query 明确要求的结果已有第1类证据证明完成" in prompt
-    assert "不得自行挑选某一项作为所谓核心任务而改判 wrong" in prompt
-    assert "复杂多任务中没有任何一项 query 明确要求的结果完成" in prompt
+    assert "复杂多任务中任意一项 query 明确要求的结果未完成" in prompt
+    assert "其他任务已经成功" in prompt
+    assert "任一目标未完成即 wrong" in prompt
 
 
 def test_operation_prompt_defines_strict_partial_and_special_cases() -> None:
     _, prompt = _operation_prompt()
 
-    assert "结果已完成但在当前任务有效时间窗内存在少量冗余" in prompt
-    assert "只需用户点击一次时，应判 partial" in prompt
+    assert "结果完成但过程有瑕疵" in prompt
+    assert "partial 的前提是整个 query 的所有结果都已完成" in prompt
+    assert "简单任务的最终动作未执行" in prompt
+    assert "即使只差最后一次保存、确认、开启、拍摄或发送" in prompt
     assert "操作前已经满足且有画面证据，也判 right" in prompt
-    assert "不能把 agent 文字声明、“正在操作/已结束操作”卡片" in prompt
-    assert "只能看到 agent 文字声称完成或“已结束操作”卡片，应判 unclear" in prompt
+    assert "仅有文字声明、操作卡片或口头指导而无第1类最终状态证据" in prompt
+    assert "仅文字无状态证据" in prompt
     assert "待权限授权" in prompt
-    assert "画面证据不足" in prompt
+    assert "录屏证据缺失" in prompt
     assert '"操作完成度": {"total": <1-5 整数>, "reason":' in prompt
     assert '"步骤正确性": {"total": <1-5 整数>, "reason":' in prompt
 
@@ -93,17 +96,17 @@ def test_operation_prompt_has_pre_output_correctness_gates() -> None:
 
     assert "【输出前硬校验】" in prompt
     assert "写不出则禁止输出 right" in prompt
-    assert "只有计划、尝试、操作卡片、文字声明、应用首页、图库选择器" in prompt
-    assert "外部条件缺失导致，就禁止输出 wrong" in prompt
+    assert "任一目标未完成、只差最后一步、只有计划/尝试/文字声明时" in prompt
+    assert "若失败确由输入缺失、必要授权、账号、硬件、设备能力或样本损坏导致" in prompt
     assert "不得仅因为缺少状态变化前后对比而降为 unclear" in prompt
 
 
 def test_operation_prompt_prioritizes_blockers_and_fact_verification() -> None:
     _, prompt = _operation_prompt()
 
-    assert "SIM 卡等硬件" in prompt
-    assert "外部完成条件缺失时 unclear 优先于 wrong" in prompt
-    assert "复杂多任务只要有必要子任务因这类条件被阻塞，也优先判 unclear" in prompt
+    assert "设备、账号、硬件或应用客观不具备完成条件" in prompt
+    assert "必须等待用户授权、登录、选择、确认" in prompt
+    assert "unclear 不是普通未完成的兜底" in prompt
     assert "出现“WebSearch/搜索完成”不等于事实正确" in prompt
     assert "事实结果无法核验" in prompt
 
@@ -121,14 +124,13 @@ def test_operation_prompt_ignores_recording_infrastructure() -> None:
     assert any("录屏工具自身的计时" in criterion for criterion in operation.rubrics[1].criteria)
 
 
-def test_operation_prompt_restricts_simple_partial_to_one_final_action() -> None:
+def test_operation_prompt_marks_missing_final_action_wrong() -> None:
     operation, prompt = _operation_prompt()
 
-    assert "直接执行最终动作" in prompt
-    assert "不需要用户再选择目标、回答问题、授权、登录或补充任何信息" in prompt
-    assert "应用首页、图库选择器或仍需多步导航的中间页面" in prompt
+    assert "最终动作尚未执行，应判 wrong" in prompt
+    assert "停在可直接执行去水印/保存的最后一步，判 wrong" in prompt
     assert "已进入相机录像模式，仍显示可点击的红色圆形开始按钮" in prompt
-    assert operation.rubrics[0].score_anchors[3].startswith("简单任务已到达直接执行最终动作")
+    assert operation.rubrics[0].score_anchors[3].startswith("已完成主要过程")
 
 
 def test_operation_user_prompt_repeats_recording_noise_warning() -> None:
@@ -142,12 +144,38 @@ def test_operation_user_prompt_repeats_recording_noise_warning() -> None:
 def test_operation_prompt_prioritizes_pending_user_input_as_unclear() -> None:
     _, prompt = _operation_prompt()
 
-    assert "unclear 优先于 partial 和 wrong" in prompt
-    assert "是否新建/覆盖/发送" in prompt
+    assert "必须等待用户授权、登录、选择、确认" in prompt
     assert "未找到该笔记，是否新建后记录" in prompt
     assert "只打开图库并等待用户选择具体照片后才能去水印" in prompt
-    assert "只要 agent 正在等待用户回答/选择/确认" in prompt
+    assert "query 本身缺少必要信息" in prompt
+    assert "最终因用户未确认而超时终止" in prompt
+    assert "用户未授权或未确认导致超时必须判 unclear" in prompt
     assert "最终状态证据略弱" not in prompt
+
+
+def test_operation_prompt_requires_error_type_and_low_level_flag() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "只要 correctness 不是 right，error_type 必须输出一个非空标签" in prompt
+    assert "【是否低级 is_low_level】" in prompt
+    assert "right 和 unclear 固定输出 no" in prompt
+    assert "如果任务形态是复杂多任务，is_low_level 固定输出 no" in prompt
+    assert "不要因为结果是 wrong 就自动输出 yes" in prompt
+    assert '"task_type": "simple|complex"' in prompt
+    assert '"is_low_level": "yes|no"' in prompt
+
+
+def test_operation_output_fields_are_normalized() -> None:
+    assert normalize_operation_fields("right", "路径错误", "yes") == (None, "no")
+    assert normalize_operation_fields("wrong", None, True) == ("未归因", "yes")
+    assert normalize_operation_fields("partial", "路径冗余", "是") == ("路径冗余", "yes")
+    assert normalize_operation_fields("unclear", "待权限授权", "yes") == ("待权限授权", "no")
+    assert normalize_operation_fields(
+        "wrong",
+        "仅文字无状态证据",
+        "yes",
+        "complex",
+    ) == ("仅文字无状态证据", "no")
 
 
 def test_operation_total_reason_output_is_flattened_with_reasons() -> None:

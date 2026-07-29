@@ -1,6 +1,7 @@
 """裁判可用的工具：web_search / fetch_page / calculate / python_run。
 
-- web_search：Tavily/SerpAPI/Bing 三选一联网搜索；
+- web_search：Tavily/SerpAPI/Bing 三选一联网搜索，外加内部搜索代理
+  google（HMAC-SHA256 认证）和 search_plan_internal（搜索规划引擎）；
 - fetch_page：抓取网页正文，深挖核实；
 - calculate：安全求值算术表达式（AST 白名单），核查计算题；
 - python_run：受限执行 Python（子进程+超时），核查编程/逻辑题（默认关，注意安全）。
@@ -8,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import operator
 import os
 import subprocess
@@ -15,9 +17,12 @@ import sys
 import time
 from functools import partial
 from urllib.parse import quote
+from os import urandom
+import hashlib, hmac, uuid
 
 import httpx
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
 
 WEB_SEARCH_TOOL = {
     "type": "function",
@@ -71,14 +76,15 @@ PYTHON_RUN_TOOL = {
     },
 }
 
-_KEY_ENV = {"tavily": "TAVILY_API_KEY", "serpapi": "SERPAPI_API_KEY", "bing": "BING_API_KEY", "jina": "JINA_API_KEY"}
-
+_KEY_ENV = {"tavily": "TAVILY_API_KEY", "serpapi": "SERPAPI_API_KEY", "bing": "BING_API_KEY", "jina": "JINA_API_KEY",
+            "google": "GOOGLE_INTERNAL_API_KEY", "search_plan_internal": "SEARCH_PLAN_INTERNAL_API_KEY"}
 
 def _search_tavily(query: str, topk: int, key: str) -> list[dict]:
     r = httpx.post(
         "https://api.tavily.com/search",
         json={"api_key": key, "query": query, "max_results": topk},
         timeout=20.0,
+        verify=False,  # 企业代理可能导致证书问题
     )
     r.raise_for_status()
     data = r.json()
@@ -137,7 +143,108 @@ def _search_jina(query: str, topk: int, key: str) -> list[dict]:
     return [{"url": "", "title": "Jina聚合搜索", "snippet": text[:1500]}]
 
 
-_SEARCH_FUNCS = {"tavily": _search_tavily, "serpapi": _search_serpapi, "bing": _search_bing, "jina": _search_jina}
+def _search_google(query: str, topk: int, key: str) -> list[dict]:
+    """内部 Google 搜索代理（HMAC-SHA256 认证）。
+
+    使用 requests 而非 httpx：该 API 的 body header 包含非 ASCII 内容，
+    httpx 的 header 编码校验严格导致 504，而 requests 兼容良好。
+    """
+
+    _GOOGLE_INTERNAL_HOST = "http://10.31.22.115:51516/Opendata_Platform/test/v1/query/get_google_result"
+    _GOOGLE_INTERNAL_CP_ID = "56EFB6A2012FD215"
+
+    body = {
+        "country": "cn", "dev": "pc", "engine": "google", "lang": "zh",
+        "page": 20, "query": query, "tbm": "all",
+        "hasContent": "true", "requestTime": 6, "cacheTime": 1,
+    }
+
+    body_json = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    random = urandom(32).hex().upper()
+    timestamp = str(int(time.time() * 1000))
+    msg = timestamp + random + body_json
+
+    hmac_digest = hmac.new(key.encode("utf-8"), msg.encode("utf-8"), digestmod=hashlib.sha256).digest()
+    auth_code = hmac_digest.hex().upper()
+
+    body_encoded = body_json.encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "timestamp": timestamp, "authCode": auth_code, "random": random,
+        "cpId": _GOOGLE_INTERNAL_CP_ID,
+        "body": body_encoded.decode("latin-1"),  # requests 兼容 latin-1 编码的非 ASCII header
+    }
+
+    r = requests.post(_GOOGLE_INTERNAL_HOST, headers=headers, data=body_encoded, timeout=20, verify=False)
+    r.raise_for_status()
+    data = (r.json()).get("data", [])
+    if not data:
+        return []
+    results: list[dict] = []
+    for item in data:
+        content = item.get("content", "")
+        if content is None:
+            continue
+        results.append({
+            "url": item.get("url", item.get("link", "")),
+            "title": item.get("title", ""),
+            "snippet": content,
+        })
+    return results[:topk]
+
+
+def _search_search_plan_internal(query: str, topk: int, key: str) -> list[dict]:
+    """内部搜索规划引擎（HMAC-SHA256 认证），从 webreader_candidates 提取结果。"""
+
+    _SEARCH_PLAN_HOST = "http://10.97.130.186:3399/search-gpt"
+    _SEARCH_PLAN_SOURCE = "CC002600"
+
+    sn = f"auto_eval_agent_{uuid.uuid4().hex[:8]}_{int(time.time() * 1000)}"
+    req_body = {
+        "query": query, "sn": "document_" + sn, "from": _SEARCH_PLAN_SOURCE,
+        "sregion": "cn",
+        "need_box_ids": [
+            "108", "1801", "1311", "109", "200", "9003", "9007", "2601", "2602",
+            "11004", "1200", "1221", "1260", "1430", "1002", "1000", "1001",
+            "1112", "1113", "1114", "105", "1301", "1448", "1449", "1012",
+            "1014", "1013", "1011", "2100", "2102", "2103", "1211", "1230",
+            "1310", "1250", "8620", "8621", "8622", "8628", "1051", "4451",
+            "1053", "8400", "8401", "8402", "8410", "8411", "1900044",
+            "1900045", "1900046", "1900015", "1900011", "1900071", "1900006",
+            "1900070", "1900013", "1900040", "1900023", "9995", "7720", "7721",
+            "7722", "7723", "7724", "1900043", "2602", "9010",
+        ],
+    }
+
+    payload = json.dumps(req_body)
+    timestamp2 = str(int(time.time() * 1000))
+    value = f"timestamp={timestamp2}&url=/search-gpt&body={payload.replace(chr(10), '')}"
+    hmac_obj = hmac.new(key.encode("utf-8"), value.encode("utf-8"), hashlib.sha256)
+    headers = {
+        "Authorization": hmac_obj.hexdigest(),
+        "timestamp": timestamp2,
+        "Content-Type": "application/json",
+        "x-traffic-identity": "total_harmony",
+    }
+
+    try:
+        r = requests.post(_SEARCH_PLAN_HOST, headers=headers, data=payload.encode(), timeout=20)
+        r.raise_for_status()
+        data = (r.json()).get("results", {}).get("webreader_candidates", [])
+        results: list[dict] = []
+        for item in data:
+            if item.get("content"):
+                results.append({
+                    "url": item.get("url", item.get("link", "")),
+                    "title": item.get("title", ""),
+                    "snippet": item.get("content", ""),
+                })
+        return results[:topk]
+    except Exception:
+        return []
+
+_SEARCH_FUNCS = {"tavily": _search_tavily, "serpapi": _search_serpapi, "bing": _search_bing, "jina": _search_jina,
+                 "google": _search_google, "search_plan_internal": _search_search_plan_internal}
 
 _SEARCH_CACHE: dict[str, tuple[float, list[str]]] = {}
 _SEARCH_TTL = 3600  # 秒，相同 query 在 TTL 内复用结果（去重，省 API 调用）

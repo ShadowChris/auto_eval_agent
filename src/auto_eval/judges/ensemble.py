@@ -72,8 +72,22 @@ def aggregate_scores(
     total = sum(rubric_mean[k] * dim_weight.get(k, 1.0) for k in active_keys) / wsum if active_keys else 0.0
 
     correctness = _majority([s.correctness for s in scores]) or "unclear"
-    ets = [s.error_type for s in scores if s.error_type]
-    error_type = _majority(ets) if ets else None
+    if correctness == "right":
+        error_type = None
+    else:
+        # 只聚合同最终 correctness 一致的错因，平票时确定性回退到第一项。
+        ets = [s.error_type for s in scores if s.correctness == correctness and s.error_type]
+        error_type = (_majority(ets) or ets[0]) if ets else None
+        if error_type is None and any(dim.name == "操作完成度" for dim in dims):
+            error_type = "证据冲突" if correctness == "unclear" else "未归因"
+    low_level_votes = [
+        s.is_low_level
+        for s in scores
+        if s.correctness == correctness and s.is_low_level in {"yes", "no"}
+    ]
+    is_low_level = "yes" if low_level_votes.count("yes") > low_level_votes.count("no") else "no"
+    if correctness in {"right", "unclear"}:
+        is_low_level = "no"
 
     # 多裁判一致率：correctness 最多类占比
     corr = [s.correctness for s in scores]
@@ -97,6 +111,9 @@ def aggregate_scores(
         if parts:
             rubric_reasons[k] = " | ".join(parts[:3])
 
+    # 取第一个裁判的 top_issue 字段
+    first = scores[0]
+
     return Verdict(
         item_id=scores[0].item_id,
         model=scores[0].model,
@@ -106,7 +123,12 @@ def aggregate_scores(
         total=total,
         correctness=correctness,
         error_type=error_type,
+        is_low_level=is_low_level,
         rationale=" | ".join(f"[{s.judge}] {s.rationale}" for s in scores[:3]),
+        top_issue_1_dim=first.top_issue_1_dim,
+        top_issue_2_dim=first.top_issue_2_dim,
+        top_issue_3_dim=first.top_issue_3_dim,
+        top_issues_desc=first.top_issues_desc,
         n_judges=len(by_judge),
         judges_agreement=agree,
         repeat_std=repeat_std,

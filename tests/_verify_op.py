@@ -1,4 +1,4 @@
-"""操作类评测改动综合自检：import 链 / schema / 模板 / runner 装配 / parse 防御 / multipart / 抽帧算法。"""
+"""任务类（录屏）评测改动综合自检：import 链 / schema / 模板 / runner 装配 / parse 防御 / multipart / 抽帧算法。"""
 import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 

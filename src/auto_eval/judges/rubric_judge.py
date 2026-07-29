@@ -15,6 +15,7 @@ from ..schema import EvalItem, SingleScore
 
 logger = logging.getLogger("auto_eval.classify")
 from .base import JudgeClient, JudgeOutputParseError
+from .operation_fields import normalize_operation_fields
 from .prompts import (
     OPERATION_SYSTEM,
     OPERATION_USER,
@@ -151,7 +152,7 @@ class RubricJudge:
             item.metadata.setdefault("category_source", "dataset")
         skill_dims, skill_rules, _ = (self.skill_router.match(item) if self.skill_router else (None, "", []))
         is_product_compare = (self.client.cfg.persona == "product_expert") and bool(competitor)
-        user_images: list[str] | None = None  # 操作类评测：关键帧 data_url 列表，其余模式为 None
+        user_images: list[str] | None = None  # 任务类评测：关键帧 data_url 列表，其余模式为 None
         user_image_refs: list[str] | None = None  # 关键帧本地路径（仅写入 trace 供回溯，不展示前端）
         if eval_mode == "operation":
             op_skill = self.skill_router.domain.get("operation") if self.skill_router else None
@@ -233,7 +234,22 @@ class RubricJudge:
         if correctness not in _VALID:
             correctness = "unclear"
         error_type = data.get("error_type")
+        is_low_level = data.get("is_low_level", "no")
+        if eval_mode == "operation":
+            task_type = data.get("task_type")
+            if "复杂多任务" in analysis:
+                task_type = "complex"
+            error_type, is_low_level = normalize_operation_fields(
+                correctness,
+                error_type,
+                is_low_level,
+                task_type,
+            )
         rationale = data.get("rationale", "")
+        top_issue_1_dim = data.get("top_issue_1_dim")
+        top_issue_2_dim = data.get("top_issue_2_dim")
+        top_issue_3_dim = data.get("top_issue_3_dim")
+        top_issues_desc = data.get("top_issues_desc")
 
         return SingleScore(
             item_id=item.id,
@@ -247,7 +263,12 @@ class RubricJudge:
             total=total,
             correctness=correctness,
             error_type=error_type,
+            is_low_level=is_low_level,
             rationale=rationale,
+            top_issue_1_dim=top_issue_1_dim,
+            top_issue_2_dim=top_issue_2_dim,
+            top_issue_3_dim=top_issue_3_dim,
+            top_issues_desc=top_issues_desc,
             analysis=analysis,
             used_search=reply.used_search,
             tool_trace=reply.tool_trace,
@@ -389,6 +410,7 @@ async def _classify(item: EvalItem, client, model: str, skill_router=None) -> st
                     ],
                     "temperature": 0,
                     "max_tokens": 200,
+                    "extra_body": {"enable_thinking": False}
                 },
                 total_timeout_s=15.0,
                 max_attempts=3,

@@ -24,6 +24,7 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+*.drawio.bkp
 
 # 临时测试脚本（按需保留）
 verify_*.py

@@ -168,13 +168,15 @@ def test_eval_error_keeps_original_and_repaired_model_outputs(tmp_path, monkeypa
     runner._write_eval_error(
         "task-1",
         1,
-        {"query": "q", "context": "c"},
+        {"id": "case-1", "query": "q", "context": "c"},
         error,
         request_id="2607052331_218ba6_q1",
     )
 
     record = json.loads((tmp_path / "eval_errors.jsonl").read_text(encoding="utf-8"))
     assert record["request_id"] == "2607052331_218ba6_q1"
+    assert record["item_id"] == "case-1"
+    assert record["query"] == "q"
     assert record["stage"] == "judge_json_parse"
     assert record["original_model_output"] == error.raw_output
     assert record["repair_model_output"] == error.repair_output
@@ -188,7 +190,7 @@ async def test_non_retriable_parse_error_does_not_restart_whole_item(monkeypatch
     task = Task(
         id="parse-error-no-restart",
         mode="single",
-        items=[{"query": "q", "answer": "a"}],
+        items=[{"id": "case-17", "query": "q", "answer": "a"}],
         options={"judges": [cfg.judges[0].name], "concurrency": 1},
     )
     calls = 0
@@ -206,7 +208,37 @@ async def test_non_retriable_parse_error_does_not_restart_whole_item(monkeypatch
 
     assert calls == 1
     assert len(task.results) == 1
+    assert task.results[0]["item_id"] == "case-17"
+    assert task.results[0]["query"] == "q"
     assert "ValueError" in task.results[0]["error"]
+
+
+def test_export_backfills_identity_for_historical_failed_results():
+    snapshot = {
+        "task_id": "historical-failure",
+        "mode": "operation",
+        "items": [
+            {"id": "fast_query_4", "query": "设置为静音"},
+            {"query": "打开24小时制"},
+        ],
+        "results": [
+            {"index": 0, "query": "设置为静音", "error": "provider failed"},
+            {"index": 1, "error": "video missing"},
+        ],
+        "summary": {},
+    }
+
+    sheets = history.export_rows(snapshot)
+
+    assert sheets["评估失败"][0]["item_id"] == "fast_query_4"
+    assert sheets["评估失败"][0]["query"] == "设置为静音"
+    assert sheets["评估失败"][1]["item_id"] == "q1"
+    assert sheets["评估失败"][1]["query"] == "打开24小时制"
+    assert [row["数据集序号"] for row in sheets["逐题结果"]] == [1, 2]
+    assert [
+        {key: value for key, value in row.items() if key != "数据集序号"}
+        for row in sheets["逐题结果"]
+    ] == sheets["评估失败"]
 
 
 @pytest.mark.asyncio
