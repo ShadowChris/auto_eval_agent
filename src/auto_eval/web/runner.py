@@ -559,6 +559,7 @@ async def _eval_one(
                 "挂卡数": out.get("card_count"),
                 "Superlink数": out.get("superlink_count"),
                 "需复核": out.get("needs_review"),
+                "是否解决问题": out.get("problem_solved"),
             },
             progress=90,
             progress_message="正在整理垂域视觉评测结果",
@@ -787,7 +788,7 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
 
 
 def _summarize_rich_content(task: Task) -> dict:
-    """汇总视觉发现，不使用问答类 correctness/准确率口径。"""
+    """汇总视觉发现与整体评价，不使用问答类 correctness/准确率口径。"""
     results = task.results
     ok = [row for row in results if "error" not in row]
     card_cases = [row for row in ok if row.get("card_presence") == "present"]
@@ -795,10 +796,9 @@ def _summarize_rich_content(task: Task) -> dict:
         row for row in ok if row.get("superlink_presence") == "present"
     ]
     complete = [row for row in ok if row.get("answer_coverage") == "complete"]
-    suitable = [
-        row for row in card_cases
-        if row.get("card_suitability") == "suitable"
-    ]
+    solved_ok = [row for row in ok if row.get("problem_solved") == "ok"]
+    solved_nok = [row for row in ok if row.get("problem_solved") == "nok"]
+    solved_review = [row for row in ok if row.get("problem_solved") == "need_review"]
     both = [
         row for row in ok
         if row.get("card_presence") == "present"
@@ -819,12 +819,18 @@ def _summarize_rich_content(task: Task) -> dict:
             "count": 0,
             "card_cases": 0,
             "superlink_cases": 0,
+            "solved_ok": 0,
+            "solved_nok": 0,
+            "solved_review": 0,
         })
         entry["count"] += 1
         entry["card_cases"] += int(row.get("card_presence") == "present")
         entry["superlink_cases"] += int(
             row.get("superlink_presence") == "present"
         )
+        entry["solved_ok"] += int(row.get("problem_solved") == "ok")
+        entry["solved_nok"] += int(row.get("problem_solved") == "nok")
+        entry["solved_review"] += int(row.get("problem_solved") == "need_review")
 
     return {
         "total": len(results),
@@ -836,10 +842,6 @@ def _summarize_rich_content(task: Task) -> dict:
             round(len(card_cases) / len(ok), 3) if ok else None
         ),
         "card_total": sum(int(row.get("card_count") or 0) for row in ok),
-        "card_suitable_count": len(suitable),
-        "card_suitable_rate": (
-            round(len(suitable) / len(card_cases), 3) if card_cases else None
-        ),
         "superlink_case_count": len(superlink_cases),
         "superlink_presence_rate": (
             round(len(superlink_cases) / len(ok), 3) if ok else None
@@ -851,6 +853,12 @@ def _summarize_rich_content(task: Task) -> dict:
         "neither_count": len(neither),
         "needs_review_count": sum(bool(row.get("needs_review")) for row in ok),
         "complete_coverage_count": len(complete),
+        "solved_ok": len(solved_ok),
+        "solved_nok": len(solved_nok),
+        "solved_review": len(solved_review),
+        "solved_ok_rate": (
+            round(len(solved_ok) / len(ok), 3) if ok else None
+        ),
         "by_category": sorted(
             by_category.values(),
             key=lambda entry: (-entry["count"], entry["category"]),

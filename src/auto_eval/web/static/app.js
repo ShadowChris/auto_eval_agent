@@ -399,18 +399,23 @@ createApp({
           { key: "query", label: "Query" },
           ...contextCols,
           { key: "category_display", label: "垂域" },
-          { key: "card_presence", label: "挂卡" },
-          { key: "card_count", label: "挂卡数" },
-          { key: "card_types", label: "挂卡类型" },
-          { key: "card_contents", label: "挂卡内容" },
-          { key: "card_suitability", label: "挂卡适配性" },
-          { key: "card_suitability_score", label: "适配分" },
-          { key: "superlink_presence", label: "Superlink" },
-          { key: "superlink_count", label: "链接数" },
-          { key: "superlink_count_type", label: "计数类型" },
-          { key: "superlink_texts", label: "链接文字" },
+          { key: "card_presence", label: "是否有卡片" },
+          { key: "card_count", label: "卡片数量" },
+          { key: "card_types", label: "卡片种类" },
+          { key: "card_contents", label: "卡片内容" },
+          { key: "superlink_presence", label: "Superlink是否存在" },
+          { key: "superlink_count", label: "Superlink数量" },
+          { key: "superlink_texts", label: "Superlink文字" },
+          { key: "card_suitability", label: "卡片是否合适" },
+          { key: "card_suitability_reason", label: "卡片不合适原因" },
+          { key: "superlink_suitability", label: "Superlink是否合适" },
+          { key: "superlink_suitability_reason", label: "Superlink不合适原因" },
           { key: "answer_coverage", label: "回答覆盖" },
           { key: "needs_review", label: "需人工复核" },
+          { key: "review_reason", label: "复核原因" },
+          { key: "problem_solved", label: "是否解决用户问题" },
+          { key: "problem_solved_reason", label: "评价原因" },
+          { key: "answer_issues", label: "回答内容问题" },
           { key: "rationale", label: "识别结论" },
           { key: "latency_s", label: "耗时" },
         ];
@@ -472,10 +477,10 @@ createApp({
         || [
           "correctness", "winner", "total", "used_search", "truncated", "arbitrated",
           "agree", "latency_s", "bidirectional_consistent", "is_low_level",
-          "card_presence", "card_count", "card_suitability_score", "superlink_presence",
-          "superlink_count", "answer_coverage", "needs_review",
+          "card_presence", "card_count", "superlink_presence",
+          "superlink_count", "answer_coverage", "needs_review", "problem_solved",
         ].includes(c.key);
-      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc"].includes(c.key);
+      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc", "answer_issues", "problem_solved_reason"].includes(c.key);
       let minWidth = compact ? 80 : textColumn ? 150 : 96;
       let maxWidth = compact ? 120 : c.key === "rationale" ? 380 : textColumn ? 320 : 200;
       if (c.key === "item_id") {
@@ -1048,16 +1053,15 @@ createApp({
         return Array.isArray(v) ? v.join("；") : (v || "");
       }
       if (c.key === "card_presence" || c.key === "superlink_presence") {
-        return ({ present: "有", absent: "无", unclear: "不确定" }[v] || v) || "";
+        return ({ present: "是", absent: "否", unclear: "不清楚" }[v] || v) || "";
       }
-      if (c.key === "card_suitability") {
-        return ({
-          suitable: "合适",
-          partially_suitable: "部分合适",
-          unsuitable: "不合适",
-          unclear: "不确定",
-          not_applicable: "N/A",
-        }[v] || v) || "";
+      if (c.key === "card_suitability" || c.key === "superlink_suitability") {
+        if (v === "ok") return "OK";
+        if (v === "nok") return "NOK";
+        return v || "";
+      }
+      if (c.key === "problem_solved") {
+        return ({ ok: "OK", nok: "NOK", need_review: "需复查" }[v] || v) || "";
       }
       if (c.key === "answer_coverage") {
         return ({ complete: "完整", partial: "部分", unclear: "不确定" }[v] || v) || "";
@@ -1065,7 +1069,7 @@ createApp({
       if (c.key === "superlink_count_type") {
         return ({ exact: "精确", lower_bound: "至少", unknown: "未知" }[v] || v) || "";
       }
-      if (c.key === "needs_review") return v ? "是" : "否";
+      if (c.key === "needs_review") return v ? "T" : "F";
       if (v == null) return "";
       return v;
     }

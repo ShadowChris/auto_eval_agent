@@ -221,6 +221,9 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
             _all_dim_names(results, cfg),
         ),
     }
+    if mode == "rich_content":
+        # 垂域视觉评测：使用中文列名并按固定顺序导出
+        rows["逐题结果"] = _rich_content_export_rows(aligned_results)
     frame_rows = _frame_manifest_rows(snapshot)
     if frame_rows:
         rows["抽帧清单"] = frame_rows
@@ -321,6 +324,62 @@ _RUNTIME_ITEM_FIELDS = {
     "duration",
     "source_data",
 }
+
+# 垂域视觉评测（rich_content）Excel/CSV 导出列：与前端展示一致，按此顺序输出
+_RICH_CONTENT_EXPORT_COLUMNS: list[tuple[str, str]] = [
+    ("item_id", "题号"),
+    ("query", "Query"),
+    ("context", "context"),
+    ("category_display", "垂域"),
+    ("card_presence_label", "是否有卡片"),
+    ("card_count", "卡片数量"),
+    ("card_types", "卡片种类"),
+    ("card_contents", "卡片内容"),
+    ("superlink_presence_label", "Superlink是否存在"),
+    ("superlink_count", "Superlink数量"),
+    ("superlink_texts", "Superlink文字"),
+    ("card_suitability", "卡片是否合适"),
+    ("card_suitability_reason", "卡片不合适原因"),
+    ("superlink_suitability", "Superlink是否合适"),
+    ("superlink_suitability_reason", "Superlink不合适原因"),
+    ("answer_coverage", "回答覆盖"),
+    ("needs_review_label", "识别是否需要人工复查"),
+    ("review_reason", "需要复核的原因"),
+    ("problem_solved", "评价是否解决了用户问题"),
+    ("problem_solved_reason", "评价的原因"),
+    ("answer_issues", "回答的内容有什么问题"),
+    ("rationale", "识别结论"),
+    ("latency_s", "耗时"),
+]
+
+# 列表类字段取值后需要拼接为字符串
+_RICH_CONTENT_LIST_FIELDS = {"card_types", "card_contents", "superlink_texts"}
+
+# 枚举值 → 展示值映射
+_RICH_CONTENT_DISPLAY_MAP: dict[str, dict[str, str]] = {
+    "answer_coverage": {"complete": "完整", "partial": "部分", "unclear": "不确定"},
+    "card_suitability": {"ok": "OK", "nok": "NOK"},
+    "superlink_suitability": {"ok": "OK", "nok": "NOK"},
+    "problem_solved": {"ok": "OK", "nok": "NOK", "need_review": "需复查"},
+}
+
+
+def _rich_content_export_rows(results: list[dict]) -> list[dict]:
+    """将 rich_content 结果行按导出列顺序重排并转换为中文列名，列与前端展示一致。"""
+    export: list[dict] = []
+    for row in results:
+        export_row: dict[str, Any] = {}
+        for key, label in _RICH_CONTENT_EXPORT_COLUMNS:
+            value = row.get(key)
+            if value is None:
+                value = ""
+            if key in _RICH_CONTENT_LIST_FIELDS and isinstance(value, list):
+                value = "；".join(str(v) for v in value)
+            if key in _RICH_CONTENT_DISPLAY_MAP and value:
+                value = _RICH_CONTENT_DISPLAY_MAP[key].get(str(value), value)
+            export_row[label] = value
+        export.append(export_row)
+    return export
 
 
 def _project_relative_path(

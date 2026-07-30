@@ -22,8 +22,14 @@ from .prompts import (
 
 def rich_content_result_fields(
     observation: RichContentObservation,
+    prompt_variant: str = "rich_content",
 ) -> dict[str, Any]:
-    """把强类型视觉发现转换为 Web/导出友好的稳定字段。"""
+    """把强类型视觉发现转换为 Web/导出友好的稳定字段。
+
+    prompt_variant:
+      - "rich_content"：垂域视觉评测，Part 2 为整体评价（是否解决用户问题）
+      - "rich_content_quality"：垂域视觉综合评测，Part 2 为逐卡适配性评价
+    """
     cards = [card.model_dump() for card in observation.cards]
     superlinks = [link.model_dump() for link in observation.superlinks]
     coverage = observation.answer_coverage
@@ -44,62 +50,114 @@ def rich_content_result_fields(
         count_type = "unknown"
         superlink_count = None
 
-    suitability_values = [card["suitability"] for card in cards]
-    if not cards:
-        card_suitability = "not_applicable"
-    elif all(value == "suitable" for value in suitability_values):
-        card_suitability = "suitable"
-    elif all(value == "unsuitable" for value in suitability_values):
-        card_suitability = "unsuitable"
-    elif any(value == "unclear" for value in suitability_values):
-        card_suitability = "unclear"
-    else:
-        card_suitability = "partially_suitable"
-    scores = [
-        int(card["suitability_score"])
-        for card in cards
-        if card.get("suitability_score") is not None
-    ]
+    # 中文标签（用于 Excel 导出）
+    _presence_label = {"present": "是", "absent": "否", "unclear": "不清楚"}
+    card_presence_label = _presence_label.get(card_presence, "")
+    superlink_presence_label = _presence_label.get(superlink_presence, "")
+    _count_label = {"exact": "精确", "lower_bound": "至少", "unknown": "未知"}
+    superlink_count_type_label = _count_label.get(count_type, "")
+
+    # Part 2 字段提取与归一化
+    card_suitability = (observation.card_suitability or "").strip()
+    if card_suitability not in ("ok", "nok"):
+        card_suitability = ""
+    card_suitability_reason = observation.card_suitability_reason or ""
+
+    superlink_suitability = (observation.superlink_suitability or "").strip()
+    if superlink_suitability not in ("ok", "nok"):
+        superlink_suitability = ""
+    superlink_suitability_reason = observation.superlink_suitability_reason or ""
+
+    problem_solved_raw = (observation.problem_solved or "").strip()
+    _PROBLEM_SOLVED_MAP = {
+        "ok": "ok", "是": "ok", "yes": "ok",
+        "nok": "nok", "否": "nok", "no": "nok",
+        "need_review": "need_review", "不清楚": "need_review", "unclear": "need_review",
+    }
+    problem_solved = _PROBLEM_SOLVED_MAP.get(
+        problem_solved_raw.lower() if problem_solved_raw else "", ""
+    )
+    problem_solved_reason = observation.problem_solved_reason or ""
+    answer_issues = observation.answer_issues or ""
 
     visual_description = observation.visual_description or ""
-    # Part 2：视觉评测适配性 — 从 cards 提取，独立于垂域问答类的卡片适配性评价
-    visual_suitability = [
-        {
-            "type": card["type"],
-            "entity": card.get("entity", ""),
-            "suitability": card.get("suitability", "unclear"),
-            "suitability_score": card.get("suitability_score"),
-            "reason": card.get("reason", ""),
-        }
-        for card in cards
-    ]
 
     needs_review = bool(
         observation.needs_review or coverage != "complete"
     )
-    return {
+
+    # 基础字段（两种模式共用）
+    base = {
         "visual_findings": observation.model_dump(),
         "visual_description": visual_description,
-        "visual_suitability": visual_suitability,
         "answer_coverage": coverage,
         "card_presence": card_presence,
+        "card_presence_label": card_presence_label,
         "card_count": len(cards),
         "card_types": [card["type"] for card in cards],
         "card_contents": [
             card["visible_content"] or card["entity"] for card in cards
         ],
-        "card_suitability": card_suitability,
-        "card_suitability_score": (
-            round(sum(scores) / len(scores), 2) if scores else None
-        ),
         "superlink_presence": superlink_presence,
+        "superlink_presence_label": superlink_presence_label,
         "superlink_count": superlink_count,
         "superlink_count_type": count_type,
+        "superlink_count_type_label": superlink_count_type_label,
         "superlink_texts": [link["text"] for link in superlinks],
         "needs_review": needs_review,
+        "needs_review_label": "T" if needs_review else "F",
         "review_reason": observation.review_reason,
+        "card_suitability": card_suitability,
+        "card_suitability_reason": card_suitability_reason,
+        "superlink_suitability": superlink_suitability,
+        "superlink_suitability_reason": superlink_suitability_reason,
         "rationale": observation.rationale,
     }
+
+    if prompt_variant == "rich_content_quality":
+        # 逐卡适配性评价（仅垂域视觉综合评测使用）
+        suitability_values = [card["suitability"] for card in cards]
+        if not cards:
+            card_suitability = "not_applicable"
+        elif all(value == "suitable" for value in suitability_values):
+            card_suitability = "suitable"
+        elif all(value == "unsuitable" for value in suitability_values):
+            card_suitability = "unsuitable"
+        elif any(value == "unclear" for value in suitability_values):
+            card_suitability = "unclear"
+        else:
+            card_suitability = "partially_suitable"
+        scores = [
+            int(card["suitability_score"])
+            for card in cards
+            if card.get("suitability_score") is not None
+        ]
+        visual_suitability = [
+            {
+                "type": card["type"],
+                "entity": card.get("entity", ""),
+                "suitability": card.get("suitability", "unclear"),
+                "suitability_score": card.get("suitability_score"),
+                "reason": card.get("reason", ""),
+            }
+            for card in cards
+        ]
+        base["card_suitability"] = card_suitability
+        base["card_suitability_score"] = (
+            round(sum(scores) / len(scores), 2) if scores else None
+        )
+        base["visual_suitability"] = visual_suitability
+        # 整体评价字段（quality 模式可能为空）
+        base["problem_solved"] = problem_solved
+        base["problem_solved_reason"] = problem_solved_reason
+        base["answer_issues"] = answer_issues
+    else:
+        # 垂域视觉评测：Part 2 为整体评价
+        base["problem_solved"] = problem_solved
+        base["problem_solved_reason"] = problem_solved_reason
+        base["answer_issues"] = answer_issues
+
+    return base
 
 
 def _format_visual_findings_for_rubric(visual: dict) -> str:
@@ -190,6 +248,7 @@ class RichContentJudge:
     ):
         self.client = client
         self.profile = profile
+        self._prompt_variant = prompt_variant
         if prompt_variant == "rich_content_quality":
             self._system_template = RICH_CONTENT_QUALITY_SYSTEM
             self._user_template = RICH_CONTENT_QUALITY_USER
@@ -262,7 +321,7 @@ class RichContentJudge:
                 model=self.client.model,
             ) from exc
 
-        result = rich_content_result_fields(observation)
+        result = rich_content_result_fields(observation, prompt_variant=self._prompt_variant)
         result.update({
             "judge": self.client.cfg.name,
             "judge_model": self.client.model,

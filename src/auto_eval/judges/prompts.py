@@ -283,8 +283,14 @@ RICH_CONTENT_SYSTEM = Template(
 
 【对象定义】
 - 挂卡：带结构化信息容器、领域元数据或操作能力的富内容组件。普通内嵌图片、正文截图和纯文本段落不算挂卡。
-- Superlink：assistant 当前回答区域内的蓝色文字或蓝色图标加文字。产品规则保证这类蓝色文字或图标可点击，因此按 Superlink 统计。
-- 忽略用户气泡、历史问答、顶部导航、底部输入框、系统按钮、状态栏及其他应用 UI 中的蓝字。
+- Superlink：assistant 当前回答区域内、颜色为**蓝色或浅蓝色（淡蓝色）**的标签（tag）/文字/图标+文字。产品规则保证这类蓝色/浅蓝色标签或文字可点击，因此按 Superlink 统计。
+- **极其重要（防漏检，最高优先级）**：文字回答正文中出现的所有蓝色/浅蓝色元素一律都是 Superlink，没有任何例外。常见形态包括但不限于：
+  - 浅蓝色底色的圆角胶囊小标签，图标+文字的组合（典型例子：浅蓝底色、带摄像机/胶卷图标、文字为《影视作品名》如《百万英镑》的小标签）；
+  - 正文行内颜色发蓝的文字，包括《书名号》形式的蓝色片名、人名、作品名等；
+  - 蓝色文字+小图标、带或不带下划线的蓝色文字链接。
+  这类蓝色元素往往尺寸小、嵌在正文行内、与黑色正文混在一起，极易被略过。必须逐行扫描回答正文，把所有颜色与黑色正文不同的蓝色文字/标签全部找出来；只要颜色是蓝色/浅蓝色就必须记录，禁止因为"看起来不像链接""不确定能否点击""只是正文中的一个词"而跳过或漏记。
+- **极其重要（防误检）**：只有蓝色或浅蓝色的标签/文字才算 Superlink。红色、橙色、绿色、灰色等其他颜色的标签/文字一律不是 Superlink，不要统计；黑色正文文字不是 Superlink。
+- 忽略用户气泡、过去问答、顶部导航、底部输入框、系统按钮、状态栏及其他应用 UI 中的蓝字。
 
 【挂卡类型】
 {% for key, label in card_types.items() -%}
@@ -308,7 +314,7 @@ RICH_CONTENT_SYSTEM = Template(
 
 描述必须覆盖以下内容：
 - 一共有几张挂卡，分别是什么类型（用中文标签如"音乐""影视""天气"等），每张挂卡的可见关键信息（实体名称、数据、文字等）。
-- 一共有几个 Superlink，分别是什么蓝色文字。
+- 一共有几个 Superlink，分别是什么蓝色/浅蓝色标签或文字（明确描述颜色、图标和文字内容）。先逐行扫描正文把所有蓝色文字/标签（尤其是浅蓝底色图标+文字的胶囊小标签）一个不落地列出来，确认颜色为蓝色或浅蓝色后再计数，不得遗漏任何一个。
 - 尤其注意：描述那些与用户 query / 可信 context 中的实体、场景、时间、地点等关键条件高度呼应的内容细节，也描述那些看起来与 query 完全不沾边的内容细节。但只用观察语言呈现"挂卡上有什么"，让读者自己判断是否相关。
 
 【严禁以下行为】
@@ -318,16 +324,39 @@ RICH_CONTENT_SYSTEM = Template(
 - 只能写"看到了什么"：挂卡类型、实体、数据、文字、画面位置。例如"挂卡显示周杰伦《七里香》的播放按钮和专辑封面"而非"挂卡与用户问的歌曲完全匹配"。
 - 如果你觉得某些内容和 query 特别有关或特别无关，用观察细节自然带出——描述该内容的具体信息让读者自己判断。
 
-【Part 2 — 挂卡适配性评价】
-仅对实际识别到的挂卡逐张判断：
-- 对照 query 和可信 context 检查垂域、核心实体、时间、地点、场次等关键条件——但 query 永远优先：query 明确点名的对象（如"新疆天气"）就是用户要的，即便 context 背景定位在别处（如杭州），挂卡匹配 query 即为适配；只有 query 模糊指代"本地/这里/当前"时才用 context 定位消歧。
-- 检查挂卡与回答正文是否一致，以及卡片形态是否适合用户意图。
-- relation_to_query 只能是 direct / supporting / weak / unrelated / unclear。
-- suitability 只能是 suitable / partially_suitable / unsuitable / unclear。
-{% for score, anchor in suitability_anchors.items()|sort(reverse=true) -%}
-- {{ score }}分：{{ anchor }}
-{% endfor %}
-- 无挂卡时 cards 输出空数组，不要虚构 not_applicable 卡片。
+【Part 2 — 整体评价：回答是否解决了用户问题】
+结合回答的文字内容（answer_text）与视觉组件（挂卡和 Superlink），作为一个整体来判断该回答是否解决了用户的问题（query）。不要单独评价某张挂卡是否合适，也不要单独判断某个 Superlink 是否相关——请综合文字+全部视觉组件，整体判断。
+
+评价"是否解决了用户问题"（problem_solved）只能是以下三种值：
+- "ok"：回答解决了客户的问题。文字+视觉组件共同给出了正确、完整的答案。也包括以下情况：回答给出了需要用户二次确认或澄清的内容（如说明风险要求用户确认），但回答本身提供的核心信息和卡片已经是正确的——这种属于"多轮对话造成需求未闭环"，应判 ok 同时在 answer_issues 中记录"多轮对话造成需求未闭环：回答要求用户确认但用户未操作"。
+- "nok"：回答没有解决用户的问题，或给出的答案有明显错误。例如：回答跑题、核心事实错误、挂卡与 query 完全不匹配、没给出有效信息、操作路径不可行等。
+- "need_review"：正文和已有截图中的内容无法完全确定是否满足用户需求，但回答中出现了与 query 相关性很高的挂卡或 Superlink，需要点开卡片/链接查看详细内容才能判断是否真正满足用户需求。这种情况判 need_review。
+
+同时输出 problem_solved_reason（评价的原因），简明扼要地说明为什么做此判断，点出关键证据。
+
+【卡片是否合适（card_suitability）】
+整体判断所有挂卡是否都与用户 query 相关。不要逐张评价，给出一个整体结论：
+- "ok"：所有出现的挂卡都与用户关心的内容相关（即使不是精确匹配，只要领域/主题对得上即可）。
+- "nok"：至少有一张挂卡与用户 query 明显无关（例如用户问天气但出了一张音乐卡片）。
+- 没有挂卡时，card_suitability 填空字符串 ""。
+同时输出 card_suitability_reason：当为 "nok" 时说明哪张卡片不合适及原因；当为 "ok" 时填空字符串 ""。
+
+【Superlink 是否合适（superlink_suitability）】
+整体判断所有 Superlink 是否合适。Superlink 的判断标准比挂卡宽松——只要用户可能感兴趣，都算合适。
+- "ok"：所有 Superlink 用户都可能感兴趣。
+- "nok"：至少有一个 Superlink 明显与用户意图无关。
+- 没有 Superlink 时，superlink_suitability 填空字符串 ""。
+同时输出 superlink_suitability_reason：当为 "nok" 时说明哪个链接不合适及原因；当为 "ok" 时填空字符串 ""。
+
+【回答的内容有什么问题（answer_issues）】
+指出回答的内容存在什么问题。格式：先写问题分类标签（冒号分隔），再写具体问题描述。例如："文卡不一致：回答正文说'点击下方卡片查看'但实际未出卡"。
+- 当 problem_solved 为 "nok" 或 "need_review" 时，必须填写。从分类列表选最贴切的标签。
+- 当 problem_solved 为 "ok" 但有瑕疵时（如卡片/Superlink 不合适、多轮对话未闭环），也应填写对应的标签和描述。例如："Superlink不相关：回答中出现了与query无关的链接"、"多轮对话造成需求未闭环：回答要求用户确认风险，用户未操作"。
+- 当 problem_solved 为 "ok" 且无任何问题时，填空字符串 ""。
+- 如果存在多个问题，用换行分隔，逐一列出。
+
+问题分类标签参考（选最贴切的）：
+多轮对话造成需求未闭环 / 相关性 / 时效性 / 真实性 / 准确性 / 完整性 / 逻辑性 / 合规性 / 有用性 / 结构性 / 服务闭环 / 结果重复 / 思考漏出 / 未出卡 / 资源挂载缺失 / 计算错误 / 时延高 / 遵从性 / 文卡不一致 / 回答截断 / 无结果 / 本机机型不感知 / 多轮未接续 / 操作冗余 / 路径错误 / 提示无法操作 / 需求闭环 / 执行中卡住或中断 / 执行中循环出不来 / 没有总结信息或信息总结错误 / 未取到私域信息 / 中控规划 / 私域信息滥用 / skill技能实现问题 / 思考过程暴露 / 卡片不相关 / Superlink不相关 / need_review
 
 【人工复核】
 出现画面模糊、内容被遮挡、回答覆盖不完整、跨帧无法可靠去重、卡片类型或蓝字归属不确定时，needs_review=true 并说明原因。
@@ -337,12 +366,12 @@ RICH_CONTENT_SYSTEM = Template(
 <analysis>
 1. 回答有效区域与覆盖度。
 2. 挂卡跨帧去重与内容识别。
-3. Superlink 跨帧去重与可见文字。
+3. Superlink 识别：逐行扫描回答正文，逐一列出所有蓝色/浅蓝色文字和标签（重点检查浅蓝底色的图标+文字胶囊小标签，禁止略过），再跨帧去重并记录可见文字。
 4. Part 1：纯客观视觉描述（撰写 visual_description 的思考过程）。
-5. Part 2：挂卡适配性评价。
+5. Part 2：整体评价（判断是否解决了用户问题、写评价原因、分析回答内容的问题）。
 6. 不确定项和人工复核原因。
 </analysis>
-{"visual_description":"<Part 1：纯客观描述文本，不得包含评价性语言>","answer_coverage":"complete|partial|unclear","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","relation_to_query":"direct|supporting|weak|unrelated|unclear","suitability":"suitable|partially_suitable|unsuitable|unclear","suitability_score":<1-5或null>,"reason":"<判断理由>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","rationale":"<一句话总结发现>"}
+{"visual_description":"<Part 1：纯客观描述文本，不得包含评价性语言>","answer_coverage":"complete|partial|unclear","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","card_suitability":"<ok|nok|空>","card_suitability_reason":"<原因>","superlink_suitability":"<ok|nok|空>","superlink_suitability_reason":"<原因>","problem_solved":"<ok|nok|need_review>","problem_solved_reason":"<评价的原因>","answer_issues":"<问题标签：具体描述，无问题填空字符串>","rationale":"<一句话总结发现>"}
 """
 )
 
@@ -377,7 +406,13 @@ RICH_CONTENT_QUALITY_SYSTEM = Template(
 
 【对象定义】
 - 挂卡：带结构化信息容器、领域元数据或操作能力的富内容组件。普通内嵌图片、正文截图和纯文本段落不算挂卡。
-- Superlink：assistant 当前回答区域内的蓝色文字或蓝色图标加文字。产品规则保证这类蓝色文字或图标可点击，因此按 Superlink 统计。
+- Superlink：assistant 当前回答区域内、颜色为**蓝色或浅蓝色（淡蓝色）**的可点击标签（tag）/文字/图标+文字。产品规则保证这类蓝色/浅蓝色标签或文字可点击，因此按 Superlink 统计。
+- **极其重要（防漏检，最高优先级）**：文字回答正文中出现的所有蓝色/浅蓝色元素一律都是 Superlink，没有任何例外。常见形态包括但不限于：
+  - 浅蓝色底色的圆角胶囊小标签，图标+文字的组合（典型例子：浅蓝底色、带摄像机/胶卷图标、文字为《影视作品名》如《百万英镑》的小标签）；
+  - 正文行内颜色发蓝的文字，包括《书名号》形式的蓝色片名、人名、作品名等；
+  - 蓝色文字+小图标、带或不带下划线的蓝色文字链接。
+  这类蓝色元素往往尺寸小、嵌在正文行内、与黑色正文混在一起，极易被略过。必须逐行扫描回答正文，把所有颜色与黑色正文不同的蓝色文字/标签全部找出来；只要颜色是蓝色/浅蓝色就必须记录，禁止因为"看起来不像链接""不确定能否点击""只是正文中的一个词"而跳过或漏记。
+- **极其重要（防误检）**：只有蓝色或浅蓝色的标签/文字才算 Superlink。红色、橙色、绿色、灰色等其他颜色的标签/文字一律不是 Superlink，不要统计；黑色正文文字不是 Superlink。
 - 忽略用户气泡、历史问答、顶部导航、底部输入框、系统按钮、状态栏及其他应用 UI 中的蓝字。
 
 【挂卡类型】
@@ -402,7 +437,7 @@ RICH_CONTENT_QUALITY_SYSTEM = Template(
 
 描述必须覆盖以下内容：
 - 一共有几张挂卡，分别是什么类型（用中文标签如"音乐""影视""天气"等），每张挂卡的可见关键信息（实体名称、数据、文字等）。
-- 一共有几个 Superlink，分别是什么蓝色文字。
+- 一共有几个 Superlink，分别是什么蓝色/浅蓝色标签或文字（明确描述颜色、图标和文字内容）。先逐行扫描正文把所有蓝色文字/标签（尤其是浅蓝底色图标+文字的胶囊小标签）一个不落地列出来，确认颜色为蓝色或浅蓝色后再计数，不得遗漏任何一个。
 - 尤其注意：描述那些与用户 query / 可信 context 中的实体、场景、时间、地点等关键条件高度呼应的内容细节，也描述那些看起来与 query 完全不沾边的内容细节。但只用观察语言呈现"挂卡上有什么"，让读者自己判断是否相关。
 
 【严禁以下行为】
@@ -431,7 +466,7 @@ RICH_CONTENT_QUALITY_SYSTEM = Template(
 <analysis>
 1. 回答有效区域与覆盖度。
 2. 挂卡跨帧去重与内容识别。
-3. Superlink 跨帧去重与可见文字。
+3. Superlink 识别：逐行扫描回答正文，逐一列出所有蓝色/浅蓝色文字和标签（重点检查浅蓝底色的图标+文字胶囊小标签，禁止略过），再跨帧去重并记录可见文字。
 4. Part 1：纯客观视觉描述（撰写 visual_description 的思考过程）。
 5. Part 2：挂卡适配性评价。
 6. 不确定项和人工复核原因。
