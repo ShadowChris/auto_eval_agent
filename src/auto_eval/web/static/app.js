@@ -399,6 +399,7 @@ createApp({
           { key: "query", label: "Query" },
           ...contextCols,
           { key: "category_display", label: "垂域" },
+          { key: "answer_text", label: "answer_text" },
           { key: "card_presence", label: "是否有卡片" },
           { key: "card_count", label: "卡片数量" },
           { key: "card_types", label: "卡片种类" },
@@ -480,7 +481,7 @@ createApp({
           "card_presence", "card_count", "superlink_presence",
           "superlink_count", "answer_coverage", "needs_review", "problem_solved",
         ].includes(c.key);
-      const textColumn = ["query", "context", "answer", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc", "answer_issues", "problem_solved_reason"].includes(c.key);
+      const textColumn = ["query", "context", "answer", "answer_text", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc", "answer_issues", "problem_solved_reason"].includes(c.key);
       let minWidth = compact ? 80 : textColumn ? 150 : 96;
       let maxWidth = compact ? 120 : c.key === "rationale" ? 380 : textColumn ? 320 : 200;
       if (c.key === "item_id") {
@@ -527,7 +528,7 @@ createApp({
         if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.answer_text || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });

@@ -331,6 +331,7 @@ _RICH_CONTENT_EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("query", "Query"),
     ("context", "context"),
     ("category_display", "垂域"),
+    ("answer_text", "answer_text"),
     ("card_presence_label", "是否有卡片"),
     ("card_count", "卡片数量"),
     ("card_types", "卡片种类"),
