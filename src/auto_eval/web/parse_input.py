@@ -102,7 +102,7 @@ def _rich_content_times(obj: dict) -> dict[str, float]:
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 ||| 分隔的粘贴文本。返回 (items, errors)。"""
     if mode in ("operation", "rich_content", "rich_content_quality"):
-        label = "任务类" if mode == "operation" else "挂卡 / Superlink"
+        label = "任务类" if mode == "operation" else "垂域视觉评测"
         return [], [f"{label}评测请逐题上传视频或导入 JSONL，不支持文本粘贴解析"]
     items: list[dict] = []
     errors: list[str] = []

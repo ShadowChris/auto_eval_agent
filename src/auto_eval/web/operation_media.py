@@ -326,7 +326,7 @@ def prepare_session_rich_content_item(
     probe_fn: Callable = probe_duration,
     extract_fn: Callable = extract_scene_keyframes,
 ) -> dict:
-    """按 Web 会话准备挂卡 / Superlink 视觉评估关键帧。"""
+    """按 Web 会话准备垂域视觉评测关键帧。"""
     raw_path = str(item.get("video_path") or "").strip()
     if not raw_path:
         media = item.get("media") or []

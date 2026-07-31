@@ -22,6 +22,7 @@ CardSuitability = Literal[
     "unclear",
     "not_applicable",
 ]
+ProblemSolved = Literal["ok", "nok", "need_review"]
 
 
 # --------------------------------------------------------------------------- #
@@ -106,8 +107,8 @@ class RichContentCard(BaseModel):
     entity: str = ""
     visible_content: str = ""
     answer_position: str = ""
-    relation_to_query: CardRelation = "unclear"
-    suitability: CardSuitability = "unclear"
+    relation_to_query: CardRelation | None = None
+    suitability: CardSuitability | None = None
     suitability_score: int | None = Field(default=None, ge=1, le=5)
     reason: str = ""
     evidence_frames: list[int] = Field(default_factory=list)
@@ -125,7 +126,7 @@ class RichContentSuperlink(BaseModel):
 
 
 class RichContentObservation(BaseModel):
-    """一次垂域挂卡 / Superlink 视频视觉识别结果。"""
+    """一次垂域视觉评测视频识别结果。"""
 
     answer_coverage: AnswerCoverage = "unclear"
     visual_description: str = ""  # 纯客观视觉描述（Part 1），不包含评价性语言
@@ -133,6 +134,13 @@ class RichContentObservation(BaseModel):
     superlinks: list[RichContentSuperlink] = Field(default_factory=list)
     needs_review: bool = False
     review_reason: str = ""
+    card_suitability: str = ""  # Part 2：卡片是否合适（"ok"/"nok"/""）
+    card_suitability_reason: str = ""  # Part 2：卡片是否合适的原因
+    superlink_suitability: str = ""  # Part 2：Superlink是否合适（"ok"/"nok"/""）
+    superlink_suitability_reason: str = ""  # Part 2：Superlink是否合适的原因
+    problem_solved: str = ""  # Part 2：是否解决了用户问题（"ok"/"nok"/"need_review"）
+    problem_solved_reason: str = ""  # Part 2：评价的原因
+    answer_issues: str = ""  # Part 2：回答的内容有什么问题（分类标签：具体描述）
     rationale: str = ""
 
 

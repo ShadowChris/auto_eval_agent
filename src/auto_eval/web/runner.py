@@ -143,7 +143,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             visual_client = JudgeClient(
                 visual_judge_cfg, _providers, cfg.eval_options.search_topk,
             )
-            visual_judge = RichContentJudge(visual_client, rich_profile)
+            visual_judge = RichContentJudge(visual_client, rich_profile, prompt_variant="rich_content_quality")
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     sem = asyncio.Semaphore(int(task.options.get("concurrency", 4)))
     eval_timeout = float(task.options.get("eval_timeout_s") or task.options.get("eval_timeout") or 300.0)
@@ -535,10 +535,10 @@ async def _eval_one(
 
     elif mode == "rich_content":
         if not rich_judges:
-            raise ValueError("没有可用的挂卡 / Superlink 视觉裁判")
+            raise ValueError("没有可用的垂域视觉评测裁判")
         frames = [str(path) for path in (item.metadata.get("frames") or [])]
         if not frames:
-            raise ValueError("挂卡 / Superlink 视觉评估缺少关键帧")
+            raise ValueError("垂域视觉评测缺少关键帧")
         answer_text = str(item_dict.get("answer_text") or "").strip()
         if answer_text:
             out["answer_text"] = answer_text
@@ -559,17 +559,18 @@ async def _eval_one(
                 "挂卡数": out.get("card_count"),
                 "Superlink数": out.get("superlink_count"),
                 "需复核": out.get("needs_review"),
+                "是否解决问题": out.get("problem_solved"),
             },
             progress=90,
-            progress_message="正在整理挂卡与Superlink结果",
+            progress_message="正在整理垂域视觉评测结果",
         )
 
     elif mode == "rich_content_quality":
         if visual_judge is None:
-            raise ValueError("缺少挂卡 / Superlink 视觉识别裁判（请选择 visual_judge）")
+            raise ValueError("缺少垂域视觉评测识别裁判（请选择 visual_judge）")
         frames = [str(path) for path in (item.metadata.get("frames") or [])]
         if not frames:
-            raise ValueError("挂卡 / Superlink 综合评测缺少关键帧")
+            raise ValueError("垂域视觉综合评测缺少关键帧")
         answer_text = str(item_dict.get("answer_text") or "").strip()
         if answer_text:
             out["answer_text"] = answer_text
@@ -581,7 +582,7 @@ async def _eval_one(
             "视觉识别阶段",
             details={"裁判": visual_judge.client.cfg.name, "模型": visual_judge.client.model},
             progress=30,
-            progress_message="正在进行挂卡与Superlink视觉识别",
+            progress_message="正在进行垂域视觉评测识别",
         )
         visual = await visual_judge.evaluate(
             question=item.question,
@@ -609,7 +610,7 @@ async def _eval_one(
         )
         # 更新 item.context 供 RubricJudge 使用
         item.context = enriched_context
-        enriched_answer = answer_text or "[此回答以挂卡/Superlink为主要交付物，纯文本部分为空]"
+        enriched_answer = answer_text or "[此回答以视觉内容为主要交付物，纯文本部分为空]"
         out["answer"] = enriched_answer
 
         async def _score_rcq(r):
@@ -787,7 +788,7 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
 
 
 def _summarize_rich_content(task: Task) -> dict:
-    """汇总视觉发现，不使用问答类 correctness/准确率口径。"""
+    """汇总视觉发现与整体评价，不使用问答类 correctness/准确率口径。"""
     results = task.results
     ok = [row for row in results if "error" not in row]
     card_cases = [row for row in ok if row.get("card_presence") == "present"]
@@ -795,10 +796,9 @@ def _summarize_rich_content(task: Task) -> dict:
         row for row in ok if row.get("superlink_presence") == "present"
     ]
     complete = [row for row in ok if row.get("answer_coverage") == "complete"]
-    suitable = [
-        row for row in card_cases
-        if row.get("card_suitability") == "suitable"
-    ]
+    solved_ok = [row for row in ok if row.get("problem_solved") == "ok"]
+    solved_nok = [row for row in ok if row.get("problem_solved") == "nok"]
+    solved_review = [row for row in ok if row.get("problem_solved") == "need_review"]
     both = [
         row for row in ok
         if row.get("card_presence") == "present"
@@ -819,12 +819,18 @@ def _summarize_rich_content(task: Task) -> dict:
             "count": 0,
             "card_cases": 0,
             "superlink_cases": 0,
+            "solved_ok": 0,
+            "solved_nok": 0,
+            "solved_review": 0,
         })
         entry["count"] += 1
         entry["card_cases"] += int(row.get("card_presence") == "present")
         entry["superlink_cases"] += int(
             row.get("superlink_presence") == "present"
         )
+        entry["solved_ok"] += int(row.get("problem_solved") == "ok")
+        entry["solved_nok"] += int(row.get("problem_solved") == "nok")
+        entry["solved_review"] += int(row.get("problem_solved") == "need_review")
 
     return {
         "total": len(results),
@@ -836,10 +842,6 @@ def _summarize_rich_content(task: Task) -> dict:
             round(len(card_cases) / len(ok), 3) if ok else None
         ),
         "card_total": sum(int(row.get("card_count") or 0) for row in ok),
-        "card_suitable_count": len(suitable),
-        "card_suitable_rate": (
-            round(len(suitable) / len(card_cases), 3) if card_cases else None
-        ),
         "superlink_case_count": len(superlink_cases),
         "superlink_presence_rate": (
             round(len(superlink_cases) / len(ok), 3) if ok else None
@@ -851,6 +853,12 @@ def _summarize_rich_content(task: Task) -> dict:
         "neither_count": len(neither),
         "needs_review_count": sum(bool(row.get("needs_review")) for row in ok),
         "complete_coverage_count": len(complete),
+        "solved_ok": len(solved_ok),
+        "solved_nok": len(solved_nok),
+        "solved_review": len(solved_review),
+        "solved_ok_rate": (
+            round(len(solved_ok) / len(ok), 3) if ok else None
+        ),
         "by_category": sorted(
             by_category.values(),
             key=lambda entry: (-entry["count"], entry["category"]),
@@ -858,7 +866,7 @@ def _summarize_rich_content(task: Task) -> dict:
     }
 
 def _summarize_rich_content_quality(task: Task, cfg: AppConfig) -> dict:
-    """综合汇总：挂卡/Superlink 视觉发现 + 回答质量评测。"""
+    """综合汇总：垂域视觉评测发现 + 回答质量评测。"""
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     results = task.results
     ok = [row for row in results if "error" not in row]

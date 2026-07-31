@@ -80,7 +80,7 @@
         <div class="op-import-row">
           <label class="op-upload-btn">
             <input type="file" accept=".jsonl,application/json" @change="onOpManifestFile" hidden>
-            导入{{ mode==='operation' ? '任务类' : '挂卡 / Superlink' }} JSONL
+            导入{{ mode==='operation' ? '任务类' : '垂域视觉评测' }} JSONL
           </label>
           <span v-if="opPreparing" class="running">正在解析 JSONL…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
@@ -305,9 +305,12 @@
       <span v-if="summary.judge_accuracy!=null">裁判判题准确率 {{ (summary.judge_accuracy*100).toFixed(0) }}% （{{ summary.meta_n }} 题有参考答案）</span>
       <span v-if="summary.a_winrate!=null">A 胜率 {{ (summary.a_winrate*100).toFixed(0) }}%</span>
       <span v-if="summary.card_presence_rate!=null">挂卡出现率 {{ (summary.card_presence_rate*100).toFixed(0) }}%（{{ summary.card_total }} 张）</span>
-      <span v-if="summary.card_suitable_rate!=null">挂卡合适率 {{ (summary.card_suitable_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.superlink_presence_rate!=null">Superlink 出现率 {{ (summary.superlink_presence_rate*100).toFixed(0) }}%（观察到 {{ summary.superlink_total_observed }} 个）</span>
       <span v-if="summary.both_count!=null">挂卡与链接同现 {{ summary.both_count }} 条</span>
+      <span v-if="summary.solved_ok!=null">OK {{ summary.solved_ok }} 条</span>
+      <span v-if="summary.solved_nok!=null">NOK {{ summary.solved_nok }} 条</span>
+      <span v-if="summary.solved_review!=null">需复查 {{ summary.solved_review }} 条</span>
+      <span v-if="summary.solved_ok_rate!=null">OK率 {{ (summary.solved_ok_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
     </div>
     <details class="skill-breakdown" v-if="summary && summary.by_skill && summary.by_skill.overview && summary.by_skill.overview.length" open>
@@ -472,6 +475,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260729_operation_fixed_judge"></script>
+  <script type="module" src="/static/app.js?v=20260730_answer_text"></script>
 </body>
 </html>
