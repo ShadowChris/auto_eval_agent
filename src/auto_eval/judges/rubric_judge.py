@@ -11,7 +11,7 @@ from ..config import RubricDim
 from ..llm_stream import build_openai_client, stream_chat_completion
 from ..media import encode_frame
 from ..observability import bind_chain_context, log_event
-from ..schema import EvalItem, SingleScore
+from ..schema import EvalItem, OperationSingleScore, SingleScore
 
 logger = logging.getLogger("auto_eval.classify")
 from .base import JudgeClient, JudgeOutputParseError
@@ -128,7 +128,7 @@ class RubricJudge:
 
     async def score(self, item: EvalItem, model_name: str, answer: str, run_idx: int = 0,
                     eval_mode: str = "result", process_dims=None, competitor: str | None = None,
-                    stream_callback=None) -> SingleScore:
+                    stream_callback=None) -> SingleScore | OperationSingleScore:
         # 操控类只使用样本显式提供的背景，避免把评测时间误当成录屏执行时间。
         # 其他模式仍保留当前时间兜底，用于时效性事实判断。
         prompt_context = (
@@ -157,14 +157,19 @@ class RubricJudge:
         if eval_mode == "operation":
             op_skill = self.skill_router.domain.get("operation") if self.skill_router else None
             dims = (op_skill.rubrics if op_skill and op_skill.rubrics else None) or self.dims
+            policy = op_skill.operation_policy if op_skill else None
+            if policy is None:
+                raise ValueError("任务类评测缺少 config/skills/operation.yaml 的 operation_policy")
             system = OPERATION_SYSTEM.render(
                 persona=self.client.persona,
-                agent_claim=(answer or "").strip(),
                 dims=dims,
                 scale=dims[0].scale if dims else 5,
+                policy=policy,
             )
             user = OPERATION_USER.render(
-                question=item.question, context=prompt_context
+                question=item.question,
+                context=prompt_context,
+                agent_claim=(answer or "").strip(),
             )
             frames = item.metadata.get("frames") or []
             user_images = [encode_frame(Path(p)) for p in frames] if frames else None
@@ -227,24 +232,55 @@ class RubricJudge:
         rubric_raw = data.get("rubric") or {}
         rubric, rubric_reasons, na_dimensions = _flatten_rubric(rubric_raw, dim_names=[d.name for d in dims])
         if data.get("total") is not None:
-            total = float(data["total"])
+            total: float | None = float(data["total"])
         else:
-            total = sum(rubric.values()) / len(rubric) if rubric else 0.0
+            total = sum(rubric.values()) / len(rubric) if rubric else None
+        if eval_mode == "operation":
+            task_type = str(data.get("task_type") or "").strip().lower()
+            if "复杂多任务" in analysis:
+                task_type = "complex"
+            elif "简单任务" in analysis and task_type not in {"simple", "complex"}:
+                task_type = "simple"
+            if task_type not in {"simple", "complex"}:
+                task_type = None
+            policy = op_skill.operation_policy if op_skill else None
+            correctness, issue_types, is_low_level = normalize_operation_fields(
+                data.get("correctness"),
+                data.get("issue_types", data.get("error_type")),
+                data.get("is_low_level", "no"),
+                task_type,
+                policy.issue_types if policy else None,
+            )
+            return OperationSingleScore(
+                item_id=item.id,
+                model=model_name,
+                judge=self.client.cfg.name,
+                persona=self.client.cfg.persona,
+                run_idx=run_idx,
+                rubric=rubric,
+                rubric_reasons=rubric_reasons,
+                na_dimensions=na_dimensions,
+                total=total,
+                task_type=task_type,
+                correctness=correctness,
+                issue_types=issue_types,
+                is_low_level=is_low_level,
+                rationale=data.get("rationale", ""),
+                analysis=analysis,
+                used_search=reply.used_search,
+                tool_trace=reply.tool_trace,
+                search_queries=reply.search_queries,
+                truncated=reply.truncated,
+                latency_ms=latency,
+            )
+
+        if total is None:
+            total = 0.0
         correctness = data.get("correctness", "unclear")
         if correctness not in _VALID:
             correctness = "unclear"
         error_type = data.get("error_type")
         is_low_level = data.get("is_low_level", "no")
-        if eval_mode == "operation":
-            task_type = data.get("task_type")
-            if "复杂多任务" in analysis:
-                task_type = "complex"
-            error_type, is_low_level = normalize_operation_fields(
-                correctness,
-                error_type,
-                is_low_level,
-                task_type,
-            )
         rationale = data.get("rationale", "")
         top_issue_1_dim = data.get("top_issue_1_dim")
         top_issue_2_dim = data.get("top_issue_2_dim")

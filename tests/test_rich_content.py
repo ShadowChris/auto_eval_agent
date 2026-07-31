@@ -93,7 +93,7 @@ def test_rich_content_prompt_defines_visual_counting_contract() -> None:
     )
 
     assert "普通内嵌图片、正文截图和纯文本段落不算挂卡" in prompt
-    assert "产品规则保证这类蓝色文字或图标可点击" in prompt
+    assert "蓝色/浅蓝色标签或文字可点击" in prompt
     assert "同一张挂卡或同一处链接" in prompt
     assert "不得按帧数累计数量" in prompt
     assert "不要输出 correctness、rubric 或 total" in prompt
@@ -130,8 +130,9 @@ def test_rich_content_result_derives_presence_counts_and_suitability() -> None:
 
     assert result["card_presence"] == "present"
     assert result["card_count"] == 1
-    assert result["card_suitability"] == "suitable"
-    assert result["card_suitability_score"] == 5
+    assert result["card_suitability"] == "ok"
+    assert result["card_suitability_reason"] == "地点和日期一致"
+    assert "card_suitability_score" not in result
     assert result["superlink_presence"] == "present"
     assert result["superlink_count"] == 1
     assert result["superlink_count_type"] == "exact"
@@ -286,9 +287,9 @@ def test_quality_variant_prompt_is_independent() -> None:
         card_types=profile.card_types,
         suitability_anchors=profile.suitability_anchors,
     )
-    # 初始内容一致
-    assert quality_prompt == original_prompt
-    # 但两个 Template 对象是独立的
+    assert quality_prompt != original_prompt
+    assert "【Part 2 — 挂卡适配性评价】" in quality_prompt
+    assert "【Part 2 — 整体评价：回答是否解决了用户问题】" in original_prompt
     assert "不要输出 correctness、rubric 或 total" in quality_prompt
     assert "【Part 1 — 视觉描述（纯客观，极其重要）】" in quality_prompt
 

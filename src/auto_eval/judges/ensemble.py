@@ -7,7 +7,14 @@ from typing import Optional
 import numpy as np
 
 from ..config import EnsembleConfig, RubricDim
-from ..schema import PairResult, SinglePair, SingleScore, Verdict
+from ..schema import (
+    OperationSingleScore,
+    OperationVerdict,
+    PairResult,
+    SinglePair,
+    SingleScore,
+    Verdict,
+)
 
 _rng = np.random.default_rng(20240622)
 
@@ -133,6 +140,121 @@ def aggregate_scores(
         judges_agreement=agree,
         repeat_std=repeat_std,
         low_agreement=low,
+        single_scores=scores,
+    )
+
+
+def aggregate_operation_scores(
+    scores: list[OperationSingleScore],
+    dims: list[RubricDim],
+    cfg: EnsembleConfig,
+    threshold: float,
+    issue_types_by_status: dict[str, list[str]] | None = None,
+) -> Optional[OperationVerdict]:
+    """聚合任务类评分，不复用问答类 correctness/error_type 语义。"""
+    if not scores:
+        return None
+
+    trim = cfg.rubric == "trim_mean"
+    all_keys = list(dict.fromkeys(k for score in scores for k in score.rubric))
+    all_na_sets = [set(score.na_dimensions) for score in scores]
+    na_consensus = list(set.intersection(*all_na_sets)) if all_na_sets else []
+    active_keys = [key for key in all_keys if key not in na_consensus]
+    dim_weight = {dim.name: dim.weight for dim in dims}
+    rubric_mean: dict[str, float] = {}
+    for key in all_keys:
+        values = [score.rubric[key] for score in scores if key in score.rubric]
+        rubric_mean[key] = (_trim_mean(values) if trim else _mean(values)) if values else 0.0
+    weight_sum = sum(dim_weight.get(key, 1.0) for key in active_keys)
+    total = (
+        sum(rubric_mean[key] * dim_weight.get(key, 1.0) for key in active_keys) / weight_sum
+        if active_keys and weight_sum
+        else None
+    )
+
+    correctness = _majority([score.correctness for score in scores]) or "others"
+    matching_scores = [score for score in scores if score.correctness == correctness]
+    issue_counts: collections.Counter[str] = collections.Counter()
+    issue_order: dict[str, int] = {}
+    for score in matching_scores:
+        for issue in score.issue_types:
+            issue_counts[issue] += 1
+            issue_order.setdefault(issue, len(issue_order))
+    issue_types = sorted(
+        issue_counts,
+        key=lambda issue: (-issue_counts[issue], issue_order[issue]),
+    )
+    if issue_types_by_status:
+        primary_types = set(issue_types_by_status.get(correctness, []))
+        issue_types = (
+            [issue for issue in issue_types if issue in primary_types]
+            + [issue for issue in issue_types if issue not in primary_types]
+        )
+    if correctness != "ok" and not issue_types:
+        issue_types = ["评测证据冲突" if correctness == "others" else "其他执行问题"]
+
+    task_types = [score.task_type for score in matching_scores if score.task_type]
+    task_type = _majority(task_types) or (task_types[0] if task_types else None)
+    low_level_votes = [
+        score.is_low_level
+        for score in matching_scores
+        if score.is_low_level in {"yes", "no"}
+    ]
+    is_low_level = (
+        "yes"
+        if correctness == "nok"
+        and task_type != "complex"
+        and low_level_votes.count("yes") > low_level_votes.count("no")
+        else "no"
+    )
+
+    correctness_votes = [score.correctness for score in scores]
+    agreement = (
+        max(collections.Counter(correctness_votes).values()) / len(correctness_votes)
+        if correctness_votes
+        else None
+    )
+    by_judge: dict[str, list[float]] = collections.defaultdict(list)
+    for score in scores:
+        if score.total is not None:
+            by_judge[score.judge].append(score.total)
+    stds = [float(np.std(values)) for values in by_judge.values() if len(values) > 1]
+    repeat_std = float(np.mean(stds)) if stds else 0.0
+    scale = dims[0].scale if dims else 5
+    low_agreement = (
+        (agreement is not None and agreement < threshold)
+        or repeat_std > (0.15 * scale + 0.3)
+    )
+
+    all_reason_keys = list(
+        dict.fromkeys(key for score in scores for key in score.rubric_reasons)
+    )
+    rubric_reasons: dict[str, str] = {}
+    for key in all_reason_keys:
+        parts = [
+            f"[{score.judge}] {score.rubric_reasons[key]}"
+            for score in scores
+            if key in score.rubric_reasons
+        ]
+        if parts:
+            rubric_reasons[key] = " | ".join(parts[:3])
+
+    return OperationVerdict(
+        item_id=scores[0].item_id,
+        model=scores[0].model,
+        rubric=rubric_mean,
+        rubric_reasons=rubric_reasons,
+        na_dimensions=na_consensus,
+        total=total,
+        task_type=task_type,
+        correctness=correctness,
+        issue_types=issue_types,
+        is_low_level=is_low_level,
+        rationale=" | ".join(f"[{score.judge}] {score.rationale}" for score in scores[:3]),
+        n_judges=len({score.judge for score in scores}),
+        judges_agreement=agreement,
+        repeat_std=repeat_std,
+        low_agreement=low_agreement,
         single_scores=scores,
     )
 

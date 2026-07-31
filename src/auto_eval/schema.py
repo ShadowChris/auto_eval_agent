@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Correctness = Literal["right", "wrong", "partial", "unclear"]
+OperationCorrectness = Literal["ok", "nok", "no_support", "others"]
+OperationTaskType = Literal["simple", "complex"]
 LowLevel = Literal["yes", "no"]
 Winner = Literal["a", "b", "tie"]
 Difficulty = Literal["easy", "medium", "hard"]
@@ -98,6 +100,37 @@ class SingleScore(BaseModel):
     tool_trace: list[str] = Field(default_factory=list)  # 评测 agent 的工具调用轨迹
     truncated: bool = False  # 是否被 max_rounds 截断（已强制判定兜底）
     latency_ms: int = 0
+
+
+class OperationSingleScore(BaseModel):
+    """任务类（录屏）单裁判评分，与问答类判定和错因字段解耦。"""
+
+    item_id: str
+    model: str
+    judge: str
+    persona: str | None = None
+    run_idx: int = 0
+    rubric: dict[str, int] = Field(default_factory=dict)
+    rubric_reasons: dict[str, str] = Field(default_factory=dict)
+    na_dimensions: list[str] = Field(default_factory=list)
+    total: float | None = None
+    task_type: OperationTaskType | None = None
+    correctness: OperationCorrectness
+    issue_types: list[str] = Field(default_factory=list)
+    is_low_level: LowLevel = "no"
+    rationale: str = ""
+    analysis: str = ""
+    used_search: bool = False
+    search_queries: list[str] = Field(default_factory=list)
+    tool_trace: list[str] = Field(default_factory=list)
+    truncated: bool = False
+    latency_ms: int = 0
+
+    @model_validator(mode="after")
+    def require_issue_types_for_non_ok(self):
+        if self.correctness != "ok" and not self.issue_types:
+            raise ValueError(f"{self.correctness} 必须提供至少一个 issue_type")
+        return self
 
 
 class RichContentCard(BaseModel):
@@ -191,6 +224,36 @@ class Verdict(BaseModel):
     arbitrated: bool = False
     arbitrator_confidence: float | None = None
     arbitrator_rationale: str | None = None
+
+
+class OperationVerdict(BaseModel):
+    """任务类（录屏）聚合结论。"""
+
+    item_id: str
+    model: str
+    rubric: dict[str, float] = Field(default_factory=dict)
+    rubric_reasons: dict[str, str] = Field(default_factory=dict)
+    na_dimensions: list[str] = Field(default_factory=list)
+    total: float | None = None
+    task_type: OperationTaskType | None = None
+    correctness: OperationCorrectness
+    issue_types: list[str] = Field(default_factory=list)
+    is_low_level: LowLevel = "no"
+    rationale: str = ""
+    n_judges: int = 0
+    judges_agreement: float | None = None
+    repeat_std: float | None = None
+    low_agreement: bool = False
+    single_scores: list[OperationSingleScore] = Field(default_factory=list)
+    arbitrated: bool = False
+    arbitrator_confidence: float | None = None
+    arbitrator_rationale: str | None = None
+
+    @model_validator(mode="after")
+    def require_issue_types_for_non_ok(self):
+        if self.correctness != "ok" and not self.issue_types:
+            raise ValueError(f"{self.correctness} 必须提供至少一个 issue_type")
+        return self
 
 
 class PairResult(BaseModel):

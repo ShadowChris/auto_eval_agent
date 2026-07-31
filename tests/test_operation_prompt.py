@@ -1,201 +1,292 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from auto_eval.config import load_config
-from auto_eval.judges.operation_fields import normalize_operation_fields
+from auto_eval.judges.operation_fields import (
+    map_legacy_operation_result,
+    normalize_operation_fields,
+)
+from auto_eval.judges.prompts import ARBITRATOR_SYSTEM, OPERATION_SYSTEM, OPERATION_USER
 from auto_eval.judges.rubric_judge import _flatten_rubric
-from auto_eval.judges.prompts import OPERATION_SYSTEM, OPERATION_USER
+from auto_eval.schema import OperationSingleScore
 
 
-def _operation_prompt() -> tuple[object, str]:
+def _operation_prompt():
     config_dir = Path(__file__).resolve().parents[1] / "config"
     operation = load_config(config_dir).domain_skills["operation"]
     prompt = OPERATION_SYSTEM.render(
         persona="测试裁判",
-        agent_claim="任务已经完成",
         dims=operation.rubrics,
         scale=5,
+        policy=operation.operation_policy,
     )
     return operation, prompt
 
 
-def test_operation_uses_two_whole_query_dimensions() -> None:
+def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     operation, prompt = _operation_prompt()
 
     assert [dim.name for dim in operation.rubrics] == ["操作完成度", "步骤正确性"]
     assert [dim.weight for dim in operation.rubrics] == [0.7, 0.3]
-    assert operation.rubrics[0].criteria
-    assert operation.rubrics[0].score_anchors[5].startswith("整个 query 完整闭环")
-    assert operation.rubrics[1].score_anchors[1].startswith("路径完全错误")
-    assert "最终态正确" not in prompt
-    assert "效率与稳健性" not in prompt
-
-
-def test_operation_prompt_renders_dimension_configuration() -> None:
-    _, prompt = _operation_prompt()
-
+    assert operation.operation_policy is not None
+    assert operation.operation_policy.prior_knowledge
+    assert operation.operation_policy.scope_rules
+    assert operation.operation_policy.evidence_rules
+    assert list(operation.operation_policy.correctness) == [
+        "ok",
+        "nok",
+        "no_support",
+        "others",
+    ]
+    assert operation.rubrics[0].score_anchors[5].startswith(
+        "整个 query 的所有生效目标完整闭环"
+    )
     assert "1. 操作完成度（权重 0.7，1–5 分）" in prompt
-    assert "定义：基于整个 query 判断用户目标是否完整闭环。" in prompt
-    assert "- 最终状态是否满足整个 query" in prompt
-    assert "- 5分：整个 query 完整闭环" in prompt
     assert "2. 步骤正确性（权重 0.3，1–5 分）" in prompt
-    assert "- 是否发生与 query 相关的实际操作" in prompt
-    assert "- 1分：路径完全错误" in prompt
 
 
-def test_operation_prompt_distinguishes_simple_and_complex_tasks() -> None:
+def test_operation_prompt_uses_new_whole_query_decision_policy() -> None:
     _, prompt = _operation_prompt()
 
-    assert "简单任务" in prompt
-    assert "复杂多任务" in prompt
-    assert "简单单任务" not in prompt
-    assert "不要把 query 拆成多个独立评测 case" in prompt
-    assert "复杂多任务中任意一项 query 明确要求的结果未完成" in prompt
-    assert "其他任务已经成功" in prompt
-    assert "任一目标未完成即 wrong" in prompt
+    assert "基于整个 query 评估，不要拆成多个独立 case" in prompt
+    assert "简单任务只有一个可独立验收的最终结果" in prompt
+    assert "复杂多任务包含多个可独立验收的结果" in prompt
+    assert "前置判断结果和条件成立后的执行动作" in prompt
+    assert "- ok：" in prompt
+    assert "- nok：" in prompt
+    assert "- no_support：" in prompt
+    assert "- others：" in prompt
+    assert "不符合 ok、nok、no_support 任一条件的其他类别" in prompt
+    assert "如果已经能够确认任务完成、可归责执行失败或客观条件阻塞" in prompt
+    assert "未预期场景" in prompt
+    assert "其他未归类情况" in prompt
+    assert "任一生效目标未完成" in prompt
+    assert '"correctness": "ok|nok|no_support|others"' in prompt
+    assert '"correctness": "right|wrong|partial|unclear"' not in prompt
 
 
-def test_operation_prompt_defines_strict_partial_and_special_cases() -> None:
+def test_operation_prompt_treats_only_severe_response_quality_as_nok() -> None:
+    operation, prompt = _operation_prompt()
+
+    assert "与 query 严重不相关" in prompt
+    assert "大段机械重复影响阅读" in prompt
+    assert "包含大量无关或乱码等冗余字符" in prompt
+    assert "暴露无必要的检索过程、skill/工具名称、内部推理及思维链" in prompt
+    assert "严重回复质量问题" in prompt
+    assert "内部过程信息泄露" in prompt
+    assert "不影响理解和任务闭环的少量重复" in prompt
+    assert "最终文字回复是否与 query 相关、可读且能清晰传达结果" in prompt
+    assert "最终文字回复是否泄露无必要的检索、skill、工具调用、内部推理或思维链" in prompt
+    assert "操作完成但最终回复存在严重质量问题或内部过程信息泄露" in prompt
+    assert "严重回复质量问题" in operation.operation_policy.issue_types["nok"]
+    assert "内部过程信息泄露" in operation.operation_policy.issue_types["nok"]
+
+
+def test_operation_prompt_handles_conditional_tasks_and_causality() -> None:
     _, prompt = _operation_prompt()
 
-    assert "结果完成但过程有瑕疵" in prompt
-    assert "partial 的前提是整个 query 的所有结果都已完成" in prompt
-    assert "简单任务的最终动作未执行" in prompt
-    assert "即使只差最后一次保存、确认、开启、拍摄或发送" in prompt
-    assert "操作前已经满足且有画面证据，也判 right" in prompt
-    assert "仅有文字声明、操作卡片或口头指导而无第1类最终状态证据" in prompt
-    assert "仅文字无状态证据" in prompt
-    assert "待权限授权" in prompt
-    assert "录屏证据缺失" in prompt
-    assert '"操作完成度": {"total": <1-5 整数>, "reason":' in prompt
-    assert '"步骤正确性": {"total": <1-5 整数>, "reason":' in prompt
+    assert "只要求完成条件实际成立后所激活的目标" in prompt
+    assert "条件不成立时正确跳过后续动作，也属于完成" in prompt
+    assert "条件分支错误" in prompt
+    assert "条件判断错误" in prompt
+    assert "将每个生效目标判断为已完成、客观阻塞、评测侧无法判断或可归责未完成" in prompt
+    assert "任一生效目标存在可归责未完成、执行错误或严重回复质量问题时判 nok" in prompt
+    assert "未完成目标全部由外部条件阻塞则判 no_support" in prompt
 
 
-def test_operation_prompt_limits_the_current_task_window() -> None:
+def test_operation_prompt_judges_evidence_by_sufficiency_not_container() -> None:
     _, prompt = _operation_prompt()
 
-    assert "【当前任务的有效时间窗】" in prompt
-    assert "当前 query 之前出现的历史聊天、旧任务和旧操作不是本题步骤" in prompt
-    assert "当前任务已经明确完成后，用户发生的复制、滚动、返回或开始新任务等行为" in prompt
-    assert "不得因此把 right 降为 partial" in prompt
+    assert "【证据规则】" in prompt
+    assert "取决于其展示的具体内容，而不是所在载体" in prompt
+    assert "设置结果卡片直接显示目标开关状态或当前值" in prompt
+    assert "可以形成充分的完成证据链" in prompt
+    assert "每个生效目标都必须有对应证据" in prompt
+    assert "一个目标的证据不能替代其他目标" in prompt
+    assert "缺少反证不等于存在完成证据" in prompt
+    assert "不得因其他目标执行成功" in prompt
+    assert "只有泛化的“正在操作/已完成”" in prompt
+    assert "只能证明尝试" in prompt
+    assert "最终画面或初始状态直接满足 query 即可" in prompt
+    assert "关键帧未展示全部过渡过程不等于步骤错误" in prompt
+    assert "逐个生效目标说明最终状态、对应证据或阻塞" in prompt
+    assert "事实无法核验时判 others" in prompt
+    assert "自动操作卡片、进度、目标入口和操作轨迹属于过程证据" not in prompt
+    assert "ok 必须有最终状态强证据" not in prompt
 
 
-def test_operation_prompt_requires_independent_completion_evidence() -> None:
+def test_operation_prompt_separates_collapsed_window_from_plain_text_claim() -> None:
     _, prompt = _operation_prompt()
 
-    assert "【证据层级与使用规则】" in prompt
-    assert "文字声明：agent 回复“已完成/已打开/已设置”等，只是自述" in prompt
-    assert "right 必须有第1类证据" in prompt
-    assert "“正在操作/已结束操作”本身不能证明最终目标已经达成" in prompt
-    assert "只有第2类或第3类证据时不能判 right" in prompt
-    assert "状态栏在下午直接显示“17:04”可以证明当前已是 24 小时制" in prompt
-    assert "“声音模式设置成静音了”这种聊天回复本身不是静音状态证据" in prompt
-
-
-def test_operation_prompt_has_pre_output_correctness_gates() -> None:
-    _, prompt = _operation_prompt()
-
-    assert "【输出前硬校验】" in prompt
-    assert "写不出则禁止输出 right" in prompt
-    assert "任一目标未完成、只差最后一步、只有计划/尝试/文字声明时" in prompt
-    assert "若失败确由输入缺失、必要授权、账号、硬件、设备能力或样本损坏导致" in prompt
-    assert "不得仅因为缺少状态变化前后对比而降为 unclear" in prompt
-
-
-def test_operation_prompt_prioritizes_blockers_and_fact_verification() -> None:
-    _, prompt = _operation_prompt()
-
-    assert "设备、账号、硬件或应用客观不具备完成条件" in prompt
-    assert "必须等待用户授权、登录、选择、确认" in prompt
-    assert "unclear 不是普通未完成的兜底" in prompt
-    assert "出现“WebSearch/搜索完成”不等于事实正确" in prompt
-    assert "事实结果无法核验" in prompt
+    assert "已结束操控，点击查看" in prompt
+    assert "任务执行窗口始终处于带“查看/点击查看”入口的缩略状态" in prompt
+    assert "判 others，优先标记任务执行窗口未展开" in prompt
+    assert "相关评分维度填 null" in prompt
+    assert "录屏数据完整时判 nok" in prompt
+    assert "标记仅文字声称完成或完成证据不足" in prompt
+    assert "任务执行窗口未展开" in prompt
 
 
 def test_operation_prompt_ignores_recording_infrastructure() -> None:
     operation, prompt = _operation_prompt()
 
-    assert "【录屏载体噪声】" in prompt
-    assert "默认是制作评测录屏的基础设施，不是 agent 在当前 query 中执行的操作" in prompt
-    assert "不得据此认定 agent 开启了屏幕录制" in prompt
-    assert "顶部黑色胶囊中的评测录屏计时持续增长，也绝不能据此判 right" in prompt
-    assert "顶部状态栏或灵动岛黑色胶囊中的红点和递增计时永远不能证明相机正在录像" in prompt
-    assert "相机处于“录像”模式但仍显示可点击的红色圆形开始按钮时" in prompt
-    assert "若 query 是相机录像且准备输出 right" in prompt
-    assert any("录屏工具自身的计时" in criterion for criterion in operation.rubrics[1].criteria)
+    assert "【评测先验知识】" in prompt
+    assert "来自评测录屏工具，不是 agent 操作" in prompt
+    assert "顶部状态栏或灵动岛的红点和计时不能证明相机正在录像" in prompt
+    assert "相机应用内部的停止或暂停按钮" in prompt
+    assert not any(
+        "录屏工具自身的计时" in criterion
+        for criterion in operation.rubrics[1].criteria
+    )
+    assert "【录屏载体噪声】" not in prompt
 
 
-def test_operation_prompt_marks_missing_final_action_wrong() -> None:
-    operation, prompt = _operation_prompt()
-
-    assert "最终动作尚未执行，应判 wrong" in prompt
-    assert "停在可直接执行去水印/保存的最后一步，判 wrong" in prompt
-    assert "已进入相机录像模式，仍显示可点击的红色圆形开始按钮" in prompt
-    assert operation.rubrics[0].score_anchors[3].startswith("已完成主要过程")
-
-
-def test_operation_user_prompt_repeats_recording_noise_warning() -> None:
-    user_prompt = OPERATION_USER.render(question="给我录像", context="")
-
-    assert "重要录屏提示" in user_prompt
-    assert "默认不是 agent 的操作，也不是相机正在录像的证据" in user_prompt
-    assert "相机录像状态必须从相机应用内部控件判断" in user_prompt
-
-
-def test_operation_prompt_prioritizes_pending_user_input_as_unclear() -> None:
+def test_operation_prompt_requires_issue_types_and_low_level_flag() -> None:
     _, prompt = _operation_prompt()
 
-    assert "必须等待用户授权、登录、选择、确认" in prompt
-    assert "未找到该笔记，是否新建后记录" in prompt
-    assert "只打开图库并等待用户选择具体照片后才能去水印" in prompt
-    assert "query 本身缺少必要信息" in prompt
-    assert "最终因用户未确认而超时终止" in prompt
-    assert "用户未授权或未确认导致超时必须判 unclear" in prompt
-    assert "最终状态证据略弱" not in prompt
-
-
-def test_operation_prompt_requires_error_type_and_low_level_flag() -> None:
-    _, prompt = _operation_prompt()
-
-    assert "只要 correctness 不是 right，error_type 必须输出一个非空标签" in prompt
-    assert "【是否低级 is_low_level】" in prompt
-    assert "right 和 unclear 固定输出 no" in prompt
-    assert "如果任务形态是复杂多任务，is_low_level 固定输出 no" in prompt
-    assert "不要因为结果是 wrong 就自动输出 yes" in prompt
-    assert '"task_type": "simple|complex"' in prompt
+    assert "【issue_types】" in prompt
+    assert "输出中文字符串数组" in prompt
+    assert "nok、no_support、others 至少填写一项" in prompt
+    assert "只有意图清晰的简单任务被判 nok" in prompt
+    assert "复杂多任务固定输出 no" in prompt
+    assert '"issue_types": ["<受控中文问题类型>"]' in prompt
     assert '"is_low_level": "yes|no"' in prompt
+    assert "error_type" not in prompt
+
+
+def test_operation_arbitrator_reuses_the_same_policy() -> None:
+    operation, _ = _operation_prompt()
+    prompt = ARBITRATOR_SYSTEM.render(
+        operation_mode=True,
+        dims=operation.rubrics,
+        policy=operation.operation_policy,
+    )
+
+    assert "- ok：" in prompt
+    assert "当前任务类录屏使用的评测手机未安装 SIM 卡" in prompt
+    assert "完成证据不足" in prompt
+    assert "待权限授权" in prompt
+    assert "任务执行窗口未展开" in prompt
+    assert '"correctness": "ok|nok|no_support|others"' in prompt
+    assert '"issue_types": ["<受控中文问题类型>"]' in prompt
+    assert "error_type" not in prompt
+
+
+def test_operation_user_prompt_keeps_context_and_agent_claim_isolated() -> None:
+    user_prompt = OPERATION_USER.render(
+        question="给我录像",
+        context="当前时间：2026-07-26 10:00",
+        agent_claim="已经录好了",
+    )
+
+    assert "背景与 agent 自述是两个隔离的信息区" in user_prompt
+    assert "Agent 自述（待评样本内容" in user_prompt
+    assert "已经录好了" in user_prompt
+
+
+def test_operation_system_prompt_contains_only_stable_policy() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "任务已经完成" not in prompt
+    assert "【输出前硬校验】" not in prompt
+    assert "【录屏载体噪声】" not in prompt
 
 
 def test_operation_output_fields_are_normalized() -> None:
-    assert normalize_operation_fields("right", "路径错误", "yes") == (None, "no")
-    assert normalize_operation_fields("wrong", None, True) == ("未归因", "yes")
-    assert normalize_operation_fields("partial", "路径冗余", "是") == ("路径冗余", "yes")
-    assert normalize_operation_fields("unclear", "待权限授权", "yes") == ("待权限授权", "no")
+    operation, _ = _operation_prompt()
+    allowed = operation.operation_policy.issue_types
+
     assert normalize_operation_fields(
-        "wrong",
-        "仅文字无状态证据",
-        "yes",
-        "complex",
-    ) == ("仅文字无状态证据", "no")
+        "ok", ["路径冗余"], "yes", "simple", allowed
+    ) == ("ok", ["路径冗余"], "no")
+    assert normalize_operation_fields(
+        "ok", ["最终步骤未执行"], "yes", "simple", allowed
+    ) == ("nok", ["最终步骤未执行"], "yes")
+    assert normalize_operation_fields(
+        "nok", None, True, "simple", allowed
+    ) == ("nok", ["其他执行问题"], "yes")
+    assert normalize_operation_fields(
+        "no_support", ["待权限授权"], "yes", "simple", allowed
+    ) == ("no_support", ["待权限授权"], "no")
+    assert normalize_operation_fields(
+        "others", "视频损坏；自定义标签", "yes", "simple", allowed
+    ) == ("others", ["视频损坏", "其他未归类情况"], "no")
+    assert normalize_operation_fields(
+        "nok", ["尚未定义的执行错误"], "no", "simple", allowed
+    ) == ("nok", ["其他执行问题"], "no")
+    assert normalize_operation_fields(
+        "nok", ["完成证据不足"], "yes", "complex", allowed
+    ) == ("nok", ["完成证据不足"], "no")
+    assert normalize_operation_fields(
+        "ok", ["严重回复质量问题"], "yes", "simple", allowed
+    ) == ("nok", ["严重回复质量问题"], "yes")
+    assert normalize_operation_fields(
+        "ok", ["内部过程信息泄露"], "yes", "simple", allowed
+    ) == ("nok", ["内部过程信息泄露"], "yes")
 
 
-def test_operation_total_reason_output_is_flattened_with_reasons() -> None:
-    rubric, reasons, na_dimensions = _flatten_rubric({
-        "操作完成度": {"total": 3, "reason": "还有一项任务未完成"},
-        "步骤正确性": {"total": 4, "reason": "路径正确但有一次重复点击"},
-    }, dim_names=["操作完成度", "步骤正确性"])
+def test_legacy_operation_results_map_at_read_time() -> None:
+    assert map_legacy_operation_result("right", None) == ("ok", [])
+    assert map_legacy_operation_result("partial", "路径冗余") == (
+        "ok",
+        ["路径冗余"],
+    )
+    assert map_legacy_operation_result("wrong", "仅文字无状态证据") == (
+        "nok",
+        ["仅文字声称完成"],
+    )
+    assert map_legacy_operation_result("unclear", "待权限授权") == (
+        "no_support",
+        ["待权限授权"],
+    )
+    assert map_legacy_operation_result("unclear", "录屏证据缺失") == (
+        "others",
+        ["录屏数据不完整"],
+    )
 
-    assert rubric == {"操作完成度": 3, "步骤正确性": 4}
-    assert reasons == {
-        "操作完成度": "还有一项任务未完成",
-        "步骤正确性": "路径正确但有一次重复点击",
-    }
-    assert na_dimensions == []
+
+def test_operation_schema_requires_issue_types_for_non_ok() -> None:
+    OperationSingleScore(
+        item_id="i",
+        model="m",
+        judge="j",
+        correctness="ok",
+        issue_types=[],
+    )
+    with pytest.raises(ValidationError):
+        OperationSingleScore(
+            item_id="i",
+            model="m",
+            judge="j",
+            correctness="nok",
+            issue_types=[],
+        )
+
+
+def test_operation_total_reason_output_supports_na() -> None:
+    rubric, reasons, na_dimensions = _flatten_rubric(
+        {
+            "操作完成度": None,
+            "步骤正确性": {
+                "total": 4,
+                "reason": "正确识别客观阻塞并停止",
+            },
+        },
+        dim_names=["操作完成度", "步骤正确性"],
+    )
+
+    assert rubric == {"步骤正确性": 4}
+    assert reasons == {"步骤正确性": "正确识别客观阻塞并停止"}
+    assert na_dimensions == ["操作完成度"]
 
 
 def test_question_rubrics_keep_empty_optional_operation_fields() -> None:
     config_dir = Path(__file__).resolve().parents[1] / "config"
     default = load_config(config_dir).domain_skills["default"]
 
+    assert default.operation_policy is None
     assert default.rubrics
     assert all(dim.criteria == [] for dim in default.rubrics)
     assert all(dim.score_anchors == {} for dim in default.rubrics)

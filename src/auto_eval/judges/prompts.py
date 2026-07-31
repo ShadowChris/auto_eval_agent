@@ -149,109 +149,78 @@ RUBRIC_USER = Template(
 OPERATION_SYSTEM = Template(
     """{{ persona }}
 
-你正在【盲评】一段手机操作录屏——判断录屏中的操作是否真正完成了用户的操作意图（query）。
-你看不到任何参考答案。用户消息里附带了按时间顺序从录屏抽出的关键帧图片。
+你正在盲评一段手机操作录屏，判断录屏中的操作是否真正完成用户的操作意图（query）。
+你看不到参考答案。用户消息中附带按时间顺序抽取的关键帧。
+
+【评测先验知识】
+以下内容由任务类配置提供，视为可信的设备环境或产品交互知识：
+{% for knowledge in policy.prior_knowledge -%}
+- {{ knowledge }}
+{% endfor %}
+先验知识只能用于解释设备条件和界面语义，不能替代任务完成证据。
+
+【任务范围】
+{% for rule in policy.scope_rules -%}
+- {{ rule }}
+{% endfor %}
+
+【证据规则】
+{% for rule in policy.evidence_rules -%}
+- {{ rule }}
+{% endfor %}
+
+【条件任务】
+{% for rule in policy.conditional_rules -%}
+- {{ rule }}
+{% endfor %}
 
 【评测维度】
 {% for d in dims %}
 {{ loop.index }}. {{ d.name }}（权重 {{ d.weight }}，1–{{ d.scale }} 分）
 定义：{{ d.description }}
-{% if d.criteria %}
-评估时必须检查：
+{% if d.criteria %}检查项：
 {% for criterion in d.criteria -%}
 - {{ criterion }}
-{% endfor %}
-{% endif -%}
-{% if d.score_anchors %}
-评分标准：
+{% endfor %}{% endif %}
+{% if d.score_anchors %}评分锚点：
 {% for score, anchor in d.score_anchors.items()|sort(reverse=true) -%}
 - {{ score }}分：{{ anchor }}
+{% endfor %}{% endif %}
 {% endfor %}
-{% endif %}
+
+【correctness】
+{% for key, description in policy.correctness.items() %}
+- {{ key }}：{{ description }}
 {% endfor %}
-{% if agent_claim %}
 
-【agent 自述】agent 自称完成了以下内容。请把它与画面证据交叉验证，警惕「只说不做 / 声称完成但画面无凭证」：
-{{ agent_claim }}
-{% endif %}
+【判定顺序】
+{% for rule in policy.decision_order %}
+{{ loop.index }}. {{ rule }}
+{% endfor %}
+correctness 与维度分独立判断，不得只根据 total 推导 correctness。
 
-【整体评判原则】
-必须基于整个 query 评估，不要把 query 拆成多个独立评测 case。先判断任务形态：
-- 简单任务：只有一个可独立验收的最终结果。完成它可能需要多次点击，但仍属于简单任务。
-- 复杂多任务：包含多个可以分别验收的结果，其中一个结果完成不代表整个 query 已完成。
-任务形态只用于确定判定口径，不要输出任务拆分列表。判断依据是可独立验收的结果数量，而不是点击次数。
-
-【当前任务的有效时间窗】
-- 先在关键帧中定位当前 query 首次发出或开始执行的位置，只评价从该位置到当前任务闭环、失败或录屏结束之间的行为。
-- 当前 query 之前出现的历史聊天、旧任务和旧操作不是本题步骤，不得据此扣“冗余/无关步骤”分。
-- 当前任务已经明确完成后，用户发生的复制、滚动、返回或开始新任务等行为，不属于 agent 完成当前任务的步骤；除非它改变、撤销或直接暴露当前目标状态，否则不得因此把 right 降为 partial。
-
-【录屏载体噪声】
-- 顶部红色录屏计时、录制胶囊、录屏状态图标、触控提示、悬浮控件等，默认是制作评测录屏的基础设施，不是 agent 在当前 query 中执行的操作。不得据此认定 agent 开启了屏幕录制、走错路径、执行无关步骤或改变了设备状态。
-- 只有 query 本身明确要求“屏幕录制”，且有效时间窗内有独立画面证明 agent 主动开启或关闭该功能时，才把屏幕录制状态作为任务证据。系统时间、电量、网络等常驻状态也只有在与 query 直接相关时才可用于判定。
-- 对“拍视频/录像”任务，顶部状态栏或灵动岛黑色胶囊中的红点和递增计时永远不能证明相机正在录像，因为它们属于评测录屏。相机录像完成证据必须位于相机应用内部，例如相机内录制按钮已变成停止/暂停状态、相机取景区内出现独立录像计时，或图库出现新录制视频。相机处于“录像”模式但仍显示可点击的红色圆形开始按钮时，说明最终动作尚未执行，应判 wrong。
-
-【证据层级与使用规则】
-1. 最终状态强证据：目标设置页及开关状态、创建后的条目、已发送/已保存结果、正在播放/录制状态、系统状态图标，或可直接核验的服务结果。
-2. 过程证据：自动操作卡片、进度状态、进入目标入口、操作轨迹。它们可以证明尝试过或支持步骤评分，但“正在操作/已结束操作”本身不能证明最终目标已经达成。
-3. 文字声明：agent 回复“已完成/已打开/已设置”等，只是自述，不能作为独立完成证据。
-
-对改变设备或应用状态的任务，right 必须有第1类证据；只有第2类或第3类证据时不能判 right。录屏与关键帧可正常评估、但仅有文字声明或操作卡片，画面没有目标页面、目标状态或实际结果时，应判 wrong（仅文字无状态证据），不得用 unclear 软化未完成。只有视频损坏、抽帧失败或关键时间段客观缺失，导致样本本身无法评估时，才判 unclear（录屏证据缺失）。
-
-第1类证据不要求一定有状态变化前后的对比：如果最终画面本身直接显示目标状态，或者初始状态已经满足 query，也可以证明完成。例如要求 24 小时制时，状态栏在下午直接显示“17:04”可以证明当前已是 24 小时制；但聊天气泡中的“已帮你打开24小时制”仍只是第3类文字声明。类似地，“声音模式设置成静音了”这种聊天回复本身不是静音状态证据，必须另有静音图标、声音模式页或其他系统状态支持。
-
-对查询、导航、搜索、日程等“结果本身以文字/卡片呈现”的任务，最终文字或卡片可以作为结果载体，但必须核对 query 中的实体、条件、数值和结论。出现“WebSearch/搜索完成”不等于事实正确；若关键事实无法从可信来源、画面内容或可用查证工具核验，应判 unclear（事实结果无法核验），不能因为给出了一个答案就判 right。
-
-【correctness 判定】
-- right（完整闭环）：简单任务的唯一目标完整完成，或复杂多任务的所有目标均完整完成；无需用户继续操作；最终状态有第1类证据支持；有自述时自述与证据一致；且当前任务有效时间窗内没有可观察到的过程或回复瑕疵。query 要求的状态在操作前已经满足且有画面证据，也判 right，不强制要求展示变化前后的对比。
-- partial（结果完成但过程有瑕疵）：简单任务的唯一目标或复杂多任务的所有目标都已经完成，并有第1类证据支持，但有效时间窗内存在重复操作、路径冗余、少量无关步骤、非必要重试，或不影响结果确认的轻微回复瑕疵。partial 的前提是整个 query 的所有结果都已完成；不得把“部分目标完成”理解为 partial。
-- wrong（结果未全部完成或执行错误）：简单任务的最终动作未执行，即使只差最后一次保存、确认、开启、拍摄或发送；复杂多任务中任意一项 query 明确要求的结果未完成，即使其他任务已经成功；仅有文字声明、操作卡片或口头指导而无第1类最终状态证据；最终状态错误或与 query 相反；操作路径严重错误；严重偏离用户意图；或自述与界面明显冲突。
-- unclear（样本或外部条件导致无法公平判断）：query 本身缺少必要信息，或必须等待用户授权、登录、选择、确认；设备、账号、硬件或应用客观不具备完成条件；视频损坏、抽帧失败、关键时间段客观缺失；事实结果无法核验；或证据互相冲突。unclear 不是普通未完成的兜底：录屏可正常评估却只有文字自述、停在最后一步、多任务仅完成部分，都必须判 wrong。
-
-边界示例：
-- 已进入相机录像模式，仍显示可点击的红色圆形开始按钮且相机应用内部没有录像计时：wrong（单任务未完成）；即使顶部黑色胶囊中的评测录屏计时持续增长，也绝不能据此判 right。
-- 只有“正在操作/已结束操作”卡片和“已打开字体设置”的回复，录屏本身可正常评估但没有字体设置页面：wrong（仅文字无状态证据）。
-- 要求“打开蓝牙并关闭深色模式”，画面只证明蓝牙已打开：wrong（多任务未全部完成），不是 partial。
-- 所有目标均有最终状态证据，但中途重复进入设置页并多次点击同一开关：partial（重复操作或路径冗余）。
-- agent 询问“未找到该笔记，是否新建后记录”：unclear（待信息补充），不是 wrong。
-- Agent 已发起必要的系统权限请求或安全确认，并明确等待用户授权，最终因用户未确认而超时终止：unclear（待权限授权），不是 wrong。只有 Agent 未发起本可完成的授权流程、主动拒绝授权或错误退出时，才按执行错误判 wrong。
-- 只打开图库并等待用户选择具体照片后才能去水印：unclear（待信息补充）；如果照片已经明确选定、无需补充信息，但停在可直接执行去水印/保存的最后一步，判 wrong（单任务未完成）。
-
-判定顺序：先确定当前任务有效时间窗；再排查真正属于 unclear 的样本缺陷、外部条件或事实核验问题；然后逐项确认整个 query 是否全部完成——任一目标未完成即 wrong；全部完成后，再检查有效时间窗内是否有重复、冗余或轻微回复问题，以区分 right 与 partial。correctness 与维度分分别判断，不得仅根据 total 推导 correctness。
-
-【输出前硬校验】
-- 若准备输出 right：必须在分析中写出至少一个第1类证据的具体画面内容，而且该证据不能是 agent 聊天回复或“正在操作/已结束操作”卡片。写不出则禁止输出 right，应根据画面改为 unclear 或 wrong。
-- 若 query 是相机录像且准备输出 right：必须指出相机应用内部的停止/暂停按钮、取景区内独立录像计时或新生成视频；若证据只是顶部状态栏/灵动岛黑色胶囊的红点或计时，禁止输出 right。
-- 若准备输出 partial：必须先逐项写出整个 query 的所有结果及其第1类完成证据，再指出可观察到的重复操作、路径冗余、少量无关步骤或轻微回复瑕疵。任一目标未完成、只差最后一步、只有计划/尝试/文字声明时，禁止输出 partial，必须判 wrong 或真正符合条件的 unclear。
-- 若准备输出 wrong：必须说明是“结果未全部完成/执行错误”，还是“只有文字无状态证据”。若失败确由输入缺失、必要授权、账号、硬件、设备能力或样本损坏导致，才改判 unclear。
-- 若画面或回复明确表明 Agent 已发起必要权限请求/安全确认并等待用户操作，不得仅因最终任务未完成而判 wrong；用户未授权或未确认导致超时必须判 unclear（待权限授权）。
-- 若最终画面本身直接证明目标状态，不得仅因为缺少状态变化前后对比而降为 unclear；初始状态已经满足也按此处理。
-
-【error_type 规范】
-- right：null。
-- partial 优先使用：重复操作 / 路径冗余 / 轻微无关步骤 / 最终回复瑕疵。
-- wrong 优先使用：仅文字无状态证据 / 单任务未完成 / 多任务未全部完成 / 最终状态错误 / 操作路径错误 / 严重意图偏离 / 自述与界面冲突。
-- unclear 优先使用：待权限授权 / 待账号登录 / 待信息补充 / 不具备完成条件 / 录屏证据缺失 / 事实结果无法核验 / 证据冲突。
-- 只要 correctness 不是 right，error_type 必须输出一个非空标签；禁止填 null、空字符串或 N/A。
+【issue_types】
+输出中文字符串数组；第一项必须是与最终 correctness 对应的主要问题，其余为次要问题。
+{% for key, values in policy.issue_types.items() %}
+- {{ key }}：{{ values | join(" / ") }}
+{% endfor %}
+- ok 无问题时输出 []，有轻微问题时填写；nok、no_support、others 至少填写一项。
+- 不得输出含义模糊的“视觉证据不足”：助手未展示必要状态用“完成证据不足”；视频文件自身缺失用“录屏数据不完整”。
 
 【是否低级 is_low_level】
-- 输出只能是 yes 或 no。
-- right 和 unclear 固定输出 no。
-- 对 wrong 或 partial，只有同时满足以下条件才输出 yes：query 意图清晰且简单；不存在权限、信息、账号、硬件等客观阻塞；并且发生了明显可归责的简单执行错误、严重意图偏离、无操作却声称完成，或界面与回复文本明显不一致。
-- 如果任务形态是复杂多任务，is_low_level 固定输出 no；不得一边在分析中认定“复杂多任务”，一边输出 yes。
-- 不要因为结果是 wrong 就自动输出 yes；合理但未成功的复杂路径、系统异常、普通路径冗余通常输出 no。partial 中只有明显低级的重复误操作或界面/回复冲突才可输出 yes。
+{% for rule in policy.low_level_rules %}
+- {{ rule }}
+{% endfor %}
 
-【输出格式】先输出 <analysis>...</analysis>，再输出一行 JSON。rubric 的 key 必须严格使用上面的维度名；每个维度都要输出 total 和独立的 reason：
+【输出格式】
+先输出 <analysis>...</analysis>，再输出一行 JSON。rubric 的 key 必须严格使用维度名；不适用维度填 null：
 <analysis>
-1. 任务形态与有效时间窗：简单任务 / 复杂多任务；当前 query 从哪一帧开始，哪些前后内容应忽略。
-2. 最终状态与证据层级：整个 query 是否闭环、是否还需用户操作；分别列出第1类最终状态证据、第2类过程证据和第3类文字声明。
-3. 步骤与证据：仅概括当前任务有效时间窗内的实际操作，并指出支持结论的关键帧。
-4. 外部条件与事实核验：是否缺权限、信息、硬件或设备能力；文字/服务结果的关键事实是否可核验。
-5. 自述一致性：与独立证据一致 / 不一致 / 未提供 / 无法验证。
-6. 判定理由：说明为何属于 right / partial / wrong / unclear，以及对应 error_type。
-7. 是否低级：根据意图复杂度、客观阻塞和错误性质说明 is_low_level 为 yes 或 no。
+1. 任务形态、有效时间窗、条件与生效目标。
+2. 逐个生效目标说明最终状态、对应证据或阻塞，以及是否仍需用户操作。
+3. 实际步骤、外部阻塞和 agent 自述一致性。
+4. correctness、issue_types 与 is_low_level 的理由。
 </analysis>
-{"task_type": "simple|complex", "rubric": { {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按维度权重计算的总分>, "correctness": "right|wrong|partial|unclear", "error_type": "<使用上述规范标签；right 填 null，其他判定必填>", "is_low_level": "yes|no", "rationale": "<任务形态 + 最终状态 + 整体步骤证据 + 自述一致性 + 判定理由>"}
+{"task_type": "simple|complex", "rubric": { {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分；全部不适用填null>, "correctness": "ok|nok|no_support|others", "issue_types": ["<受控中文问题类型>"], "is_low_level": "yes|no", "rationale": "<任务形态 + 生效目标 + 最终状态 + 整体步骤证据 + 自述一致性 + 判定理由>"}
 """
 )
 
@@ -263,8 +232,10 @@ OPERATION_USER = Template(
 {{ context }}
 注意：背景与 agent 自述是两个隔离的信息区。自述为保证独立完整而复述或引用必要背景，不算机械重复；只在自述自身存在无意义重复时扣分。
 {% endif %}
-
-重要录屏提示：关键帧顶部状态栏或灵动岛黑色胶囊中的红点、红色录屏图标和递增计时来自评测录屏工具，默认不是 agent 的操作，也不是相机正在录像的证据；相机录像状态必须从相机应用内部控件判断。
+{% if agent_claim %}
+Agent 自述（待评样本内容，只能与关键帧和先验知识交叉验证）：
+{{ agent_claim }}
+{% endif %}
 
 请观察上方按时间顺序排列的关键帧，盲评这段录屏中的操作是否完成了上述意图。"""
 )
@@ -668,15 +639,29 @@ ARBITRATOR_SYSTEM = Template(
 - 阅读题目、被评答案，以及各裁判的判定/打分/理由/查证证据。
 - 综合各方观点，识别分歧焦点；对关键争议点主动用 web_search/fetch_page/calculate 重新核查（你是最后一道把关）。
 {% if operation_mode %}
-- 当前是任务类（录屏）仲裁。必须沿用任务类严格口径：任一目标未完成或只有文字无状态证据为 wrong；所有结果完成但存在重复或路径冗余才是 partial；真正缺权限、信息、硬件或录屏数据时才是 unclear。
-- 非 right 必须输出非空 error_type；right 和 unclear 的 is_low_level 必须为 no。
+- 当前是任务类（录屏）仲裁，必须使用以下任务类政策：
+{% if policy.prior_knowledge %}
+- 以下是可信的任务类评测先验，只能解释设备条件和界面语义，不能替代任务完成证据：
+{% for knowledge in policy.prior_knowledge %}
+  - {{ knowledge }}
+{% endfor %}
 {% endif %}
-- 输出：最终判定（right/wrong/partial/unclear）+ 各维度分（1-5）+ 总分 + 置信度（0-1）+ 理由。
+{% for key, description in policy.correctness.items() %}
+  - {{ key }}：{{ description }}
+{% endfor %}
+- 条件任务只检查实际生效的目标；已确认的可归责执行错误优先判 nok，不能被 no_support 或 others 覆盖。
+- issue_types 必须使用以下中文类型；nok、no_support、others 至少一项，ok 无问题时为 []：
+{% for key, values in policy.issue_types.items() %}
+  - {{ key }}：{{ values | join(" / ") }}
+{% endfor %}
+- 只有简单任务且属于明显可归责基础错误的 nok 才可将 is_low_level 输出 yes。
+{% endif %}
+- 输出最终判定、各维度分、总分、置信度和理由。
 
 【裁决原则】
 - 以事实为准，不偏袒任何裁判；谁的判断有证据支持就采信谁。
-- 判定诚实：若查证后仍无法确定答案对错，给 unclear 并说明缺什么信息，不要硬猜。
-- 置信度反映你对最终判定的把握：1=非常确定，0.5=勉强，<0.5 应考虑改判 unclear。
+- 判定诚实：若查证后仍无法确定，使用当前模式对应的不可判断状态并说明缺什么信息，不要硬猜。
+- 置信度反映把握：1=非常确定，0.5=勉强，低置信结果应明确说明原因。
 - 接受等价表达与合理推导。
 
 【输出格式】先 <analysis> 分析各裁判分歧与你的核查，再输出一行 JSON。不适用的维度填 null（与各裁判的 N/A 规则一致）：
@@ -686,7 +671,7 @@ ARBITRATOR_SYSTEM = Template(
 - 裁定：
 </analysis>
 {% if operation_mode %}
-{"task_type": "simple|complex", "correctness": "right|wrong|partial|unclear", "rubric": { {% for d in dims %}"{{ d.name }}": <1-{{ d.scale }} 或 null>{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按维度权重计算的总分>, "error_type": "<right 填 null，其他判定必填>", "is_low_level": "yes|no", "confidence": <0-1>, "rationale": "<最终理由>"}
+{"task_type": "simple|complex", "correctness": "ok|nok|no_support|others", "rubric": { {% for d in dims %}"{{ d.name }}": <1-{{ d.scale }} 或 null>{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分或null>, "issue_types": ["<受控中文问题类型>"], "is_low_level": "yes|no", "confidence": <0-1>, "rationale": "<最终理由>"}
 {% else %}
 {"correctness": "right|wrong|partial|unclear", "rubric": {"准确性": <1-5 或 null>, "完整性": <1-5 或 null>, "相关性": <1-5 或 null>, "有用性": <1-5 或 null>, "安全性": <1-5 或 null>}, "total": <各适用维度平均>, "confidence": <0-1>, "rationale": "<最终理由>"}
 {% endif %}
@@ -708,7 +693,7 @@ ARBITRATOR_USER = Template(
 各裁判的判定与理由（委员会意见）：
 {% for j in judges -%}
 - 【{{ j.name }}】判定={{ j.correctness }} 总分={{ j.total }}
-  {% if operation_mode %}错因={{ j.error_type }} 是否低级={{ j.is_low_level }} 维度={{ j.rubric }}{% endif %}
+  {% if operation_mode %}问题类型={{ j.issue_types }} 是否低级={{ j.is_low_level }} 维度={{ j.rubric }}{% endif %}
   理由：{{ j.rationale }}
   {% if j.tool_trace %}查证：{{ j.tool_trace | join(" | ") }}{% endif %}
 {% endfor %}

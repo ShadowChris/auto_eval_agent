@@ -62,6 +62,21 @@ def rich_content_result_fields(
     if card_suitability not in ("ok", "nok"):
         card_suitability = ""
     card_suitability_reason = observation.card_suitability_reason or ""
+    if not card_suitability and cards:
+        legacy_suitability = [card.get("suitability") for card in cards]
+        if all(value == "suitable" for value in legacy_suitability):
+            card_suitability = "ok"
+        elif any(
+            value in ("unsuitable", "partially_suitable")
+            for value in legacy_suitability
+        ):
+            card_suitability = "nok"
+        if card_suitability and not card_suitability_reason:
+            card_suitability_reason = "；".join(
+                str(card.get("reason") or "").strip()
+                for card in cards
+                if str(card.get("reason") or "").strip()
+            )
 
     superlink_suitability = (observation.superlink_suitability or "").strip()
     if superlink_suitability not in ("ok", "nok"):

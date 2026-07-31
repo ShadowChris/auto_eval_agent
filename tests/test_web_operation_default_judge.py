@@ -19,10 +19,11 @@ def test_single_and_operation_default_to_end_user_judge() -> None:
     assert "selectedJudges.value = defaultJudgeSelection(mode.value)" in app_js
 
 
-def test_operation_results_show_error_and_low_level_fields() -> None:
+def test_operation_results_show_issue_types_and_low_level_fields() -> None:
     app_js = (PROJECT_ROOT / "src/auto_eval/web/static/app.js").read_text(encoding="utf-8")
 
-    assert '{ key: "error_type", label: "错误类型" }' in app_js
+    assert '{ key: "issue_types", label: "问题类型" }' in app_js
     assert '{ key: "is_low_level", label: "是否低级" }' in app_js
     assert 'if (c.key === "is_low_level") return v === "yes" ? "是" : "否";' in app_js
-    assert 'partial: "◐ 完成但有瑕疵"' in app_js
+    assert 'ok: "✓ 完成"' in app_js
+    assert 'no_support: "⊘ 客观条件不支持"' in app_js

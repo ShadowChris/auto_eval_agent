@@ -52,6 +52,22 @@ def test_legacy_history_filename_remains_compatible(tmp_path, monkeypatch):
     assert not legacy.exists()
 
 
+def test_history_list_limit_zero_returns_all_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(history, "HISTORY_DIR", tmp_path)
+    for index in range(3):
+        task = Task(
+            id=f"task-{index}",
+            mode="operation",
+            items=[],
+            options={},
+            created_at=float(index + 1),
+        )
+        assert history.save_task(task)
+
+    assert len(history.list_snapshots(limit=2)) == 2
+    assert len(history.list_snapshots(limit=0)) == 3
+
+
 def test_history_note_api_updates_task_and_persists(monkeypatch):
     task = Task(
         id="note-task",
@@ -66,12 +82,33 @@ def test_history_note_api_updates_task_and_persists(monkeypatch):
 
     response = server.api_history_note(
         task.id,
-        server.HistoryNoteReq(note="  第二轮回归通过  "),
+        server.HistoryNoteReq(note="  第二轮回归\n已通过  "),
     )
 
-    assert response["note"] == "第二轮回归通过"
-    assert task.note == "第二轮回归通过"
-    assert saved == ["第二轮回归通过"]
+    assert response["note"] == "第二轮回归\n已通过"
+    assert task.note == "第二轮回归\n已通过"
+    assert saved == ["第二轮回归\n已通过"]
+
+
+def test_history_note_ui_supports_multiline_editing_and_full_display():
+    static_dir = server.STATIC_DIR
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    css = (static_dir / "style.css").read_text(encoding="utf-8")
+    js = (static_dir / "app.js").read_text(encoding="utf-8")
+
+    assert '<textarea\n                  v-model="historyNoteDrafts[h.task_id]"' in html
+    assert '@keydown.ctrl.enter.prevent="saveHistoryNote(h)"' in html
+    assert '@keydown.meta.enter.prevent="saveHistoryNote(h)"' in html
+    assert '@keyup.enter="saveHistoryNote(h)"' not in html
+    assert ".history-note-text {" in css
+    assert "white-space: pre-wrap;" in css
+    assert "overflow-wrap: anywhere;" in css
+    assert ".history-note-editor textarea {" in css
+    assert 'v-for="h in pagedHistoryItems"' in html
+    assert 'v-model.number="historyPageSize"' in html
+    assert "changeHistoryPage(-1)" in html
+    assert "jumpTablePage('history')" in html
+    assert 'fetch("/api/history?limit=0")' in js
 
 
 def test_history_note_api_limits_length(monkeypatch):

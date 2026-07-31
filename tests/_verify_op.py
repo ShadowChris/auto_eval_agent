@@ -24,11 +24,20 @@ op_skill = cfg.domain_skills.get("operation")
 assert op_skill and op_skill.rubrics, "operation skill 未加载（检查 config/skills/operation.yaml）"
 op_dims = op_skill.rubrics
 print("[3a] operation.yaml 加载 OK, dims=", [d.name for d in op_dims], "weights=", [d.weight for d in op_dims])
-s = OPERATION_SYSTEM.render(persona="评测员", agent_claim="我已设好闹钟", dims=op_dims, scale=op_dims[0].scale)
-assert "操作完成度" in s and "我已设好闹钟" in s, "模板渲染异常"
+s = OPERATION_SYSTEM.render(
+    persona="评测员",
+    dims=op_dims,
+    scale=op_dims[0].scale,
+    policy=op_skill.operation_policy,
+)
+assert "操作完成度" in s and "评测先验知识" in s, "模板渲染异常"
 assert all(d.name in s for d in op_dims), "维度未全部渲染进 prompt"
-u = OPERATION_USER.render(question="set alarm", current_date="2026年7月")
-assert "set alarm" in u
+u = OPERATION_USER.render(
+    question="set alarm",
+    context="当前时间：2026年7月",
+    agent_claim="我已设好闹钟",
+)
+assert "set alarm" in u and "我已设好闹钟" in u
 print("[3b] OPERATION_SYSTEM 动态渲染 OK")
 
 # 4) _to_evalitem 透传 media / frames→metadata

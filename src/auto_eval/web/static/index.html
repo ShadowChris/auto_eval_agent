@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260729_page_sizes">
+  <link rel="stylesheet" href="/static/style.css?v=20260730_history_pagination">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -35,7 +35,7 @@
       <table class="grid history-table auto-table">
         <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th class="history-progress-cell">进度</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
-          <tr v-for="h in historyItems" :key="h.task_id">
+          <tr v-for="h in pagedHistoryItems" :key="h.task_id">
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
             <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ modeLabel(h.mode) }}</td>
@@ -48,14 +48,16 @@
             </td>
             <td class="history-note-cell">
               <div v-if="historyNoteEditing[h.task_id]" class="history-note-editor">
-                <input
+                <textarea
                   v-model="historyNoteDrafts[h.task_id]"
                   maxlength="1000"
+                  rows="4"
                   placeholder="填写批跑备注"
-                  @keyup.enter="saveHistoryNote(h)"
+                  @keydown.ctrl.enter.prevent="saveHistoryNote(h)"
+                  @keydown.meta.enter.prevent="saveHistoryNote(h)"
                   @keyup.escape="cancelHistoryNote(h)"
                   autofocus
-                >
+                ></textarea>
                 <a href="#" class="history-text-link" @click.prevent="saveHistoryNote(h)">保存</a>
                 <a href="#" class="history-text-link history-cancel-link" @click.prevent="cancelHistoryNote(h)">取消</a>
               </div>
@@ -68,6 +70,29 @@
           </tr>
         </tbody>
       </table>
+    </div>
+    <div class="pagination" v-if="historyItems.length">
+      <span class="page-size">
+        每页
+        <select v-model.number="historyPageSize" @change="changeHistoryPageSize">
+          <option :value="10">10</option>
+          <option :value="20">20</option>
+          <option :value="50">50</option>
+        </select>
+        条
+      </span>
+      <template v-if="historyPageCount>1">
+        <button @click="changeHistoryPage(-1)" :disabled="historyPage<=1">上一页</button>
+        <template v-for="page in paginationPages(historyPage, historyPageCount)" :key="'history-page-'+page">
+          <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
+          <button v-else class="page-number" :class="{active:page===historyPage}" @click="setTablePage('history', page)">{{ page }}</button>
+        </template>
+        <button @click="changeHistoryPage(1)" :disabled="historyPage>=historyPageCount">下一页</button>
+        <span class="page-jump">
+          跳至 <input v-model="historyJumpPage" type="number" min="1" :max="historyPageCount" @keyup.enter="jumpTablePage('history')"> 页
+          <button @click="jumpTablePage('history')">确定</button>
+        </span>
+      </template>
     </div>
     <p v-else class="hint">暂无历史记录。</p>
   </details>
@@ -300,6 +325,7 @@
       <span>成功评测 {{ summary.done }}</span>
       <span v-if="summary.failed">失败 {{ summary.failed }}</span>
       <span v-if="summary.problem_count!=null">出问题 {{ summary.problem_count }}</span>
+      <span v-if="summary.completion_rate!=null">任务闭环率 {{ (summary.completion_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.accuracy!=null">准确率 {{ (summary.accuracy*100).toFixed(0) }}%</span>
       <span v-if="summary.mean_total!=null">平均总分 {{ summary.mean_total }} / {{ (summary.norm_mean*100).toFixed(0) }}%</span>
       <span v-if="summary.judge_accuracy!=null">裁判判题准确率 {{ (summary.judge_accuracy*100).toFixed(0) }}% （{{ summary.meta_n }} 题有参考答案）</span>
@@ -365,10 +391,18 @@
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="correctnessFilter" @change="resetResultPage">
           <option value="">全部判定</option>
-          <option value="right">{{ mode==='operation' ? '完成' : '正确' }}</option>
-          <option value="partial">{{ mode==='operation' ? '完成但有瑕疵' : '部分正确' }}</option>
-          <option value="wrong">{{ mode==='operation' ? '未完成' : '错误' }}</option>
-          <option value="unclear">{{ mode==='operation' ? '无法判断' : '不清楚' }}</option>
+          <template v-if="mode==='operation'">
+            <option value="ok">完成</option>
+            <option value="nok">未完成或执行错误</option>
+            <option value="no_support">客观条件不支持</option>
+            <option value="others">其他</option>
+          </template>
+          <template v-else>
+            <option value="right">正确</option>
+            <option value="partial">部分正确</option>
+            <option value="wrong">错误</option>
+            <option value="unclear">不清楚</option>
+          </template>
         </select>
         <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="problemDimFilter" @change="resetResultPage">
           <option value="">全部维度</option>
@@ -475,6 +509,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260730_answer_text"></script>
+  <script type="module" src="/static/app.js?v=20260731_dev_merge"></script>
 </body>
 </html>
