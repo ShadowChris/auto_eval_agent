@@ -19,6 +19,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from ..judges.operation_fields import map_legacy_operation_result
 from ..paths import PROJECT_ROOT, RUNS_DIR
 
 
@@ -113,7 +114,7 @@ def load_snapshot(task_id: str) -> dict | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _with_operation_compat(json.loads(path.read_text(encoding="utf-8")))
     except Exception:
         return None
 
@@ -165,7 +166,7 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "preview": _preview(data),
         })
     rows.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
-    return rows[:limit]
+    return rows[:limit] if limit > 0 else rows
 
 def _preview(data: dict) -> str:
     items = data.get("items") or []
@@ -176,6 +177,7 @@ def _preview(data: dict) -> str:
 
 
 def snapshot_payload(data: dict) -> dict:
+    data = _with_operation_compat(data)
     return {
         "task_id": data.get("task_id"),
         "session_name": data.get("session_name"),
@@ -195,6 +197,37 @@ def snapshot_payload(data: dict) -> dict:
     }
 
 
+def _with_operation_compat(data: dict) -> dict:
+    """按读取时兼容旧任务判定，不修改磁盘上的历史快照。"""
+    if data.get("mode") != "operation":
+        return data
+    normalized = dict(data)
+    results: list[dict] = []
+    for original in data.get("results") or []:
+        row = dict(original)
+        if "correctness" in row and "issue_types" not in row:
+            correctness, issue_types = map_legacy_operation_result(
+                row.get("correctness"),
+                row.get("error_type"),
+            )
+            row["correctness"] = correctness
+            row["issue_types"] = issue_types
+            row.pop("error_type", None)
+        results.append(row)
+    normalized["results"] = results
+    summary = dict(data.get("summary") or {})
+    judged = [row for row in results if "error" not in row and row.get("correctness")]
+    if judged:
+        ok_count = sum(row.get("correctness") == "ok" for row in judged)
+        summary.pop("right_count", None)
+        summary.pop("accuracy", None)
+        summary["ok_count"] = ok_count
+        summary["problem_count"] = len(judged) - ok_count
+        summary["completion_rate"] = round(ok_count / len(judged), 3)
+    normalized["summary"] = summary
+    return normalized
+
+
 def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]:
     """把一次评测拆成多个 Sheet 的行数据。
 
@@ -206,6 +239,7 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     sheet 均走此格式；非 compare 模式下仍按垂域分 sheet，便于筛选分析。
     传入 cfg 时，会按 skill 配置保留完整的维度列，N/A 的维度也会导出并在单元格填"N/A"。
     """
+    snapshot = _with_operation_compat(snapshot)
     results = _results_with_identity(snapshot)
     aligned_results = _aligned_results(snapshot, results)
     summary = snapshot.get("summary") or {}
@@ -511,6 +545,8 @@ def _result_rows(results: list[dict], dim_names: list[str] | None = None) -> lis
     rows = []
     for r in results:
         row = dict(r)
+        if isinstance(row.get("issue_types"), list):
+            row["issue_types"] = "；".join(str(value) for value in row["issue_types"])
         rubric = row.pop("rubric", {}) or {}
         reasons = row.pop("rubric_reasons", {}) or {}
         na_dims = set(r.get("na_dimensions") or [])

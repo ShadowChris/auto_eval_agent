@@ -68,6 +68,9 @@ createApp({
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
+    const historyPage = ref(1);
+    const historyPageSize = ref(10);
+    const historyJumpPage = ref("");
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
@@ -164,6 +167,14 @@ createApp({
       const page = Math.min(progressPage.value, progressPageCount.value);
       const start = (page - 1) * pageSize;
       return progressRows.value.slice(start, start + pageSize);
+    });
+    const historyPageCount = computed(
+      () => Math.max(1, Math.ceil(historyItems.value.length / historyPageSize.value)),
+    );
+    const pagedHistoryItems = computed(() => {
+      const page = Math.min(historyPage.value, historyPageCount.value);
+      const start = (page - 1) * historyPageSize.value;
+      return historyItems.value.slice(start, start + historyPageSize.value);
     });
     const skillOverviewRows = computed(() => summary.value?.by_skill?.overview || []);
 
@@ -385,7 +396,7 @@ createApp({
           { key: "query", label: "操作意图" },
           ...contextCols,
           { key: "correctness", label: "完成判定" },
-          { key: "error_type", label: "错误类型" },
+          { key: "issue_types", label: "问题类型" },
           { key: "is_low_level", label: "是否低级" },
           { key: "total", label: "总分" },
           ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
@@ -522,7 +533,7 @@ createApp({
         if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${(r.issue_types || []).join(" ")} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -584,6 +595,7 @@ createApp({
         operation: [opPage, opPageCount, opJumpPage],
         preview: [previewPage, previewPageCount, previewJumpPage],
         progress: [progressPage, progressPageCount, progressJumpPage],
+        history: [historyPage, historyPageCount, historyJumpPage],
       };
       const config = configs[kind];
       if (!config || requestedPage === "" || requestedPage == null) return;
@@ -606,12 +618,16 @@ createApp({
     function changeProgressPage(delta) {
       setTablePage("progress", progressPage.value + delta);
     }
+    function changeHistoryPage(delta) {
+      setTablePage("history", historyPage.value + delta);
+    }
     function jumpTablePage(kind) {
       const jumpValues = {
         result: resultJumpPage.value,
         operation: opJumpPage.value,
         preview: previewJumpPage.value,
         progress: progressJumpPage.value,
+        history: historyJumpPage.value,
       };
       setTablePage(kind, jumpValues[kind]);
     }
@@ -620,6 +636,12 @@ createApp({
       if (![10, 20, 50].includes(resultPageSize.value)) resultPageSize.value = 10;
       resultPage.value = 1;
       resultJumpPage.value = "";
+    }
+
+    function changeHistoryPageSize() {
+      if (![10, 20, 50].includes(historyPageSize.value)) historyPageSize.value = 10;
+      historyPage.value = 1;
+      historyJumpPage.value = "";
     }
 
     function trunc(v) {
@@ -1041,10 +1063,10 @@ createApp({
       if (c.key === "winner") return v === "a" ? "A" : v === "b" ? "B" : "平";
       if (c.key === "correctness") {
         if (mode.value === "operation")
-          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 完成但有瑕疵", unclear: "? 无法判断" }[v] || v) || "";
+          return ({ ok: "✓ 完成", nok: "✗ 未完成或执行错误", no_support: "⊘ 客观条件不支持", others: "? 其他" }[v] || v) || "";
         return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
       }
-      if (["card_types", "card_contents", "superlink_texts"].includes(c.key)) {
+      if (["issue_types", "card_types", "card_contents", "superlink_texts"].includes(c.key)) {
         return Array.isArray(v) ? v.join("；") : (v || "");
       }
       if (c.key === "card_presence" || c.key === "superlink_presence") {
@@ -1179,9 +1201,11 @@ createApp({
     async function loadHistory() {
       loadingHistory.value = true;
       try {
-        const r = await fetch("/api/history?limit=50");
+        const r = await fetch("/api/history?limit=0");
         const d = await r.json();
         historyItems.value = d.items || [];
+        historyPage.value = Math.min(historyPage.value, historyPageCount.value);
+        historyJumpPage.value = "";
         historyNoteDrafts.value = Object.fromEntries(
           historyItems.value.map((item) => [item.task_id, item.note || ""]),
         );
@@ -1302,7 +1326,8 @@ createApp({
       modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
-      historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      historyPage, historyPageSize, historyPageCount, historyJumpPage,
       opPage, opPageSize, opPageCount, opJumpPage,
       previewPage, previewPageCount, previewJumpPage,
       progressPage, progressPageCount, progressJumpPage,
@@ -1314,7 +1339,8 @@ createApp({
       trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
-      changePreviewPage, changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
+      changePreviewPage, changeProgressPage, changeOpPage, changeHistoryPage,
+      changeResultPageSize, changeHistoryPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,

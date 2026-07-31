@@ -86,7 +86,8 @@ def _snapshot(project: Path) -> dict:
                 "index": 0,
                 "item_id": "op_1",
                 "query": "打开设置",
-                "correctness": "right",
+                "correctness": "ok",
+                "issue_types": [],
                 "total": 5,
                 "rubric": {"操作完成度": 5},
             },
@@ -120,7 +121,7 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
 
     results = sheets["逐题结果"]
     assert [row["item_id"] for row in results] == ["op_1", "op_2", "op_3"]
-    assert results[0]["correctness"] == "right"
+    assert results[0]["correctness"] == "ok"
     assert results[1]["评估状态"] == "评估失败"
     assert "correctness" not in results[1]
     assert results[2]["评估状态"] == "待评估"
@@ -130,6 +131,30 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     assert frames[0]["时间点"] == 1.5
     assert frames[0]["保留原因"] == "scene-change"
     assert frames[-1]["抽帧状态"] == "无抽帧结果"
+
+
+def test_old_operation_results_are_converted_only_when_read_or_exported(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    snapshot["results"][1].update({
+        "correctness": "partial",
+        "error_type": "路径冗余",
+    })
+    snapshot["results"][1].pop("issue_types", None)
+
+    payload = history.snapshot_payload(snapshot)
+    converted = next(row for row in payload["results"] if row.get("item_id") == "op_1")
+    assert converted["correctness"] == "ok"
+    assert converted["issue_types"] == ["路径冗余"]
+    assert "error_type" not in converted
+
+    sheets = history.export_rows(snapshot)
+    exported = next(row for row in sheets["逐题结果"] if row.get("item_id") == "op_1")
+    assert exported["correctness"] == "ok"
+    assert exported["issue_types"] == "路径冗余"
+
+    original = next(row for row in snapshot["results"] if row.get("item_id") == "op_1")
+    assert original["correctness"] == "partial"
+    assert "issue_types" not in original
 
 
 def test_write_frames_zip_contains_images_and_manifest(tmp_path: Path):

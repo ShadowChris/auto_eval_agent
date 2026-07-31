@@ -243,23 +243,30 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .row-export-link { color: #2563eb; text-decoration: underline; font-size: 13px; }
 .row-export-link:hover { color: #1d4ed8; }
 .history-note-cell { width: 300px; min-width: 300px !important; max-width: 300px !important; }
-.history-note-display { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.history-note-display { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
 .history-note-text {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
   color: #374151;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .history-note-empty { flex: 1; color: #9ca3af; }
-.history-note-editor { display: flex; align-items: center; gap: 5px; }
-.history-note-editor input {
-  width: 205px;
-  min-width: 130px;
+.history-note-editor { display: flex; align-items: flex-start; gap: 5px; }
+.history-note-editor textarea {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 84px;
   padding: 5px 7px;
   border: 1px solid #d1d5db;
   border-radius: 5px;
+  font: inherit;
+  line-height: 1.45;
+  resize: vertical;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .history-text-link {
   flex: 0 0 auto;

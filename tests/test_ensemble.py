@@ -1,6 +1,6 @@
 from auto_eval.config import EnsembleConfig, RubricDim
-from auto_eval.judges import aggregate_pairs, aggregate_scores
-from auto_eval.schema import SinglePair, SingleScore
+from auto_eval.judges import aggregate_operation_scores, aggregate_pairs, aggregate_scores
+from auto_eval.schema import OperationSingleScore, SinglePair, SingleScore
 
 
 def test_aggregate_scores_majority_and_agreement():
@@ -38,63 +38,89 @@ def test_aggregate_scores_weighted():
 def test_aggregate_operation_fields_follow_final_correctness():
     dims = [RubricDim(name="操作完成度", description="d", scale=5)]
     scores = [
-        SingleScore(
+        OperationSingleScore(
             item_id="i",
             model="m",
             judge="j1",
             rubric={"操作完成度": 2},
             total=2,
-            correctness="wrong",
-            error_type="单任务未完成",
+            task_type="simple",
+            correctness="nok",
+            issue_types=["最终步骤未执行", "完成证据不足"],
             is_low_level="yes",
         ),
-        SingleScore(
+        OperationSingleScore(
             item_id="i",
             model="m",
             judge="j2",
             rubric={"操作完成度": 2},
             total=2,
-            correctness="wrong",
-            error_type="仅文字无状态证据",
+            task_type="simple",
+            correctness="nok",
+            issue_types=["最终步骤未执行"],
             is_low_level="yes",
         ),
     ]
 
-    verdict = aggregate_scores(scores, dims, EnsembleConfig(), 0.6)
+    verdict = aggregate_operation_scores(scores, dims, EnsembleConfig(), 0.6)
 
-    assert verdict.correctness == "wrong"
-    assert verdict.error_type == "单任务未完成"
+    assert verdict.correctness == "nok"
+    assert verdict.issue_types == ["最终步骤未执行", "完成证据不足"]
     assert verdict.is_low_level == "yes"
 
 
-def test_aggregate_operation_tie_keeps_non_right_error_type():
+def test_aggregate_operation_tie_falls_back_to_others():
     dims = [RubricDim(name="操作完成度", description="d", scale=5)]
     scores = [
-        SingleScore(
+        OperationSingleScore(
             item_id="i",
             model="m",
             judge="j1",
             rubric={"操作完成度": 5},
             total=5,
-            correctness="right",
+            task_type="simple",
+            correctness="ok",
         ),
-        SingleScore(
+        OperationSingleScore(
             item_id="i",
             model="m",
             judge="j2",
             rubric={"操作完成度": 1},
             total=1,
-            correctness="wrong",
-            error_type="仅文字无状态证据",
+            task_type="simple",
+            correctness="nok",
+            issue_types=["仅文字声称完成"],
             is_low_level="yes",
         ),
     ]
 
-    verdict = aggregate_scores(scores, dims, EnsembleConfig(), 0.6)
+    verdict = aggregate_operation_scores(scores, dims, EnsembleConfig(), 0.6)
 
-    assert verdict.correctness == "unclear"
-    assert verdict.error_type == "证据冲突"
+    assert verdict.correctness == "others"
+    assert verdict.issue_types == ["评测证据冲突"]
     assert verdict.is_low_level == "no"
+
+
+def test_aggregate_operation_all_na_keeps_total_empty():
+    dims = [RubricDim(name="操作完成度", description="d", scale=5)]
+    scores = [
+        OperationSingleScore(
+            item_id="i",
+            model="m",
+            judge="j1",
+            rubric={},
+            na_dimensions=["操作完成度"],
+            total=None,
+            task_type="simple",
+            correctness="others",
+            issue_types=["视频损坏"],
+        )
+    ]
+
+    verdict = aggregate_operation_scores(scores, dims, EnsembleConfig(), 0.6)
+
+    assert verdict.total is None
+    assert verdict.na_dimensions == ["操作完成度"]
 
 
 def test_aggregate_pairs_winrate():

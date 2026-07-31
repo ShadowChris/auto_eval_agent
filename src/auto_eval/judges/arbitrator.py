@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..schema import EvalItem, SingleScore
+from ..schema import EvalItem, OperationSingleScore, SingleScore
 from .base import JudgeClient, JudgeOutputParseError
 from .operation_fields import normalize_operation_fields
 from .prompts import (
@@ -30,24 +30,27 @@ class Arbitrator:
         self,
         item: EvalItem,
         answer: str,
-        single_scores: list[SingleScore],
+        single_scores: list[SingleScore] | list[OperationSingleScore],
         *,
         eval_mode: str | None = None,
         dims=None,
+        policy=None,
     ) -> dict:
         operation_mode = eval_mode == "operation"
         system = ARBITRATOR_SYSTEM.render(
             operation_mode=operation_mode,
             dims=dims or [],
+            policy=policy,
         )
         judges_summary = [
             {
                 "name": s.judge,
                 "correctness": s.correctness,
-                "total": round(s.total, 2),
+                "total": round(s.total, 2) if s.total is not None else None,
                 "rubric": s.rubric,
-                "error_type": s.error_type,
-                "is_low_level": s.is_low_level,
+                "error_type": getattr(s, "error_type", None),
+                "issue_types": getattr(s, "issue_types", []),
+                "is_low_level": getattr(s, "is_low_level", "no"),
                 "rationale": s.rationale,
                 "tool_trace": s.tool_trace,
             }
@@ -77,34 +80,50 @@ class Arbitrator:
                     judge=self.client.cfg.name,
                     model=self.client.model,
                 )
-        correctness = data.get("correctness", "unclear")
-        if correctness not in _VALID:
-            correctness = "unclear"
         rubric = {
             k: int(v) for k, v in (data.get("rubric") or {}).items() if isinstance(v, (int, float))
         }
         total = data.get("total")
         if total is None:
-            total = sum(rubric.values()) / len(rubric) if rubric else 0.0
+            total = sum(rubric.values()) / len(rubric) if rubric else None
         try:
             confidence = float(data["confidence"]) if data.get("confidence") is not None else None
         except (TypeError, ValueError):
             confidence = None
-        error_type = data.get("error_type")
-        is_low_level = data.get("is_low_level", "no")
         if operation_mode:
-            error_type, is_low_level = normalize_operation_fields(
-                correctness,
-                error_type,
-                is_low_level,
-                data.get("task_type"),
+            task_type = str(data.get("task_type") or "").strip().lower()
+            if task_type not in {"simple", "complex"}:
+                task_type = None
+            correctness, issue_types, is_low_level = normalize_operation_fields(
+                data.get("correctness"),
+                data.get("issue_types", data.get("error_type")),
+                data.get("is_low_level", "no"),
+                task_type,
+                policy.issue_types if policy else None,
             )
+            return {
+                "task_type": task_type,
+                "correctness": correctness,
+                "rubric": {k: round(float(v), 2) for k, v in rubric.items()},
+                "total": round(float(total), 2) if total is not None else None,
+                "issue_types": issue_types,
+                "is_low_level": is_low_level,
+                "confidence": confidence,
+                "rationale": data.get("rationale", ""),
+                "used_search": reply.used_search,
+                "tool_trace": reply.tool_trace,
+                "analysis": parse_analysis(reply.content),
+            }
+
+        correctness = data.get("correctness", "unclear")
+        if correctness not in _VALID:
+            correctness = "unclear"
         return {
             "correctness": correctness,
             "rubric": {k: round(float(v), 2) for k, v in rubric.items()},
-            "total": round(float(total), 2),
-            "error_type": error_type,
-            "is_low_level": is_low_level,
+            "total": round(float(total), 2) if total is not None else 0.0,
+            "error_type": data.get("error_type"),
+            "is_low_level": "no",
             "confidence": confidence,
             "rationale": data.get("rationale", ""),
             "used_search": reply.used_search,

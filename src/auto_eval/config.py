@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ModelConfig(BaseModel):
@@ -125,6 +125,30 @@ class EnsembleConfig(BaseModel):
     dim_problem_threshold: float = 2.0  # 维度分<=此值视为"问题"（按垂域维度问题分布用，满分通常5）
 
 
+class OperationPolicy(BaseModel):
+    """任务类专属判定政策；仅由 operation skill 渲染进视觉裁判 Prompt。"""
+
+    prior_knowledge: list[str] = Field(default_factory=list)
+    scope_rules: list[str] = Field(default_factory=list)
+    evidence_rules: list[str] = Field(default_factory=list)
+    correctness: dict[str, str] = Field(default_factory=dict)
+    issue_types: dict[str, list[str]] = Field(default_factory=dict)
+    decision_order: list[str] = Field(default_factory=list)
+    conditional_rules: list[str] = Field(default_factory=list)
+    low_level_rules: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_status_keys(self):
+        expected = {"ok", "nok", "no_support", "others"}
+        if set(self.correctness) != expected:
+            raise ValueError("operation_policy.correctness 必须完整定义 ok/nok/no_support/others")
+        if set(self.issue_types) != expected:
+            raise ValueError("operation_policy.issue_types 必须完整定义 ok/nok/no_support/others")
+        if any(not self.issue_types[key] for key in expected):
+            raise ValueError("operation_policy 的每类 issue_types 都不能为空")
+        return self
+
+
 class DomainSkill(BaseModel):
     name: str = ""
     display: str = ""  # 分类候选展示名（如中文），缺失回落 name；不参与分类的 Skill（default）可留空
@@ -132,6 +156,7 @@ class DomainSkill(BaseModel):
     rubrics: list[RubricDim] = Field(default_factory=list)  # 该 Skill 自带的一级+二级维度
     rules: str = ""
     examples: list[str] = Field(default_factory=list)
+    operation_policy: OperationPolicy | None = None
 
 
 class VisualExtractionConfig(BaseModel):

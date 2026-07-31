@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -27,7 +28,11 @@ from ..judges import (
     ensure_classified,
 )
 from ..judges.base import flush_web_trace_records
-from ..judges.ensemble import aggregate_pairs, aggregate_scores
+from ..judges.ensemble import (
+    aggregate_operation_scores,
+    aggregate_pairs,
+    aggregate_scores,
+)
 from ..llm_stream import is_retriable_llm_error
 from ..meta import ground_truth
 from ..observability import (
@@ -510,7 +515,15 @@ async def _eval_one(
         scores = [s for s in raw if s is not None]
         op_skill = cfg.domain_skills.get("operation")
         op_dims = op_skill.rubrics if op_skill and op_skill.rubrics else cfg.rubrics
-        v = aggregate_scores(scores, op_dims, cfg.ensemble, cfg.ensemble.flag_low_agreement)
+        v = aggregate_operation_scores(
+            scores,
+            op_dims,
+            cfg.ensemble,
+            cfg.ensemble.flag_low_agreement,
+            op_skill.operation_policy.issue_types
+            if op_skill and op_skill.operation_policy
+            else None,
+        )
         # 多裁判分歧 → 主席仲裁（纯文本，不带帧；兜底）
         if v and v.low_agreement and len(scores) >= 2 and arbitrator:
             try:
@@ -520,9 +533,11 @@ async def _eval_one(
                     list(scores),
                     eval_mode="operation",
                     dims=op_dims,
+                    policy=op_skill.operation_policy if op_skill else None,
                 )
                 v.correctness, v.total, v.rubric = arb["correctness"], arb["total"], arb["rubric"]
-                v.error_type = arb["error_type"]
+                v.task_type = arb["task_type"]
+                v.issue_types = arb["issue_types"]
                 v.is_low_level = arb["is_low_level"]
                 v.arbitrated = True
                 v.arbitrator_confidence = arb["confidence"]
@@ -530,8 +545,7 @@ async def _eval_one(
                 v.rationale = f"[主席仲裁·置信度{arb['confidence']}] {arb['rationale']}"
             except Exception:
                 pass
-        _fill_verdict(out, v)
-        _maybe_meta(out, item, answer, v)
+        _fill_operation_verdict(out, v)
 
     elif mode == "rich_content":
         if not rich_judges:
@@ -733,6 +747,33 @@ def _fill_verdict(out: dict, v) -> None:
     out["top_issues_desc"] = v.top_issues_desc
 
 
+def _fill_operation_verdict(out: dict, v) -> None:
+    if v is None:
+        out["error"] = out.get("error", "裁判无输出")
+        return
+    out["task_type"] = v.task_type
+    out["correctness"] = v.correctness
+    out["total"] = round(v.total, 2) if v.total is not None else None
+    out["rubric"] = {key: round(value, 2) for key, value in v.rubric.items()}
+    out["rubric_reasons"] = v.rubric_reasons or {}
+    out["issue_types"] = v.issue_types
+    out["is_low_level"] = v.is_low_level
+    rationale = v.rationale or ""
+    reasons = v.rubric_reasons or {}
+    if reasons:
+        suffix = " ｜ ".join(f"{key}：{reason}" for key, reason in reasons.items())
+        out["rationale"] = f"{rationale}  ||  {suffix}" if rationale else suffix
+    else:
+        out["rationale"] = rationale
+    out["tool_trace"] = v.single_scores[0].tool_trace if v.single_scores else []
+    out["used_search"] = any(score.used_search for score in v.single_scores)
+    out["truncated"] = any(score.truncated for score in v.single_scores)
+    out["low_agreement"] = v.low_agreement
+    out["arbitrated"] = v.arbitrated
+    out["arbitrator_confidence"] = v.arbitrator_confidence
+    out["na_dimensions"] = v.na_dimensions
+
+
 def _maybe_meta(out: dict, item: EvalItem, answer: str, v) -> None:
     if item.reference and v is not None:
         obj = ground_truth.compute(answer, item.reference)
@@ -745,6 +786,8 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
         return _summarize_rich_content(task)
     if task.mode == "rich_content_quality":
         return _summarize_rich_content_quality(task, cfg)
+    if task.mode == "operation":
+        return _summarize_operation(task, cfg)
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
     res = task.results
     ok = [r for r in res if "error" not in r]
@@ -784,6 +827,36 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
         except Exception:
             summary["by_skill"] = []
     return summary
+
+
+def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
+    results = task.results
+    completed = [row for row in results if "error" not in row]
+    judged = [row for row in completed if row.get("correctness") is not None]
+    ok_count = sum(row.get("correctness") == "ok" for row in judged)
+    totals = [row["total"] for row in judged if row.get("total") is not None]
+    scale = (
+        cfg.domain_skills["operation"].rubrics[0].scale
+        if cfg.domain_skills.get("operation")
+        and cfg.domain_skills["operation"].rubrics
+        else 5
+    )
+    return {
+        "total": len(results),
+        "done": len(completed),
+        "failed": len(results) - len(completed),
+        "mode": task.mode,
+        "ok_count": ok_count,
+        "problem_count": len(judged) - ok_count,
+        "completion_rate": round(ok_count / len(judged), 3) if judged else None,
+        "mean_total": round(sum(totals) / len(totals), 2) if totals else None,
+        "norm_mean": (
+            round(sum(totals) / len(totals) / scale, 3)
+            if totals
+            else None
+        ),
+        "correctness_dist": dict(collections.Counter(row["correctness"] for row in judged)),
+    }
 
 
 def _summarize_rich_content(task: Task) -> dict:

@@ -141,8 +141,9 @@ async def test_operation_without_context_does_not_inject_evaluation_time():
             return SimpleNamespace(
                 content=(
                     '<analysis>画面显示目标状态。</analysis>'
-                    '{"rubric":{"最终态正确":5},"total":5,'
-                    '"correctness":"right","error_type":null,"rationale":"已完成"}'
+                    '{"task_type":"simple","rubric":{"操作完成度":5,"步骤正确性":5},'
+                    '"total":5,"correctness":"ok","issue_types":[],'
+                    '"is_low_level":"no","rationale":"已完成"}'
                 ),
                 rounds=1,
                 used_search=False,
@@ -152,14 +153,22 @@ async def test_operation_without_context_does_not_inject_evaluation_time():
             )
 
     client = CaptureClient()
+    config_dir = Path(__file__).resolve().parents[1] / "config"
+    router = SkillRouter(load_config(config_dir).domain_skills)
     judge = RubricJudge(
         client,
         [RubricDim(name="最终态正确", description="最终状态是否满足用户需求", scale=5)],
+        skill_router=router,
         evaluation_time=frozen,
     )
 
     await judge.score(
-        EvalItem(id="op", question="打开蓝牙"),
+        EvalItem(
+            id="op",
+            question="打开蓝牙",
+            category="operation",
+            metadata={"category_source": "dataset"},
+        ),
         model_name="agent",
         answer="已打开",
         eval_mode="operation",
