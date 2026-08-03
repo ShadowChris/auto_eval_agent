@@ -77,7 +77,7 @@ def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
     if len(events) > MAX_PROGRESS_EVENTS_PER_ITEM:
         del events[:-MAX_PROGRESS_EVENTS_PER_ITEM]
     task.item_progress[key] = event_payload
-    task.queue.put_nowait({"event": "item_progress", "data": event_payload})
+    task.publish_nowait("item_progress", event_payload)
     return event_payload
 
 
@@ -106,13 +106,13 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
         await _run(task, cfg)
         task.summary = _summarize(task, cfg)
         task.status = "done"
-        await task.publish("done", {"summary": task.summary, "total": len(task.items)})
         _persist_task(task)
+        await task.publish("done", {"summary": task.summary, "total": len(task.items)})
     except Exception as e:
         task.status = "error"
         task.error = f"{type(e).__name__}: {e}"
-        await task.publish("error", {"message": task.error})
         _persist_task(task)
+        await task.publish("error", {"message": task.error})
 
 
 async def _run(task: Task, cfg: AppConfig) -> None:

@@ -193,6 +193,7 @@ def snapshot_payload(data: dict) -> dict:
         "summary": data.get("summary") or {},
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
+        "done_total": int(data.get("done_total") or len(data.get("results") or [])),
         "error": data.get("error"),
     }
 

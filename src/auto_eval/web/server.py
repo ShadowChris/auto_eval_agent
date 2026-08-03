@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -42,7 +43,7 @@ from .operation_media import (
     resolve_operation_video_path,
 )
 from .runner import run_eval
-from .tasks import get_task, new_task
+from .tasks import get_live_task, get_task, new_task
 
 # auto_eval_agent/ 目录（src/auto_eval/web/server.py 往上 4 层）
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -182,7 +183,14 @@ async def api_eval(req: EvalReq):
         await asyncio.sleep(0.05)
         await run_eval(task, app_cfg)
 
-    asyncio.create_task(_start_later())
+    execution = asyncio.create_task(_start_later())
+    task.execution = execution
+
+    def clear_execution(finished: asyncio.Task) -> None:
+        if task.execution is finished:
+            task.execution = None
+
+    execution.add_done_callback(clear_execution)
     return {"task_id": task.id}
 
 
@@ -258,44 +266,56 @@ async def api_stream(task_id: str):
     task = get_task(task_id)
     if not task:
         raise HTTPException(404, "task not found")
+    event_queue = task.subscribe()
 
     async def event_gen():
-        # 清掉连接建立前已进入队列的快照类事件；下面统一回放最新状态，
-        # 避免先回放 60% 后又消费旧队列事件退回到 10%。
-        while True:
-            try:
-                task.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        # 回放有界事件历史，供 Web 展示与文件日志同源的逐行调用记录。
-        for item_events in list(task.progress_events.values()):
-            for progress_event in item_events:
-                yield _sse("progress_event", progress_event)
-        # 回放每题最新进度，断线重连后能立即恢复当前阶段。
-        for progress_item in list(task.item_progress.values()):
-            yield _sse("item_progress", progress_item)
-        # 先回放已有结果（断线重连不丢已完成的）
-        for r in list(task.results):
-            yield _sse("result", {"progress": task.done_total, "total": len(task.items), "result": r})
-        if task.status == "done":
-            yield _sse("done", {"summary": task.summary, "total": len(task.items)})
-            return
-        if task.status == "error":
-            yield _sse("error", {"message": task.error})
-            return
-        # 实时跟进
-        while True:
-            msg = await task.queue.get()
-            yield _sse(msg["event"], msg["data"])
-            if msg["event"] in ("done", "error"):
-                break
+        try:
+            # 回放有界事件历史，供刷新/重新加载后恢复当前页面状态。
+            for item_events in list(task.progress_events.values()):
+                for progress_event in item_events:
+                    yield _sse("progress_event", progress_event)
+            for progress_item in list(task.item_progress.values()):
+                yield _sse("item_progress", progress_item)
+            for result in list(task.results):
+                yield _sse(
+                    "result",
+                    {"progress": task.done_total, "total": len(task.items), "result": result},
+                )
+            if task.status == "done":
+                yield _sse("done", {"summary": task.summary, "total": len(task.items)})
+                return
+            if task.status == "error":
+                yield _sse("error", {"message": task.error})
+                return
+            if task.status == "cancelled":
+                yield _sse("cancelled", {"message": task.error or "任务已中断"})
+                return
+            # 每个 SSE 连接使用独立队列，刷新或多标签页不会互相抢事件。
+            while True:
+                msg = await event_queue.get()
+                yield _sse(msg["event"], msg["data"])
+                if msg["event"] in ("done", "error", "cancelled"):
+                    break
+        finally:
+            task.unsubscribe(event_queue)
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
 @app.get("/api/history")
 def api_history(limit: int = 50):
-    return {"items": list_snapshots(limit=limit)}
+    rows = list_snapshots(limit=limit)
+    for row in rows:
+        live = get_live_task(str(row.get("task_id") or ""))
+        if live is None:
+            continue
+        row.update({
+            "status": live.status,
+            "total": len(live.items),
+            "done": live.done_total,
+            "error": live.error,
+        })
+    return {"items": rows}
 
 
 @app.get("/api/history/{task_id}")
@@ -311,9 +331,54 @@ def api_history_detail(task_id: str):
 
 @app.delete("/api/history/{task_id}")
 def api_history_delete(task_id: str):
+    live = get_live_task(task_id)
+    if live is not None and live.status in {"pending", "running"}:
+        raise HTTPException(409, "运行中的任务请先中断，再删除历史记录")
     if not delete_snapshot(task_id):
         raise HTTPException(404, "task not found")
     return {"ok": True}
+
+
+@app.post("/api/eval/{task_id}/cancel")
+async def api_eval_cancel(task_id: str):
+    task = get_live_task(task_id)
+    if task is None:
+        raise HTTPException(404, "当前服务中没有这个运行任务")
+    if task.status not in {"pending", "running"}:
+        return {"ok": True, "task_id": task.id, "status": task.status}
+
+    reason = "用户手动中断批跑"
+    task.status = "cancelled"
+    task.error = reason
+    updated_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
+    for index, item in enumerate(task.items):
+        key = str(index)
+        previous = task.item_progress.get(key) or {}
+        if previous.get("status") in {"done", "error", "cancelled"}:
+            continue
+        events = task.progress_events.setdefault(key, [])
+        payload = {
+            **previous,
+            "item_index": index,
+            "item_id": item.get("id") or f"q{index}",
+            "status": "cancelled",
+            "message": "任务已手动中断",
+            "percent": previous.get("percent", 0),
+            "sequence": int(events[-1].get("sequence", 0)) + 1 if events else 1,
+            "updated_at": updated_at,
+        }
+        events.append(payload)
+        del events[:-100]
+        task.item_progress[key] = payload
+        task.publish_nowait("item_progress", payload)
+
+    execution = task.execution
+    if execution is not None and not execution.done():
+        execution.cancel()
+    await task.publish("cancelled", {"message": reason})
+    if not save_task(task):
+        raise HTTPException(500, "任务已中断，但历史状态保存失败")
+    return {"ok": True, "task_id": task.id, "status": task.status}
 
 
 @app.patch("/api/history/{task_id}/note")

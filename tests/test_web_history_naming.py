@@ -109,6 +109,13 @@ def test_history_note_ui_supports_multiline_editing_and_full_display():
     assert "changeHistoryPage(-1)" in html
     assert "jumpTablePage('history')" in html
     assert 'fetch("/api/history?limit=0")' in js
+    assert 'v-for="h in pagedHistoryItems"' in html
+    assert 'cancelHistoryTask(h)' in html
+    assert "historyStatusLabel(h.status)" in html
+    assert "function resetEvaluationView()" in js
+    assert "resetEvaluationView();\n      mode.value = k;" in js
+    assert "if (running.value) connectSSE();" in js
+    assert "new EventSource(`/api/eval/${connectedTaskId}/stream`)" in js
 
 
 def test_history_note_api_limits_length(monkeypatch):

@@ -74,6 +74,7 @@ createApp({
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
+    let activeEventSource = null;
     const pageSize = 10;
     const opPageSize = 10;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
@@ -192,7 +193,7 @@ createApp({
       const previous = itemProgress.value[index] || {};
       const previousRank = previous.stage_rank ?? progressStageRank(previous);
       const incomingRank = progressStageRank(incoming);
-      const terminal = incoming.status === "done" || incoming.status === "error";
+      const terminal = ["done", "error", "cancelled"].includes(incoming.status);
       const updatedAt = Date.parse(incoming.updated_at || "");
       itemProgress.value = {
         ...itemProgress.value,
@@ -230,7 +231,7 @@ createApp({
     function progressStageClass(row, stageIndex) {
       if (row.status === "done") return "completed";
       if (stageIndex < row.stageRank) return "completed";
-      if (stageIndex === row.stageRank) return row.status === "error" ? "error" : "active";
+      if (stageIndex === row.stageRank) return ["error", "cancelled"].includes(row.status) ? "error" : "active";
       return "pending";
     }
 
@@ -246,12 +247,14 @@ createApp({
 
     function progressStageLabel(row) {
       if (row.status === "error") return "失败";
+      if (row.status === "cancelled") return "已中断";
       if (row.status === "done") return "完成";
       return progressStages[Math.max(0, Math.min(4, row.stageRank))];
     }
 
     function progressStatusClass(row) {
       if (row.status === "error") return "status-error";
+      if (row.status === "cancelled") return "status-cancelled";
       if (row.status === "done") return "status-done";
       if (row.stageRank === 0) return "status-pending";
       return "status-running";
@@ -312,7 +315,7 @@ createApp({
 
     function formatProgressElapsed(seconds, status) {
       if (seconds == null || !Number.isFinite(seconds)) return "—";
-      if (status === "done" || status === "error") {
+      if (["done", "error", "cancelled"].includes(status)) {
         if (seconds < 60) return `${seconds.toFixed(1)}s`;
       }
       const whole = Math.max(0, Math.floor(seconds));
@@ -678,7 +681,36 @@ createApp({
       ) || judges.value.find((judge) => judge.persona === "end_user");
     }
 
+    function disconnectSSE() {
+      if (activeEventSource) {
+        activeEventSource.close();
+        activeEventSource = null;
+      }
+    }
+
+    function resetEvaluationView() {
+      disconnectSSE();
+      taskId.value = "";
+      running.value = false;
+      progress.value = 0;
+      total.value = 0;
+      results.value = [];
+      summary.value = null;
+      itemProgress.value = {};
+      progressEvents.value = {};
+      barChartRefs.value = [];
+      activeSkill.value = "";
+      resultQuery.value = "";
+      correctnessFilter.value = "";
+      problemDimFilter.value = "";
+      resultPage.value = 1;
+      progressPage.value = 1;
+      runError.value = "";
+    }
+
     function switchMode(k) {
+      if (k === mode.value) return;
+      resetEvaluationView();
       mode.value = k;
       selectedJudges.value = defaultJudgeSelection(k);
       items.value = [];
@@ -698,6 +730,7 @@ createApp({
     function onFile(e) {
       const f = e.target.files[0];
       if (!f) return;
+      resetEvaluationView();
       datasetName.value = f.name || "";
       const r = new FileReader();
       r.onload = () => {
@@ -755,6 +788,7 @@ createApp({
       const file = e.target.files && e.target.files[0];
       e.target.value = "";
       if (!file) return;
+      resetEvaluationView();
       datasetName.value = file.name || "";
       opPreparing.value = true;
       errors.value = [];
@@ -937,6 +971,7 @@ createApp({
         return;
       }
       taskId.value = d.task_id;
+      loadHistory();
       connectSSE();
     }
 
@@ -983,17 +1018,29 @@ createApp({
     }
 
     function connectSSE() {
-      const es = new EventSource(`/api/eval/${taskId.value}/stream`);
+      disconnectSSE();
+      const connectedTaskId = taskId.value;
+      if (!connectedTaskId) return;
+      const es = new EventSource(`/api/eval/${connectedTaskId}/stream`);
+      activeEventSource = es;
       es.addEventListener("item_progress", (e) => {
+        if (taskId.value !== connectedTaskId) return;
         const d = JSON.parse(e.data);
         mergeItemProgress(d);
       });
       es.addEventListener("progress_event", (e) => {
+        if (taskId.value !== connectedTaskId) return;
         appendProgressEvent(JSON.parse(e.data));
       });
       es.addEventListener("result", (e) => {
+        if (taskId.value !== connectedTaskId) return;
         const d = JSON.parse(e.data);
-        results.value.push(d.result);
+        const existing = results.value.findIndex((entry) => entry.index === d.result.index);
+        if (existing >= 0) {
+          results.value = results.value.map((entry, index) => index === existing ? d.result : entry);
+        } else {
+          results.value = [...results.value, d.result];
+        }
         progress.value = d.progress;
         const index = d.result.index;
         if (index != null) {
@@ -1011,16 +1058,16 @@ createApp({
           };
         }
       });
-      es.addEventListener("done", (e) => {
-        summary.value = JSON.parse(e.data).summary;
-        if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
-        resultPage.value = 1;
+      es.addEventListener("done", async () => {
+        if (taskId.value !== connectedTaskId) return;
         running.value = false;
         es.close();
-        renderCharts();
-        loadHistory();
+        if (activeEventSource === es) activeEventSource = null;
+        await loadHistoryTask(connectedTaskId, false);
+        await loadHistory();
       });
       es.addEventListener("error", async (e) => {
+        if (taskId.value !== connectedTaskId) return;
         // 原生 EventSource 网络错误没有 data，让浏览器按协议自动重连并回放状态。
         if (!e.data) return;
         let message = "未知错误";
@@ -1030,8 +1077,23 @@ createApp({
         } catch (_) {}
         running.value = false;
         es.close();
+        if (activeEventSource === es) activeEventSource = null;
         await reconcileTaskAfterError(message);
         runError.value = "评估出错：" + message;
+        await loadHistory();
+      });
+      es.addEventListener("cancelled", async (e) => {
+        if (taskId.value !== connectedTaskId) return;
+        let message = "任务已中断";
+        try {
+          message = JSON.parse(e.data).message || message;
+        } catch (_) {}
+        running.value = false;
+        es.close();
+        if (activeEventSource === es) activeEventSource = null;
+        await loadHistoryTask(connectedTaskId, false);
+        runError.value = message;
+        await loadHistory();
       });
     }
 
@@ -1257,7 +1319,8 @@ createApp({
       if (!confirm("确认删除这条历史记录？删除后不可恢复。")) return;
       const r = await fetch(`/api/history/${id}`, { method: "DELETE" });
       if (!r.ok) {
-        alert("删除失败");
+        const data = await r.json().catch(() => ({}));
+        alert("删除失败：" + (data.detail || "未知错误"));
         return;
       }
       if (taskId.value === id) {
@@ -1268,13 +1331,44 @@ createApp({
       await loadHistory();
     }
 
-    async function loadHistoryTask(id) {
+    function isActiveHistoryStatus(status) {
+      return status === "pending" || status === "running";
+    }
+
+    function historyStatusLabel(status) {
+      return ({
+        pending: "等待中",
+        running: "评估中",
+        done: "已完成",
+        error: "失败",
+        cancelled: "已中断",
+      }[status] || status || "未知");
+    }
+
+    async function cancelHistoryTask(item) {
+      if (!confirm(`确认中断「${item.dataset_name || item.task_id}」的批跑？已完成结果会保留。`)) return;
+      const response = await fetch(`/api/eval/${item.task_id}/cancel`, { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert("中断失败：" + (data.detail || "未知错误"));
+        await loadHistory();
+        return;
+      }
+      if (taskId.value === item.task_id) {
+        await loadHistoryTask(item.task_id, false);
+        runError.value = "用户手动中断批跑";
+      }
+      await loadHistory();
+    }
+
+    async function loadHistoryTask(id, scrollToResults = true) {
       const r = await fetch(`/api/history/${id}`);
       if (!r.ok) {
         alert("历史记录加载失败");
         return;
       }
       const d = await r.json();
+      disconnectSSE();
       taskId.value = d.task_id || id;
       mode.value = d.mode || mode.value;
       datasetName.value = d.dataset_name || "";
@@ -1284,8 +1378,13 @@ createApp({
       progressEvents.value = d.progress_events || {};
       summary.value = d.summary || null;
       total.value = items.value.length || results.value.length;
-      progress.value = results.value.length;
-      running.value = false;
+      progress.value = d.done_total ?? results.value.length;
+      running.value = isActiveHistoryStatus(d.status);
+      runError.value = d.status === "cancelled"
+        ? (d.error || "任务已中断")
+        : d.status === "error"
+          ? (d.error ? `评估出错：${d.error}` : "评估出错")
+          : "";
       activeSkill.value = "";
       resultQuery.value = "";
       correctnessFilter.value = "";
@@ -1293,9 +1392,16 @@ createApp({
       resultPage.value = 1;
       progressPage.value = 1;
       barChartRefs.value = [];
+      const options = d.options || {};
+      if (Array.isArray(options.judges) && options.judges.length) selectedJudges.value = options.judges;
+      if (options.visual_judge) visualJudge.value = options.visual_judge;
+      if (options.model) selectedModel.value = options.model;
       if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
       renderCharts();
-      nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
+      if (running.value) connectSSE();
+      if (scrollToResults) {
+        nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
+      }
     }
 
     function exportCsv() {
@@ -1330,6 +1436,7 @@ createApp({
     });
 
     onUnmounted(() => {
+      disconnectSSE();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
     });
 
@@ -1348,7 +1455,9 @@ createApp({
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
       trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
-      loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
+      loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
+      editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
+      isActiveHistoryStatus, historyStatusLabel,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
       changePreviewPage, changeProgressPage, changeOpPage, changeHistoryPage,
       changeResultPageSize, changeHistoryPageSize, paginationPages, setTablePage, jumpTablePage,

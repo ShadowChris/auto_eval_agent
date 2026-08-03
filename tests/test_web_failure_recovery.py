@@ -1,4 +1,6 @@
+import asyncio
 import json
+from contextlib import suppress
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -8,7 +10,7 @@ from fastapi import HTTPException
 from auto_eval.config import JudgeConfig, load_config
 from auto_eval.judges.base import JudgeOutputParseError
 from auto_eval.observability import current_context
-from auto_eval.web import history, runner
+from auto_eval.web import history, runner, server
 from auto_eval.web.server import EvalReq, _validate_eval_request
 from auto_eval.web.tasks import Task
 
@@ -337,12 +339,99 @@ async def test_snapshot_exception_does_not_replace_result_with_global_error(monk
     monkeypatch.setattr(runner, "_summarize", lambda _task, _cfg: {"failed": 1})
     monkeypatch.setattr(runner, "save_task", broken_save)
 
+    event_queue = task.subscribe()
     await runner.run_eval(task, SimpleNamespace())
 
     events = []
-    while not task.queue.empty():
-        events.append((await task.queue.get())["event"])
+    while not event_queue.empty():
+        events.append((await event_queue.get())["event"])
+    task.unsubscribe(event_queue)
     assert events == ["start", "result", "done"]
     assert task.status == "done"
     assert task.error is None
     assert task.results[0]["error"] == "simulated model failure"
+
+
+@pytest.mark.asyncio
+async def test_task_events_are_broadcast_to_each_sse_subscriber():
+    task = Task(id="broadcast", mode="single", items=[], options={})
+    first = task.subscribe()
+    second = task.subscribe()
+
+    await task.publish("item_progress", {"item_index": 0, "percent": 20})
+
+    assert await first.get() == {
+        "event": "item_progress",
+        "data": {"item_index": 0, "percent": 20},
+    }
+    assert await second.get() == {
+        "event": "item_progress",
+        "data": {"item_index": 0, "percent": 20},
+    }
+    task.unsubscribe(first)
+    task.unsubscribe(second)
+    assert not task.subscribers
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_task_persists_partial_results_and_notifies_subscribers(monkeypatch):
+    task = Task(
+        id="cancel-running",
+        mode="single",
+        items=[{"id": "q0", "query": "done"}, {"id": "q1", "query": "pending"}],
+        options={},
+        status="running",
+        results=[{"index": 0, "item_id": "q0", "query": "done"}],
+        done_total=1,
+        item_progress={"0": {"item_index": 0, "status": "done", "percent": 100}},
+    )
+    execution = asyncio.create_task(asyncio.sleep(60))
+    task.execution = execution
+    events = task.subscribe()
+    saved = []
+    monkeypatch.setattr(server, "get_live_task", lambda task_id: task if task_id == task.id else None)
+    monkeypatch.setattr(server, "save_task", lambda current: saved.append(current.status) or True)
+
+    response = await server.api_eval_cancel(task.id)
+    await asyncio.sleep(0)
+
+    assert response["status"] == "cancelled"
+    assert task.status == "cancelled"
+    assert task.done_total == 1
+    assert task.results == [{"index": 0, "item_id": "q0", "query": "done"}]
+    assert task.item_progress["0"]["status"] == "done"
+    assert task.item_progress["1"]["status"] == "cancelled"
+    assert saved == ["cancelled"]
+    assert execution.cancelled()
+    emitted = []
+    while not events.empty():
+        emitted.append((await events.get())["event"])
+    assert emitted == ["item_progress", "cancelled"]
+    task.unsubscribe(events)
+    with suppress(asyncio.CancelledError):
+        await execution
+
+
+def test_history_api_keeps_live_running_status(monkeypatch):
+    task = Task(
+        id="live-history",
+        mode="operation",
+        items=[{"query": "q1"}, {"query": "q2"}],
+        options={},
+        status="running",
+        done_total=1,
+    )
+    monkeypatch.setattr(server, "list_snapshots", lambda limit: [{
+        "task_id": task.id,
+        "status": "error",
+        "done": 0,
+        "total": 2,
+        "error": "服务中断",
+    }])
+    monkeypatch.setattr(server, "get_live_task", lambda task_id: task if task_id == task.id else None)
+
+    row = server.api_history(limit=50)["items"][0]
+
+    assert row["status"] == "running"
+    assert row["done"] == 1
+    assert row["error"] is None

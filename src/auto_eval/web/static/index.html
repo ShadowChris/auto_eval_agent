@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260730_history_pagination">
+  <link rel="stylesheet" href="/static/style.css?v=20260731_resumable_tasks">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -30,7 +30,7 @@
 
   <details class="history-section">
     <summary>历史记录（{{ historyItems.length }}）<button @click.stop="loadHistory" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
-    <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
+    <p class="hint">批跑由服务端持续执行，刷新页面后可从这里加载实时进度；服务进程重启或手动中断时会保留已完成的题目。</p>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
         <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th class="history-progress-cell">进度</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
@@ -39,12 +39,13 @@
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
             <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ modeLabel(h.mode) }}</td>
-            <td>{{ h.status }}</td>
+            <td><span class="history-status" :class="'history-status-'+h.status">{{ historyStatusLabel(h.status) }}</span></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
             <td>{{ h.preview }}</td>
             <td style="white-space:nowrap">
               <button @click="loadHistoryTask(h.task_id)">加载</button>
-              <button @click="delHistory(h.task_id)" class="btn-danger">删除</button>
+              <button v-if="isActiveHistoryStatus(h.status)" @click="cancelHistoryTask(h)" class="btn-warning">中断</button>
+              <button @click="delHistory(h.task_id)" class="btn-danger" :disabled="isActiveHistoryStatus(h.status)">删除</button>
             </td>
             <td class="history-note-cell">
               <div v-if="historyNoteEditing[h.task_id]" class="history-note-editor">
@@ -509,6 +510,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260731_dev_merge"></script>
+  <script type="module" src="/static/app.js?v=20260731_resumable_tasks"></script>
 </body>
 </html>

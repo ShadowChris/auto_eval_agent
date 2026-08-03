@@ -1,4 +1,4 @@
-"""任务管理：内存存储 + asyncio.Queue 作 SSE 事件总线。"""
+"""任务管理：内存存储 + 每连接独立的 SSE 事件订阅。"""
 from __future__ import annotations
 
 import asyncio
@@ -19,18 +19,32 @@ class Task:
     session_name: str = ""
     dataset_name: str = ""
     note: str = ""
-    status: str = "pending"  # pending | running | done | error
+    status: str = "pending"  # pending | running | done | error | cancelled
     results: list[dict] = field(default_factory=list)
     item_progress: dict[str, dict] = field(default_factory=dict)
     progress_events: dict[str, list[dict]] = field(default_factory=dict)
     summary: dict = field(default_factory=dict)
-    queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    subscribers: set[asyncio.Queue] = field(default_factory=set, repr=False)
+    execution: asyncio.Task[Any] | None = field(default=None, repr=False)
     created_at: float = field(default_factory=time.time)
     done_total: int = 0
     error: str | None = None
 
     async def publish(self, event: str, data: dict) -> None:
-        await self.queue.put({"event": event, "data": data})
+        self.publish_nowait(event, data)
+
+    def publish_nowait(self, event: str, data: dict) -> None:
+        message = {"event": event, "data": data}
+        for queue in list(self.subscribers):
+            queue.put_nowait(message)
+
+    def subscribe(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue()
+        self.subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        self.subscribers.discard(queue)
 
 
 TASKS: dict[str, Task] = {}
@@ -89,3 +103,8 @@ def get_task(task_id: str) -> Task | None:
     )
     TASKS[task.id] = task
     return task
+
+
+def get_live_task(task_id: str) -> Task | None:
+    """只返回当前服务进程中仍由任务管理器持有的任务。"""
+    return TASKS.get(task_id)

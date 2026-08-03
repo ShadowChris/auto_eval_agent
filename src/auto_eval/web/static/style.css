@@ -37,6 +37,8 @@ button.primary { background: #2563eb; color: #fff; border-color: #2563eb; font-s
 button.primary:hover:not(:disabled) { background: #1d4ed8; }
 button.btn-danger { color: #dc2626; border-color: #fecaca; }
 button.btn-danger:hover:not(:disabled) { background: #fef2f2; }
+button.btn-warning { color: #b45309; border-color: #fcd34d; }
+button.btn-warning:hover:not(:disabled) { background: #fffbeb; }
 .ok { color: #059669; font-size: 13px; }
 .err { color: #dc2626; font-size: 13px; }
 .running { color: #2563eb; font-size: 14px; margin-left: 8px; }
@@ -73,6 +75,7 @@ button.btn-danger:hover:not(:disabled) { background: #fef2f2; }
 .status-running .status-dot { animation: status-pulse 1.2s ease-in-out infinite; }
 .status-done { color: #047857; background: #ecfdf5; }
 .status-error { color: #b91c1c; background: #fef2f2; }
+.status-cancelled { color: #b45309; background: #fffbeb; }
 @keyframes status-pulse { 50% { opacity: 0.28; transform: scale(0.72); } }
 .progress-meta {
   min-width: 0; overflow: hidden; color: #6b7280; font-size: 11px;
@@ -243,6 +246,11 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .row-export-link { color: #2563eb; text-decoration: underline; font-size: 13px; }
 .row-export-link:hover { color: #1d4ed8; }
 .history-note-cell { width: 300px; min-width: 300px !important; max-width: 300px !important; }
+.history-status { white-space: nowrap; }
+.history-status-pending, .history-status-running { color: #1d4ed8; }
+.history-status-done { color: #047857; }
+.history-status-error { color: #b91c1c; }
+.history-status-cancelled { color: #b45309; }
 .history-note-display { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
 .history-note-text {
   flex: 1;
