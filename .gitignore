@@ -7,6 +7,9 @@ logs/
 
 # 评测数据与临时产物（不入版本控制；data/ 里已跟踪的 dataset.jsonl 仍保留）
 data/
+!data/
+data/*
+!data/excel_to_jsonl_dataset.py
 test_tmp/
 
 # Python

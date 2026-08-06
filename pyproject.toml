@@ -27,6 +27,7 @@ embed = ["sentence-transformers>=2.5"]  # 本地 embedding 语义相似度
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 web = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.9"]
 video = ["imageio-ffmpeg>=0.6,<1"]  # Pip Wheel 内含常见平台的 FFmpeg 可执行文件
+data = ["pandas>=2.0", "openpyxl>=3.1", "xlrd>=2.0"]  # XLSX/XLS/CSV 数据集转换
 
 [project.scripts]
 auto-eval = "auto_eval.cli:app"
