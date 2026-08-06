@@ -200,12 +200,14 @@ OPERATION_SYSTEM = Template(
 correctness 与维度分独立判断，不得只根据 total 推导 correctness。
 
 【issue_types】
-输出中文字符串数组；第一项必须是与最终 correctness 对应的主要问题，其余为次要问题。
-{% for key, values in policy.issue_types.items() %}
-- {{ key }}：{{ values | join(" / ") }}
+输出受控中文字符串数组，不得自行创造类型。每种类型的适用 correctness 与定义如下：
+{% for name, rule in policy.issue_types.items() %}
+- {{ name }}（允许 {{ rule.allowed_correctness | join("/") }}）：{{ rule.description }}
 {% endfor %}
-- ok 无问题时输出 []，有轻微问题时填写；nok、no_support、others 至少填写一项。
-- 不得输出含义模糊的“视觉证据不足”：助手未展示必要状态用“完成证据不足”；视频文件自身缺失用“录屏数据不完整”。
+- nok、no_support、others 至少填写一项，第一项必须是决定整体 correctness 的主要根因；ok 无问题时输出 []。
+- 复杂任务可在后续项记录其他目标的不同根因，rationale 必须说明每项对应哪个目标；同一个目标不要同时输出根因及其必然后果。
+- 内部过程信息泄露、回复语义重复、回复内容自相矛盾、重复系统卡片等通用质量问题不能作为 nok、no_support、others 的第一项。
+- 不得推测抽帧算法是否遗漏关键状态；模型收到的画面中没有结果状态时只能依据当前证据判断。
 
 【是否低级 is_low_level】
 {% for rule in policy.low_level_rules %}
@@ -650,10 +652,12 @@ ARBITRATOR_SYSTEM = Template(
   - {{ key }}：{{ description }}
 {% endfor %}
 - 条件任务只检查实际生效的目标；已确认的可归责执行错误优先判 nok，不能被 no_support 或 others 覆盖。
-- issue_types 必须使用以下中文类型；nok、no_support、others 至少一项，ok 无问题时为 []：
-{% for key, values in policy.issue_types.items() %}
-  - {{ key }}：{{ values | join(" / ") }}
+- issue_types 必须使用以下受控中文类型，不得自行创造；括号内为允许共存的 correctness：
+{% for name, rule in policy.issue_types.items() %}
+  - {{ name }}（{{ rule.allowed_correctness | join("/") }}）：{{ rule.description }}
 {% endfor %}
+- nok、no_support、others 至少一项，第一项必须是决定整体 correctness 的主要根因；复杂任务的其他目标可在后续项记录不同根因并在 rationale 对应说明。
+- 通用质量问题不能作为 nok、no_support、others 的第一项，issue type 也不得反向覆盖已经确认的 correctness。
 - 只有简单任务且属于明显可归责基础错误的 nok 才可将 is_low_level 输出 yes。
 {% endif %}
 - 输出最终判定、各维度分、总分、置信度和理由。

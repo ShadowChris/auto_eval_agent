@@ -40,6 +40,12 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
         "no_support",
         "others",
     ]
+    assert operation.operation_policy.issue_types["内部过程信息泄露"].allowed_correctness == [
+        "ok",
+        "nok",
+        "no_support",
+        "others",
+    ]
     assert operation.rubrics[0].score_anchors[5].startswith(
         "整个 query 的所有生效目标完整闭环"
     )
@@ -58,30 +64,27 @@ def test_operation_prompt_uses_new_whole_query_decision_policy() -> None:
     assert "- nok：" in prompt
     assert "- no_support：" in prompt
     assert "- others：" in prompt
-    assert "不符合 ok、nok、no_support 任一条件的其他类别" in prompt
-    assert "如果已经能够确认任务完成、可归责执行失败或客观条件阻塞" in prompt
+    assert "不存在优先级更高的可归责执行错误" in prompt
+    assert "已观察到的结果性执行错误优先于后续的临时异常或能力不支持声明" in prompt
     assert "未预期场景" in prompt
     assert "其他未归类情况" in prompt
-    assert "任一生效目标未完成" in prompt
+    assert "所有生效目标完成或正确跳过时判 ok" in prompt
     assert '"correctness": "ok|nok|no_support|others"' in prompt
     assert '"correctness": "right|wrong|partial|unclear"' not in prompt
 
 
-def test_operation_prompt_treats_only_severe_response_quality_as_nok() -> None:
+def test_operation_prompt_keeps_response_quality_issues_separate_from_correctness() -> None:
     operation, prompt = _operation_prompt()
 
-    assert "与 query 严重不相关" in prompt
-    assert "大段机械重复影响阅读" in prompt
-    assert "包含大量无关或乱码等冗余字符" in prompt
-    assert "暴露无必要的检索过程、skill/工具名称、内部推理及思维链" in prompt
-    assert "严重回复质量问题" in prompt
     assert "内部过程信息泄露" in prompt
-    assert "不影响理解和任务闭环的少量重复" in prompt
-    assert "最终文字回复是否与 query 相关、可读且能清晰传达结果" in prompt
-    assert "最终文字回复是否泄露无必要的检索、skill、工具调用、内部推理或思维链" in prompt
-    assert "操作完成但最终回复存在严重质量问题或内部过程信息泄露" in prompt
-    assert "严重回复质量问题" in operation.operation_policy.issue_types["nok"]
-    assert "内部过程信息泄露" in operation.operation_policy.issue_types["nok"]
+    assert "回复语义重复" in prompt
+    assert "回复内容自相矛盾" in prompt
+    assert "重复系统卡片" in prompt
+    assert "通用质量问题不能作为 nok、no_support、others 的第一项" in prompt
+    assert "默认不直接改变 correctness" in prompt
+    assert "必须再独立通读完整 agent 回复" in prompt
+    assert "我先想想任务规划" in prompt
+    assert "严重回复质量问题" not in operation.operation_policy.issue_types
 
 
 def test_operation_prompt_handles_conditional_tasks_and_causality() -> None:
@@ -89,11 +92,23 @@ def test_operation_prompt_handles_conditional_tasks_and_causality() -> None:
 
     assert "只要求完成条件实际成立后所激活的目标" in prompt
     assert "条件不成立时正确跳过后续动作，也属于完成" in prompt
-    assert "条件分支错误" in prompt
-    assert "条件判断错误" in prompt
-    assert "将每个生效目标判断为已完成、客观阻塞、评测侧无法判断或可归责未完成" in prompt
-    assert "任一生效目标存在可归责未完成、执行错误或严重回复质量问题时判 nok" in prompt
-    assert "未完成目标全部由外部条件阻塞则判 no_support" in prompt
+    assert "已获得前置信息但条件判断错误" in prompt
+    assert "条件成立却未执行后续动作" in prompt
+    assert "对每个目标优先识别最直接根因" in prompt
+    assert "同一个目标不要同时记录根因和其必然后果" in prompt
+    assert "优先标记三方应用跳转中断" in prompt
+    assert "不得再为同一中断所阻塞的目标重复标记" in prompt
+    assert "所有未完成目标都被外部条件阻塞时判 no_support" in prompt
+
+
+def test_operation_prompt_distinguishes_state_setting_from_action_prerequisite() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "区分幂等状态设置和依赖活动对象的动作指令" in prompt
+    assert "停止播放、暂停下载、挂断电话、取消导航" in prompt
+    assert "活动对象不存在时不能按“初始状态已满足”处理" in prompt
+    assert "动作没有对应活动对象" in prompt
+    assert "判 no_support，并标记缺少前置条件" in prompt
 
 
 def test_operation_prompt_judges_evidence_by_sufficiency_not_container() -> None:
@@ -109,10 +124,15 @@ def test_operation_prompt_judges_evidence_by_sufficiency_not_container() -> None
     assert "不得因其他目标执行成功" in prompt
     assert "只有泛化的“正在操作/已完成”" in prompt
     assert "只能证明尝试" in prompt
+    assert "严格区分“目标未执行”和“执行后缺少结果证据”" in prompt
+    assert "同一目标不能同时使用两者" in prompt
+    assert "该状态与 query 要求不一致时，优先标记任务结果错误" in prompt
+    assert "没有展示可判断对错的具体结果状态时" in prompt
     assert "最终画面或初始状态直接满足 query 即可" in prompt
     assert "关键帧未展示全部过渡过程不等于步骤错误" in prompt
     assert "逐个生效目标说明最终状态、对应证据或阻塞" in prompt
-    assert "事实无法核验时判 others" in prompt
+    assert "不主动进行外部事实核验" in prompt
+    assert "是否与录屏、结果卡、上下文或可信先验存在明确冲突" in prompt
     assert "自动操作卡片、进度、目标入口和操作轨迹属于过程证据" not in prompt
     assert "ok 必须有最终状态强证据" not in prompt
 
@@ -124,8 +144,9 @@ def test_operation_prompt_separates_collapsed_window_from_plain_text_claim() -> 
     assert "任务执行窗口始终处于带“查看/点击查看”入口的缩略状态" in prompt
     assert "判 others，优先标记任务执行窗口未展开" in prompt
     assert "相关评分维度填 null" in prompt
-    assert "录屏数据完整时判 nok" in prompt
-    assert "标记仅文字声称完成或完成证据不足" in prompt
+    assert "模型收到的画面没有可验证结果时判 nok" in prompt
+    assert "标记未展示可验证结果" in prompt
+    assert "不得推测是否由抽帧遗漏造成" in prompt
     assert "任务执行窗口未展开" in prompt
 
 
@@ -143,11 +164,32 @@ def test_operation_prompt_ignores_recording_infrastructure() -> None:
     assert "【录屏载体噪声】" not in prompt
 
 
+def test_operation_prompt_injects_completion_marker_and_podcast_knowledge() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "“√已完成”只表示本轮任务执行流程结束" in prompt
+    assert "不得仅凭该标识判为 ok" in prompt
+    assert "该标识是系统流程状态，不是 agent 的自然语言回复" in prompt
+    assert "不得仅因它与实际任务结果不同而标记回复与界面不一致" in prompt
+    assert "出现可识别的播客系统结果卡" in prompt
+    assert "卡片仍显示“生成中”或尚未自动播放" in prompt
+    assert "与卡片仍在生成具体音频内容不构成回复与界面不一致" in prompt
+    assert "没有播客结果卡时，不能判完成" in prompt
+
+
+def test_operation_prompt_requires_explicit_user_interaction_for_login_blocker() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "第三方应用页面自身显示登录入口不等于 agent 已提示用户" in prompt
+    assert "停在登录页或其他阻塞页面" in prompt
+    assert "停在第三方应用的登录页、首页等中间状态" in prompt
+
+
 def test_operation_prompt_requires_issue_types_and_low_level_flag() -> None:
     _, prompt = _operation_prompt()
 
     assert "【issue_types】" in prompt
-    assert "输出中文字符串数组" in prompt
+    assert "输出受控中文字符串数组" in prompt
     assert "nok、no_support、others 至少填写一项" in prompt
     assert "只有意图清晰的简单任务被判 nok" in prompt
     assert "复杂多任务固定输出 no" in prompt
@@ -166,8 +208,8 @@ def test_operation_arbitrator_reuses_the_same_policy() -> None:
 
     assert "- ok：" in prompt
     assert "当前任务类录屏使用的评测手机未安装 SIM 卡" in prompt
-    assert "完成证据不足" in prompt
-    assert "待权限授权" in prompt
+    assert "未展示可验证结果" in prompt
+    assert "缺少前置条件" in prompt
     assert "任务执行窗口未展开" in prompt
     assert '"correctness": "ok|nok|no_support|others"' in prompt
     assert '"issue_types": ["<受控中文问题类型>"]' in prompt
@@ -203,13 +245,13 @@ def test_operation_output_fields_are_normalized() -> None:
     ) == ("ok", ["路径冗余"], "no")
     assert normalize_operation_fields(
         "ok", ["最终步骤未执行"], "yes", "simple", allowed
-    ) == ("nok", ["最终步骤未执行"], "yes")
+    ) == ("ok", [], "no")
     assert normalize_operation_fields(
         "nok", None, True, "simple", allowed
     ) == ("nok", ["其他执行问题"], "yes")
     assert normalize_operation_fields(
         "no_support", ["待权限授权"], "yes", "simple", allowed
-    ) == ("no_support", ["待权限授权"], "no")
+    ) == ("no_support", ["缺少前置条件"], "no")
     assert normalize_operation_fields(
         "others", "视频损坏；自定义标签", "yes", "simple", allowed
     ) == ("others", ["视频损坏", "其他未归类情况"], "no")
@@ -218,13 +260,28 @@ def test_operation_output_fields_are_normalized() -> None:
     ) == ("nok", ["其他执行问题"], "no")
     assert normalize_operation_fields(
         "nok", ["完成证据不足"], "yes", "complex", allowed
-    ) == ("nok", ["完成证据不足"], "no")
-    assert normalize_operation_fields(
-        "ok", ["严重回复质量问题"], "yes", "simple", allowed
-    ) == ("nok", ["严重回复质量问题"], "yes")
+    ) == ("nok", ["未展示可验证结果"], "no")
     assert normalize_operation_fields(
         "ok", ["内部过程信息泄露"], "yes", "simple", allowed
-    ) == ("nok", ["内部过程信息泄露"], "yes")
+    ) == ("ok", ["内部过程信息泄露"], "no")
+    assert normalize_operation_fields(
+        "nok",
+        ["缺少前置条件", "应执行目标未执行", "内部过程信息泄露"],
+        "yes",
+        "complex",
+        allowed,
+    ) == (
+        "nok",
+        ["应执行目标未执行", "缺少前置条件", "内部过程信息泄露"],
+        "no",
+    )
+    assert normalize_operation_fields(
+        "no_support",
+        ["内部过程信息泄露", "待用户澄清"],
+        "yes",
+        "simple",
+        allowed,
+    ) == ("no_support", ["待用户澄清", "内部过程信息泄露"], "no")
 
 
 def test_legacy_operation_results_map_at_read_time() -> None:
@@ -235,11 +292,11 @@ def test_legacy_operation_results_map_at_read_time() -> None:
     )
     assert map_legacy_operation_result("wrong", "仅文字无状态证据") == (
         "nok",
-        ["仅文字声称完成"],
+        ["未展示可验证结果"],
     )
     assert map_legacy_operation_result("unclear", "待权限授权") == (
         "no_support",
-        ["待权限授权"],
+        ["缺少前置条件"],
     )
     assert map_legacy_operation_result("unclear", "录屏证据缺失") == (
         "others",

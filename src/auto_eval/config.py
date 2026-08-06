@@ -125,6 +125,27 @@ class EnsembleConfig(BaseModel):
     dim_problem_threshold: float = 2.0  # 维度分<=此值视为"问题"（按垂域维度问题分布用，满分通常5）
 
 
+class OperationIssueType(BaseModel):
+    """任务类问题类型；与整体 correctness 解耦。"""
+
+    allowed_correctness: list[str]
+    description: str
+
+    @model_validator(mode="after")
+    def validate_allowed_correctness(self):
+        expected = {"ok", "nok", "no_support", "others"}
+        allowed = set(self.allowed_correctness)
+        if not allowed or not allowed <= expected:
+            raise ValueError(
+                "operation_policy.issue_types.allowed_correctness "
+                "必须是 ok/nok/no_support/others 的非空子集"
+            )
+        self.allowed_correctness = list(dict.fromkeys(self.allowed_correctness))
+        if not self.description.strip():
+            raise ValueError("operation_policy.issue_types.description 不能为空")
+        return self
+
+
 class OperationPolicy(BaseModel):
     """任务类专属判定政策；仅由 operation skill 渲染进视觉裁判 Prompt。"""
 
@@ -132,7 +153,7 @@ class OperationPolicy(BaseModel):
     scope_rules: list[str] = Field(default_factory=list)
     evidence_rules: list[str] = Field(default_factory=list)
     correctness: dict[str, str] = Field(default_factory=dict)
-    issue_types: dict[str, list[str]] = Field(default_factory=dict)
+    issue_types: dict[str, OperationIssueType] = Field(default_factory=dict)
     decision_order: list[str] = Field(default_factory=list)
     conditional_rules: list[str] = Field(default_factory=list)
     low_level_rules: list[str] = Field(default_factory=list)
@@ -142,10 +163,15 @@ class OperationPolicy(BaseModel):
         expected = {"ok", "nok", "no_support", "others"}
         if set(self.correctness) != expected:
             raise ValueError("operation_policy.correctness 必须完整定义 ok/nok/no_support/others")
-        if set(self.issue_types) != expected:
-            raise ValueError("operation_policy.issue_types 必须完整定义 ok/nok/no_support/others")
-        if any(not self.issue_types[key] for key in expected):
-            raise ValueError("operation_policy 的每类 issue_types 都不能为空")
+        if not self.issue_types:
+            raise ValueError("operation_policy.issue_types 不能为空")
+        covered = {
+            correctness
+            for issue in self.issue_types.values()
+            for correctness in issue.allowed_correctness
+        }
+        if covered != expected:
+            raise ValueError("operation_policy.issue_types 必须覆盖 ok/nok/no_support/others")
         return self
 
 

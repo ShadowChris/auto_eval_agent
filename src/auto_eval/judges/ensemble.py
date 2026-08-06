@@ -15,6 +15,7 @@ from ..schema import (
     SingleScore,
     Verdict,
 )
+from .operation_fields import primary_operation_issue_types
 
 _rng = np.random.default_rng(20240622)
 
@@ -149,7 +150,7 @@ def aggregate_operation_scores(
     dims: list[RubricDim],
     cfg: EnsembleConfig,
     threshold: float,
-    issue_types_by_status: dict[str, list[str]] | None = None,
+    issue_type_rules: dict[str, object] | None = None,
 ) -> Optional[OperationVerdict]:
     """聚合任务类评分，不复用问答类 correctness/error_type 语义。"""
     if not scores:
@@ -184,8 +185,8 @@ def aggregate_operation_scores(
         issue_counts,
         key=lambda issue: (-issue_counts[issue], issue_order[issue]),
     )
-    if issue_types_by_status:
-        primary_types = set(issue_types_by_status.get(correctness, []))
+    if issue_type_rules:
+        primary_types = primary_operation_issue_types(correctness, issue_type_rules)
         issue_types = (
             [issue for issue in issue_types if issue in primary_types]
             + [issue for issue in issue_types if issue not in primary_types]
