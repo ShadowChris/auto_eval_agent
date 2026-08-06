@@ -22,8 +22,8 @@
 ## 安装
 
 ```powershell
-# 1. 安装依赖（Python 3.10+；web 组提供前端评估台）
-pip install -e ".[dev,web]"
+# 1. 安装完整开发依赖（Python 3.10+；包含 Web 和 Pip 内置 FFmpeg）
+python -m pip install -r requirements.txt
 
 # 2. 配置密钥
 cp .env.example .env                 # 填入 PROXY_API_KEY / TAVILY_API_KEY 等
@@ -34,6 +34,10 @@ cp .env.example .env                 # 填入 PROXY_API_KEY / TAVILY_API_KEY 等
 #    config/rubrics.yaml   评测维度与权重
 #    data/dataset.jsonl    你的评测集（示例 schema 见 data/）
 ```
+
+只补充视频依赖可执行 `python -m pip install -e ".[video]"`。安装后运行
+`python scripts/check_ffmpeg.py` 验证视频时长探测和真实抽帧，详见
+[FFmpeg 安装与抽帧验证](docs/FFmpeg安装与抽帧验证.md)。
 
 > ⚠️ **环境注意**：本机若 `python`（hermes venv）与 `pip`（anaconda）不一致，下面所有启动命令请用 `& "D:\ProgramData\anaconda3\python.exe" -m ...`，否则报 `ModuleNotFoundError`。
 

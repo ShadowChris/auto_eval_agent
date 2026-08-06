@@ -11,6 +11,7 @@ import base64
 import io
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,61 @@ import numpy as np
 
 KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.1.0"
 DEFAULT_TASK_START_TIME = 7.0
+
+
+class FFmpegUnavailableError(RuntimeError):
+    """系统和 Pip 视频依赖中都找不到可用的 FFmpeg。"""
+
+
+def resolve_ffmpeg_executable() -> str:
+    """解析 FFmpeg 路径：显式配置 → 系统 PATH → Pip Wheel。"""
+    configured = os.getenv("AUTO_EVAL_FFMPEG", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.is_file():
+            return str(candidate.resolve())
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+        raise FFmpegUnavailableError(
+            f"AUTO_EVAL_FFMPEG 指向的可执行文件不存在：{configured}"
+        )
+
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+
+        bundled_ffmpeg = Path(get_ffmpeg_exe())
+        if bundled_ffmpeg.is_file():
+            return str(bundled_ffmpeg.resolve())
+    except (ImportError, RuntimeError, OSError):
+        pass
+
+    raise FFmpegUnavailableError(
+        "未找到 FFmpeg。请运行 python -m pip install -e \".[video]\"，"
+        "或安装系统 FFmpeg；安装说明见 docs/FFmpeg安装与抽帧验证.md"
+    )
+
+
+def _resolve_ffprobe_executable() -> str | None:
+    """FFprobe 是可选加速项；缺失时使用 FFmpeg 元数据回退。"""
+    configured = os.getenv("AUTO_EVAL_FFPROBE", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.is_file():
+            return str(candidate.resolve())
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+        raise FFmpegUnavailableError(
+            f"AUTO_EVAL_FFPROBE 指向的可执行文件不存在：{configured}"
+        )
+    if os.getenv("AUTO_EVAL_FFMPEG", "").strip():
+        return None
+    return shutil.which("ffprobe")
 
 
 @dataclass(frozen=True)
@@ -107,27 +163,50 @@ class _Candidate:
 
 
 def probe_duration(video: Path | str) -> float:
-    """ffprobe 取时长（秒），失败回退 0.0。"""
+    """读取视频时长；优先 FFprobe，缺失时解析 FFmpeg 元数据。"""
+    ffprobe = _resolve_ffprobe_executable()
+    if ffprobe:
+        try:
+            out = subprocess.check_output(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(video),
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            return float(out.strip())
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+
+    ffmpeg = resolve_ffmpeg_executable()
     try:
-        out = subprocess.check_output(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(video),
-            ],
-            stderr=subprocess.DEVNULL,
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(video)],
+            check=False,
+            capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
         )
-        return float(out.strip())
-    except Exception:
+    except OSError:
         return 0.0
+    match = re.search(
+        r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
+        proc.stderr or "",
+    )
+    if not match:
+        return 0.0
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def scene_change_times(
@@ -137,7 +216,7 @@ def scene_change_times(
     end_time: float | None = None,
 ) -> list[float]:
     """返回 FFmpeg scene 检测到的变化时间点；失败返回空列表。"""
-    command = ["ffmpeg", "-hide_banner", "-i", str(video)]
+    command = [resolve_ffmpeg_executable(), "-hide_banner", "-i", str(video)]
     if end_time is not None:
         command.extend(["-t", f"{end_time:.3f}"])
     command.extend(
@@ -253,7 +332,7 @@ def _extract_at(
     try:
         subprocess.run(
             [
-                "ffmpeg",
+                resolve_ffmpeg_executable(),
                 "-y",
                 "-hide_banner",
                 "-loglevel",
@@ -343,7 +422,7 @@ def _extract_candidates(
         try:
             subprocess.run(
                 [
-                    "ffmpeg",
+                    resolve_ffmpeg_executable(),
                     "-y",
                     "-hide_banner",
                     "-loglevel",

@@ -1,0 +1,2 @@
+# 本地开发完整依赖：测试、Web 评估台和 Pip 内置 FFmpeg。
+-e .[dev,web,video]

@@ -1,19 +1,34 @@
 import json
-import shutil
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from PIL import Image
 
 from auto_eval.media import (
+    FFmpegUnavailableError,
     KEYFRAME_ALGORITHM_VERSION,
     KeyframeConfig,
     _Candidate,
     _final_deduplicate,
     extract_scene_keyframes,
+    probe_duration,
+    resolve_ffmpeg_executable,
 )
+
+
+def _ffmpeg_available() -> bool:
+    try:
+        resolve_ffmpeg_executable()
+        return True
+    except FFmpegUnavailableError:
+        return False
+
+
+FFMPEG_AVAILABLE = _ffmpeg_available()
 
 
 def _write_image(path: Path, value: int) -> Path:
@@ -92,9 +107,51 @@ def test_keyframe_config_uses_unified_task_time_names():
         KeyframeConfig(task_start_time=8.0, task_end_time=8.0)
 
 
+def test_resolve_ffmpeg_uses_explicit_path(tmp_path: Path, monkeypatch):
+    executable = tmp_path / "custom-ffmpeg"
+    executable.write_bytes(b"binary")
+    monkeypatch.setenv("AUTO_EVAL_FFMPEG", str(executable))
+
+    assert resolve_ffmpeg_executable() == str(executable.resolve())
+
+
+def test_resolve_ffmpeg_rejects_missing_explicit_path(monkeypatch):
+    monkeypatch.setenv("AUTO_EVAL_FFMPEG", "/missing/custom-ffmpeg")
+
+    with pytest.raises(FFmpegUnavailableError, match="AUTO_EVAL_FFMPEG"):
+        resolve_ffmpeg_executable()
+
+
+def test_resolve_ffmpeg_falls_back_to_pip_wheel(tmp_path: Path, monkeypatch):
+    bundled = tmp_path / "bundled-ffmpeg"
+    bundled.write_bytes(b"binary")
+    monkeypatch.delenv("AUTO_EVAL_FFMPEG", raising=False)
+    monkeypatch.setattr("auto_eval.media.shutil.which", lambda name: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "imageio_ffmpeg",
+        SimpleNamespace(get_ffmpeg_exe=lambda: str(bundled)),
+    )
+
+    assert resolve_ffmpeg_executable() == str(bundled.resolve())
+
+
+def test_probe_duration_falls_back_to_ffmpeg_metadata(monkeypatch):
+    monkeypatch.setattr("auto_eval.media._resolve_ffprobe_executable", lambda: None)
+    monkeypatch.setattr("auto_eval.media.resolve_ffmpeg_executable", lambda: "bundled-ffmpeg")
+    monkeypatch.setattr(
+        "auto_eval.media.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stderr="Duration: 01:02:03.45, start: 0.000000, bitrate: 800 kb/s"
+        ),
+    )
+
+    assert probe_duration("sample.mp4") == pytest.approx(3723.45)
+
+
 @pytest.mark.skipif(
-    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
-    reason="requires local ffmpeg and ffprobe",
+    not FFMPEG_AVAILABLE,
+    reason="requires system ffmpeg or the video extra",
 )
 def test_extract_scene_keyframes_preserves_popup_task_end_and_final_frame(
     tmp_path: Path,
@@ -102,7 +159,7 @@ def test_extract_scene_keyframes_preserves_popup_task_end_and_final_frame(
     video = tmp_path / "popup_flow.mp4"
     subprocess.run(
         [
-            "ffmpeg",
+            resolve_ffmpeg_executable(),
             "-y",
             "-hide_banner",
             "-loglevel",
@@ -166,14 +223,14 @@ def test_extract_scene_keyframes_preserves_popup_task_end_and_final_frame(
 
 
 @pytest.mark.skipif(
-    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
-    reason="requires local ffmpeg and ffprobe",
+    not FFMPEG_AVAILABLE,
+    reason="requires system ffmpeg or the video extra",
 )
 def test_expanded_begin_window_preserves_late_local_popup(tmp_path: Path):
     video = tmp_path / "late_popup.mp4"
     subprocess.run(
         [
-            "ffmpeg",
+            resolve_ffmpeg_executable(),
             "-y",
             "-hide_banner",
             "-loglevel",
