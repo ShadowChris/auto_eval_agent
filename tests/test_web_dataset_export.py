@@ -1,6 +1,8 @@
 import json
 import zipfile
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 from auto_eval.web import history, server
 
@@ -89,7 +91,11 @@ def _snapshot(project: Path) -> dict:
                 "correctness": "ok",
                 "issue_types": [],
                 "total": 5,
-                "rubric": {"操作完成度": 5},
+                "rubric": {"操作完成度": 5, "步骤正确性": 4},
+                "rubric_reasons": {
+                    "操作完成度": "已打开设置",
+                    "步骤正确性": "路径正确",
+                },
             },
         ],
         "summary": {},
@@ -114,23 +120,57 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     assert dataset[0]["抽帧目录项目相对路径"] == (
         "runs/videos/imported/session/001_op_1"
     )
-    assert dataset[0]["帧项目相对路径"].splitlines() == [
-        "runs/videos/imported/session/001_op_1/kf_001.jpg",
-        "runs/videos/imported/session/001_op_1/kf_002.jpg",
-    ]
+    assert "帧项目相对路径" not in dataset[0]
+    assert "抽帧数量" not in dataset[0]
+    assert "录屏时长（秒）" not in dataset[0]
 
     results = sheets["逐题结果"]
     assert [row["item_id"] for row in results] == ["op_1", "op_2", "op_3"]
+    assert list(results[0]) == list(history._OPERATION_EXPORT_COLUMNS)
     assert results[0]["correctness"] == "ok"
+    assert results[0]["理由_操作完成度"] == "已打开设置"
+    assert results[0]["理由_步骤正确性"] == "路径正确"
+    assert "index" not in results[0]
+    assert "has_video" not in results[0]
+    assert "tool_trace" not in results[0]
     assert results[1]["评估状态"] == "评估失败"
-    assert "correctness" not in results[1]
+    assert results[1]["correctness"] == ""
     assert results[2]["评估状态"] == "待评估"
-    assert "correctness" not in results[2]
+    assert results[2]["correctness"] == ""
 
     frames = sheets["抽帧清单"]
     assert frames[0]["时间点"] == 1.5
     assert frames[0]["保留原因"] == "scene-change"
+    assert "原始video_path" not in frames[0]
     assert frames[-1]["抽帧状态"] == "无抽帧结果"
+
+    assert set(sheets) == {"数据集明细", "逐题结果", "抽帧清单", "运行汇总"}
+    run_summary = sheets["运行汇总"][0]
+    assert run_summary["total"] == 3
+    assert run_summary["done"] == 1
+    assert run_summary["failed"] == 1
+    assert run_summary["pending"] == 1
+
+
+def test_operation_export_cleanup_is_decoupled_from_other_modes(
+    tmp_path: Path,
+    monkeypatch,
+):
+    snapshot = _snapshot(tmp_path)
+    snapshot["mode"] = "single"
+    monkeypatch.setattr(history, "PROJECT_ROOT", tmp_path)
+
+    sheets = history.export_rows(snapshot)
+
+    assert sheets["数据集明细"][0]["帧项目相对路径"].splitlines() == [
+        "runs/videos/imported/session/001_op_1/kf_001.jpg",
+        "runs/videos/imported/session/001_op_1/kf_002.jpg",
+    ]
+    assert sheets["抽帧清单"][0]["原始video_path"] == "data/videos/one.mp4"
+    assert "逐题-default" in sheets
+    assert "评估失败" in sheets
+    assert "运行信息" in sheets
+    assert "运行汇总" not in sheets
 
 
 def test_old_operation_results_are_converted_only_when_read_or_exported(tmp_path: Path):
@@ -291,4 +331,30 @@ def test_item_judge_export_supports_chinese_download_filename(monkeypatch):
     assert json.loads(response.body)["judge_call_count"] == 1
     disposition = response.headers["content-disposition"]
     assert "filename*=UTF-8''" in disposition
+    disposition.encode("latin-1")
+
+
+def test_xlsx_export_filename_contains_dataset_time_and_short_task_id(monkeypatch):
+    created_at = 1_786_002_524.0
+    snapshot = {
+        "task_id": "91f98ac3d82d",
+        "dataset_name": "data/0726_v2/任务类_0726_v2_众测.jsonl",
+        "created_at": created_at,
+        "mode": "operation",
+        "items": [],
+        "results": [],
+    }
+    monkeypatch.setattr(server, "get_task", lambda _: None)
+    monkeypatch.setattr(server, "load_snapshot", lambda _: snapshot)
+    monkeypatch.setattr(server, "build_xlsx", lambda _snapshot, _cfg: b"xlsx")
+    monkeypatch.setattr(server, "cfg", lambda: None)
+
+    response = server.api_export("91f98ac3d82d", "xlsx")
+
+    timestamp = datetime.fromtimestamp(created_at).strftime("%Y%m%d_%H%M%S")
+    expected = f"任务类_0726_v2_众测_eval_{timestamp}_91f98ac3.xlsx"
+    disposition = response.headers["content-disposition"]
+    assert f'filename="eval_{timestamp}_91f98ac3.xlsx"' in disposition
+    encoded_name = disposition.split("filename*=UTF-8''", 1)[1]
+    assert unquote(encoded_name) == expected
     disposition.encode("latin-1")

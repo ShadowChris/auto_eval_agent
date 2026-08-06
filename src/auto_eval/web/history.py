@@ -237,7 +237,8 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     仍占据原行，只将评分字段留空。
 
     逐题结果按维度展开成独立列（维度_X / 理由_X），CSV 与 XLSX 概览
-    sheet 均走此格式；非 compare 模式下仍按垂域分 sheet，便于筛选分析。
+    sheet 均走此格式；任务类使用固定白名单，避免混入其他模块维度和
+    内部调试字段。非 compare 模式下仍按垂域分 sheet，便于筛选分析。
     传入 cfg 时，会按 skill 配置保留完整的维度列，N/A 的维度也会导出并在单元格填"N/A"。
     """
     snapshot = _with_operation_compat(snapshot)
@@ -250,7 +251,10 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     mode = snapshot.get("mode")
 
     rows: dict[str, list[dict]] = {
-        "数据集明细": _dataset_rows(snapshot),
+        "数据集明细": _dataset_rows(
+            snapshot,
+            compact_media=mode == "operation",
+        ),
         "逐题结果": _result_rows_compact(
             aligned_results,
             _all_dim_names(results, cfg),
@@ -259,9 +263,22 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     if mode == "rich_content":
         # 垂域视觉评测：使用中文列名并按固定顺序导出
         rows["逐题结果"] = _rich_content_export_rows(aligned_results)
-    frame_rows = _frame_manifest_rows(snapshot)
+    elif mode == "operation":
+        rows["逐题结果"] = _operation_export_rows(
+            aligned_results,
+            snapshot.get("items") or [],
+        )
+    frame_rows = _frame_manifest_rows(
+        snapshot,
+        include_original_video=mode != "operation",
+    )
     if frame_rows:
         rows["抽帧清单"] = frame_rows
+    if mode == "operation":
+        # 任务类只有一个固定垂域，不再生成重复的按垂域拆分表、
+        # 失败表和通用垂域统计表。失败与告警仍在“逐题结果”原行展示。
+        rows["运行汇总"] = [_operation_run_summary(snapshot)]
+        return rows
     rows["运行信息"] = [_run_info(snapshot)]
     if mode == "compare":
         rows["逐题结果"] = _result_rows(
@@ -359,6 +376,69 @@ _RUNTIME_ITEM_FIELDS = {
     "duration",
     "source_data",
 }
+
+# 任务类“逐题结果”只保留分析和定位问题所需的字段。
+# 字段顺序同时也是 Excel 列顺序。
+_OPERATION_EXPORT_COLUMNS = (
+    "数据集序号",
+    "item_id",
+    "query",
+    "context",
+    "answer",
+    "task_type",
+    "correctness",
+    "issue_types",
+    "is_low_level",
+    "total",
+    "维度_操作完成度",
+    "理由_操作完成度",
+    "维度_步骤正确性",
+    "理由_步骤正确性",
+    "rationale",
+    "latency_s",
+    "评估状态",
+    "error",
+    "video_prepare_warnings",
+)
+
+
+def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]:
+    """将任务类结果转为固定列。
+
+    原始数据集字段由“数据集明细”完整保留；这里只展示任务类的
+    核心评估字段。结果缺失时从原始 item 回填输入字段，评分字段留空。
+    """
+    export: list[dict] = []
+    for position, result in enumerate(results):
+        item = items[position] if position < len(items) else {}
+        rubric = result.get("rubric") or {}
+        reasons = result.get("rubric_reasons") or {}
+        values = {
+            "数据集序号": result.get("数据集序号", position + 1),
+            "item_id": result.get("item_id") or item.get("id") or f"q{position}",
+            "query": result.get("query") or item.get("query") or item.get("question") or "",
+            "context": result.get("context") or item.get("context") or "",
+            "answer": result.get("answer") or item.get("answer") or "",
+            "task_type": result.get("task_type", ""),
+            "correctness": result.get("correctness", ""),
+            "issue_types": result.get("issue_types", ""),
+            "is_low_level": result.get("is_low_level", ""),
+            "total": result.get("total", ""),
+            "维度_操作完成度": rubric.get("操作完成度", ""),
+            "理由_操作完成度": reasons.get("操作完成度", ""),
+            "维度_步骤正确性": rubric.get("步骤正确性", ""),
+            "理由_步骤正确性": reasons.get("步骤正确性", ""),
+            "rationale": result.get("rationale", ""),
+            "latency_s": result.get("latency_s", ""),
+            "评估状态": result.get("评估状态", ""),
+            "error": result.get("error", ""),
+            "video_prepare_warnings": result.get("video_prepare_warnings", ""),
+        }
+        for key in ("issue_types", "video_prepare_warnings"):
+            if isinstance(values[key], list):
+                values[key] = "；".join(str(value) for value in values[key])
+        export.append({key: values[key] for key in _OPERATION_EXPORT_COLUMNS})
+    return export
 
 # 垂域视觉评测（rich_content）Excel/CSV 导出列：与前端展示一致，按此顺序输出
 _RICH_CONTENT_EXPORT_COLUMNS: list[tuple[str, str]] = [
@@ -463,7 +543,7 @@ def _source_data_for_item(item: dict) -> dict:
     }
 
 
-def _dataset_rows(snapshot: dict) -> list[dict]:
+def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
     rows: list[dict] = []
     for index, item in enumerate(snapshot.get("items") or []):
         source = _source_data_for_item(item)
@@ -481,24 +561,28 @@ def _dataset_rows(snapshot: dict) -> list[dict]:
         video_runtime_path = item.get("video_path") or (
             (item.get("media") or [""])[0]
         )
-        frame_project_paths = [
-            path for path in (
-                _project_relative_path(frame)
-                for frame in frames
-            )
-            if path
-        ]
         frame_dir = (
             _project_relative_path(Path(frames[0]).parent)
             if frames else ""
         )
-        row.update({
+        media_fields = {
             "录屏项目相对路径": _project_relative_path(video_runtime_path),
             "抽帧目录项目相对路径": frame_dir,
-            "帧项目相对路径": "\n".join(frame_project_paths),
-            "抽帧数量": item.get("frame_count") or len(frames),
-            "录屏时长（秒）": item.get("duration") or "",
-        })
+        }
+        if not compact_media:
+            frame_project_paths = [
+                path for path in (
+                    _project_relative_path(frame)
+                    for frame in frames
+                )
+                if path
+            ]
+            media_fields.update({
+                "帧项目相对路径": "\n".join(frame_project_paths),
+                "抽帧数量": item.get("frame_count") or len(frames),
+                "录屏时长（秒）": item.get("duration") or "",
+            })
+        row.update(media_fields)
         rows.append(row)
     return rows
 
@@ -519,7 +603,11 @@ def _frame_metadata(frame_dir: Path) -> tuple[dict[int, dict], dict]:
     return selected, metadata
 
 
-def _frame_manifest_rows(snapshot: dict) -> list[dict]:
+def _frame_manifest_rows(
+    snapshot: dict,
+    *,
+    include_original_video: bool = True,
+) -> list[dict]:
     """生成一帧一行的导出清单；没有成功抽帧的条目也保留一行。"""
     rows: list[dict] = []
     for item_index, item in enumerate(snapshot.get("items") or []):
@@ -532,15 +620,16 @@ def _frame_manifest_rows(snapshot: dict) -> list[dict]:
             continue
         frames = [Path(str(path)) for path in (item.get("frames") or [])]
         selected, _ = _frame_metadata(frames[0].parent) if frames else ({}, {})
-        source = _source_data_for_item(item)
-        source_video = source.get("video_path") or item.get("video_path") or ""
         base = {
             "数据集序号": item_index + 1,
             "id": item.get("id") or f"q{item_index}",
             "query": item.get("query") or item.get("question") or "",
             "录屏项目相对路径": _project_relative_path(item.get("video_path")),
-            "原始video_path": source_video,
         }
+        if include_original_video:
+            source = _source_data_for_item(item)
+            source_video = source.get("video_path") or item.get("video_path") or ""
+            base["原始video_path"] = source_video
         if not frames:
             rows.append({
                 **base,
@@ -602,6 +691,50 @@ def _run_info(snapshot: dict) -> dict:
         "created_at": _format_ts(created),
         "updated_at": _format_ts(updated),
         "options": snapshot.get("options") or {},
+        "error": snapshot.get("error") or "",
+    }
+
+
+def _operation_run_summary(snapshot: dict) -> dict:
+    """任务类单行运行汇总。
+
+    将通用的“运行信息”和“汇总指标”合并，并把 options 及
+    correctness_dist 中常用字段展开，避免 Excel 中出现嵌套 JSON。
+    """
+    summary = snapshot.get("summary") or {}
+    options = snapshot.get("options") or {}
+    distribution = summary.get("correctness_dist") or {}
+    results = snapshot.get("results") or []
+    done = len([row for row in results if "error" not in row])
+    failed = len([row for row in results if "error" in row])
+    total = len(snapshot.get("items") or [])
+    judges = options.get("judges") or []
+    if isinstance(judges, list):
+        judges = "；".join(str(judge) for judge in judges)
+    return {
+        "task_id": snapshot.get("task_id"),
+        "dataset_name": snapshot.get("dataset_name") or "",
+        "note": snapshot.get("note") or "",
+        "mode": snapshot.get("mode"),
+        "status": snapshot.get("status"),
+        "created_at": _format_ts(snapshot.get("created_at")),
+        "updated_at": _format_ts(snapshot.get("updated_at")),
+        "judges": judges,
+        "model": options.get("model") or "",
+        "concurrency": options.get("concurrency", ""),
+        "eval_timeout_s": options.get("eval_timeout_s", ""),
+        "total": summary.get("total", total),
+        "done": summary.get("done", done),
+        "failed": summary.get("failed", failed),
+        "pending": max(total - done - failed, 0),
+        "ok_count": summary.get("ok_count", distribution.get("ok", 0)),
+        "nok_count": distribution.get("nok", 0),
+        "no_support_count": distribution.get("no_support", 0),
+        "others_count": distribution.get("others", 0),
+        "problem_count": summary.get("problem_count", ""),
+        "completion_rate": summary.get("completion_rate", ""),
+        "mean_total": summary.get("mean_total", ""),
+        "norm_mean": summary.get("norm_mean", ""),
         "error": snapshot.get("error") or "",
     }
 

@@ -395,6 +395,33 @@ def api_history_note(task_id: str, req: HistoryNoteReq):
     return {"ok": True, "task_id": task.id, "note": task.note}
 
 
+def _download_stem(value: str, fallback: str) -> str:
+    safe = "".join(
+        char if char.isalnum() or char in "-_. " else "_"
+        for char in value
+    ).strip(" ._")
+    return safe[:120] or fallback
+
+
+def _xlsx_download_names(data: dict, task_id: str) -> tuple[str, str]:
+    """返回 XLSX 的 ASCII 回退文件名和 UTF-8 完整文件名。"""
+    raw_dataset_name = str(data.get("dataset_name") or "").replace("\\", "/")
+    dataset_stem = Path(raw_dataset_name).stem if raw_dataset_name else ""
+    safe_dataset = _download_stem(dataset_stem, "")[:80]
+
+    timestamp_value = data.get("created_at") or data.get("updated_at")
+    try:
+        timestamp = datetime.fromtimestamp(float(timestamp_value)).strftime("%Y%m%d_%H%M%S")
+    except (TypeError, ValueError, OSError, OverflowError):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    short_task_id = _download_stem(str(task_id), "task")[:8]
+    suffix = f"eval_{timestamp}_{short_task_id}.xlsx"
+    utf8_name = f"{safe_dataset}_{suffix}" if safe_dataset else suffix
+    ascii_name = suffix
+    return ascii_name, utf8_name
+
+
 @app.get("/api/eval/{task_id}/export")
 def api_export(task_id: str, format: str = "json"):
     task = get_task(task_id)
@@ -407,10 +434,16 @@ def api_export(task_id: str, format: str = "json"):
 
     if format == "xlsx":
         content = build_xlsx(data, cfg())
+        ascii_name, utf8_name = _xlsx_download_names(data, task_id)
         return Response(
             content,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.xlsx"},
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+                ),
+            },
         )
 
     if format in {"frames", "frames_zip"}:
@@ -437,14 +470,6 @@ def api_export(task_id: str, format: str = "json"):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.csv"},
     )
-
-
-def _download_stem(value: str, fallback: str) -> str:
-    safe = "".join(
-        char if char.isalnum() or char in "-_. " else "_"
-        for char in value
-    ).strip(" ._")
-    return safe[:120] or fallback
 
 
 @app.get("/api/eval/{task_id}/items/{item_index}/export")
