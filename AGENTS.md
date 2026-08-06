@@ -24,6 +24,10 @@ Follow existing Python conventions: four-space indentation, `snake_case` for fun
 
 Write pytest tests as `tests/test_<feature>.py`, with test functions named `test_<behavior>`. Reuse fakes and fixtures from `tests/conftest.py` so ordinary tests do not call real LLMs or networks. Mark tests that need external services with `@pytest.mark.integration`; run focused checks, for example `python -m pytest -q tests/test_context.py`, before the full suite.
 
+## Evaluation Policy Documentation
+
+Treat `config/skills/operation.yaml` as the single source of truth for task-class evaluation policy. Whenever a confirmed change modifies evaluation semantics—including correctness definitions, issue types, decision priority, evidence rules, prior knowledge, conditional-task handling, or low-level-error rules—update `docs/任务类评估标准.md` before committing. Keep the YAML configuration and the human-readable document semantically aligned, and validate the change with relevant regression cases. Implementation-only fixes that do not change evaluation semantics do not require a standards-document update. Do not commit temporary discussion notes, dated review exports, or generated backtest reports as canonical documentation.
+
 ## Commit & Pull Request Guidelines
 
 Recent history uses concise Conventional Commit-style subjects, such as `feat(web): ...` and `fix(judge): ...`; use `feat`, `fix`, or another clear type with an optional affected scope. Keep each commit narrowly scoped. PRs should explain the user-visible change, configuration/data implications, validation commands and results, and link related issues. Include screenshots for `web/static/` UI changes, and never commit `.env`, API keys, local datasets, or generated `runs/` output.
