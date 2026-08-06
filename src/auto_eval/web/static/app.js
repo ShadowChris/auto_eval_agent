@@ -1416,6 +1416,14 @@ createApp({
     function exportFrames() {
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
+    function resultWarnings(result) {
+      const direct = result?.video_prepare_warnings;
+      if (Array.isArray(direct) && direct.length) return direct.filter(Boolean).map(String);
+      const index = Number(result?.index);
+      if (!Number.isInteger(index) || index < 0) return [];
+      const itemWarnings = items.value[index]?.video_prepare_warnings;
+      return Array.isArray(itemWarnings) ? itemWarnings.filter(Boolean).map(String) : [];
+    }
     function itemArtifactUrl(result, format) {
       const index = Number(result && result.index);
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
@@ -1454,7 +1462,7 @@ createApp({
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       isActiveHistoryStatus, historyStatusLabel,

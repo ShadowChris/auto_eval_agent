@@ -271,6 +271,9 @@ async def test_operation_video_is_prepared_only_when_evaluation_starts(
             "frames": ["/abs/session/001_slow_query_001/kf_001.jpg"],
             "frame_count": 1,
             "duration": 8.5,
+            "video_prepare_warnings": [
+                "task_end_time=12 秒超出视频时长 8.5 秒，已忽略该值并使用默认结束时间"
+            ],
         }
 
     async def fake_eval(*args, **kwargs):
@@ -308,6 +311,13 @@ async def test_operation_video_is_prepared_only_when_evaluation_starts(
     assert prepare_calls[0]["item_index"] == 0
     assert prepare_calls[0]["total_items"] == 1
     assert task.results[0]["total"] == 5
+    assert task.results[0]["video_prepare_warnings"] == [
+        "task_end_time=12 秒超出视频时长 8.5 秒，已忽略该值并使用默认结束时间"
+    ]
+    assert any(
+        event.get("event") == "时间参数异常，已回退默认值"
+        for event in task.progress_events["0"]
+    )
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     assert trace["model_raw_output"] == "raw model output"
     for field, value in task.results[0].items():

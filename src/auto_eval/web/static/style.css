@@ -212,6 +212,14 @@ pre { background: #fef2f2; padding: 10px; border-radius: 6px; font-size: 12px; w
 }
 .page-jump button { padding: 5px 9px; font-size: 12px; }
 tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; color: #b91c1c; }
+tr.result-warning-detail td {
+  padding: 8px 12px;
+  background: #fffbeb !important;
+  color: #92400e;
+  line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .active-filter { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 14px; background: #eff6ff; color: #1d4ed8; font-size: 12px; }
 .active-filter button { padding: 1px 6px; border: 0; color: #1d4ed8; background: transparent; font-size: 12px; }
 

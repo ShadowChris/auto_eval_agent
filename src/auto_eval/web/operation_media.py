@@ -118,9 +118,11 @@ def _extract_frames(
 def _operation_timing(
     item: dict,
     duration: float,
-) -> tuple[dict[str, float], str]:
-    """校验任务起止时间，并生成抽帧参数和稳定缓存键。"""
+) -> tuple[dict[str, float], str, list[str], set[str]]:
+    """校验任务起止时间，并生成抽帧参数、缓存键及回退警告。"""
     supplied: dict[str, float] = {}
+    warnings: list[str] = []
+    ignored_fields: set[str] = set()
     for field in _TASK_TIME_FIELDS:
         value = item.get(field)
         if value is None:
@@ -133,7 +135,13 @@ def _operation_timing(
         if normalized < 0:
             raise ValueError(f"{field} 不能小于 0")
         if normalized > duration:
-            raise ValueError(f"{field}={normalized:g} 超出视频时长 {duration:g} 秒")
+            fallback = "默认开始时间" if field == "task_start_time" else "默认结束时间"
+            warnings.append(
+                f"{field}={normalized:g} 秒超出视频时长 {duration:g} 秒，"
+                f"已忽略该值并使用{fallback}"
+            )
+            ignored_fields.add(field)
+            continue
         supplied[field] = normalized
 
     effective_start = supplied.get("task_start_time", DEFAULT_TASK_START_TIME)
@@ -152,7 +160,7 @@ def _operation_timing(
         sort_keys=True,
         separators=(",", ":"),
     )
-    return supplied, cache_key
+    return supplied, cache_key, warnings, ignored_fields
 
 
 def _rich_content_timing(
@@ -237,6 +245,25 @@ def _prepared_item(item: dict, video_path: Path, frames: list[Path], duration: f
     return prepared
 
 
+def _prepared_operation_item(
+    item: dict,
+    video_path: Path,
+    frames: list[Path],
+    duration: float,
+    supplied_times: dict[str, float],
+    warnings: list[str],
+    ignored_fields: set[str],
+) -> dict:
+    normalized_item = dict(item)
+    for field in ignored_fields:
+        normalized_item.pop(field, None)
+    normalized_item.update(supplied_times)
+    prepared = _prepared_item(normalized_item, video_path, frames, duration)
+    if warnings:
+        prepared["video_prepare_warnings"] = warnings
+    return prepared
+
+
 def prepare_cached_operation_item(
     item: dict,
     *,
@@ -253,7 +280,7 @@ def prepare_cached_operation_item(
     duration = float(probe_fn(video_path))
     if duration <= 0:
         raise ValueError(f"无法读取视频或视频时长为 0：{raw_path}")
-    extract_kwargs, cache_key = _operation_timing(item, duration)
+    extract_kwargs, cache_key, warnings, ignored_fields = _operation_timing(item, duration)
     stat = video_path.stat()
     fingerprint = (
         f"{video_path}:{stat.st_size}:{stat.st_mtime_ns}:"
@@ -270,7 +297,15 @@ def prepare_cached_operation_item(
     )
     if not frames:
         raise ValueError(f"视频抽帧失败：{raw_path}")
-    return _prepared_item(item, video_path, frames, duration)
+    return _prepared_operation_item(
+        item,
+        video_path,
+        frames,
+        duration,
+        extract_kwargs,
+        warnings,
+        ignored_fields,
+    )
 
 
 def prepare_session_operation_item(
@@ -295,7 +330,7 @@ def prepare_session_operation_item(
     duration = float(probe_fn(video_path))
     if duration <= 0:
         raise ValueError(f"无法读取视频或视频时长为 0：{raw_path}")
-    extract_kwargs, cache_key = _operation_timing(item, duration)
+    extract_kwargs, cache_key, warnings, ignored_fields = _operation_timing(item, duration)
 
     width = max(3, len(str(max(total_items, 1))))
     sequence = str(item_index + 1).zfill(width)
@@ -311,7 +346,15 @@ def prepare_session_operation_item(
     )
     if not frames:
         raise ValueError(f"视频抽帧失败：{raw_path}")
-    return _prepared_item(item, video_path, frames, duration)
+    return _prepared_operation_item(
+        item,
+        video_path,
+        frames,
+        duration,
+        extract_kwargs,
+        warnings,
+        ignored_fields,
+    )
 
 
 def prepare_session_rich_content_item(

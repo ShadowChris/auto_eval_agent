@@ -249,6 +249,16 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                         item_dict.clear()
                         item_dict.update(prepared)
                         _persist_task(task)
+                        video_prepare_warnings = item_dict.get("video_prepare_warnings") or []
+                        if video_prepare_warnings:
+                            log_event(
+                                "视频准备",
+                                "时间参数异常，已回退默认值",
+                                level=logging.WARNING,
+                                details={"警告": "；".join(video_prepare_warnings)},
+                                progress=4,
+                                progress_message="时间参数异常，已使用默认值完成抽帧",
+                            )
                         log_event(
                             "视频准备",
                             "关键帧提取完成",
@@ -337,6 +347,9 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                         request_id=request_id,
                     )
             res["index"] = idx
+            video_prepare_warnings = item_dict.get("video_prepare_warnings") or []
+            if video_prepare_warnings:
+                res["video_prepare_warnings"] = list(video_prepare_warnings)
             if pending_judge_traces:
                 await asyncio.to_thread(
                     flush_web_trace_records,

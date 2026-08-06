@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260731_resumable_tasks">
+  <link rel="stylesheet" href="/static/style.css?v=20260806_result_warnings">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -468,6 +468,13 @@
                   <span v-else>—</span>
                 </td>
               </tr>
+              <tr v-if="resultWarnings(r).length" class="result-warning-detail">
+                <td colspan="99">
+                  <div v-for="(warning,warningIndex) in resultWarnings(r)" :key="'result-warning-'+warningIndex">
+                    ⚠️ 抽帧警告：{{ warning }}
+                  </div>
+                </td>
+              </tr>
               <tr v-if="r.error" class="result-error-detail"><td colspan="99">评估失败：{{ r.error }}</td></tr>
               <tr v-if="r.tool_trace && r.tool_trace.length" class="trace">
                 <td colspan="99">🔍 裁判查证轨迹：{{ r.tool_trace.join('  |  ') }}</td>
@@ -510,6 +517,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260731_resumable_tasks"></script>
+  <script type="module" src="/static/app.js?v=20260806_result_warnings"></script>
 </body>
 </html>

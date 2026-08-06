@@ -283,34 +283,83 @@ def test_session_prepare_passes_task_times_and_invalidates_parameter_cache(
     assert second["task_end_time"] == 14.0
 
 
-def test_session_prepare_rejects_task_time_outside_video(
+def test_session_prepare_ignores_task_end_time_outside_video(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     project = tmp_path / "project"
     video = project / "data" / "short.mp4"
     video.parent.mkdir(parents=True)
     video.write_bytes(b"fake video")
-    extracted = False
+    extract_kwargs = []
 
     def fake_extract(path, out_dir, **kwargs):
-        nonlocal extracted
-        extracted = True
-        return []
+        extract_kwargs.append(kwargs)
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        frame = out_dir / "kf_001.jpg"
+        frame.write_bytes(b"jpg")
+        return [frame]
 
     monkeypatch.delenv("OPERATION_VIDEO_ROOTS", raising=False)
-    with pytest.raises(ValueError, match="超出视频时长"):
-        prepare_session_operation_item(
-            {
-                "query": "q",
-                "video_path": "data/short.mp4",
-                "task_start_time": 11.0,
-            },
-            session_name="invalid-timing",
-            item_index=0,
-            total_items=1,
-            base_dir=project,
-            runs_dir=tmp_path / "runs",
-            probe_fn=lambda _: 10.0,
-            extract_fn=fake_extract,
-        )
-    assert not extracted
+    prepared = prepare_session_operation_item(
+        {
+            "query": "q",
+            "video_path": "data/short.mp4",
+            "task_start_time": 2.0,
+            "task_end_time": 12.0,
+        },
+        session_name="invalid-timing",
+        item_index=0,
+        total_items=1,
+        base_dir=project,
+        runs_dir=tmp_path / "runs",
+        probe_fn=lambda _: 10.0,
+        extract_fn=fake_extract,
+    )
+
+    assert extract_kwargs == [{"task_start_time": 2.0}]
+    assert prepared["task_start_time"] == 2.0
+    assert "task_end_time" not in prepared
+    assert prepared["video_prepare_warnings"] == [
+        "task_end_time=12 秒超出视频时长 10 秒，已忽略该值并使用默认结束时间"
+    ]
+
+
+def test_session_prepare_ignores_task_start_time_outside_video(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    project = tmp_path / "project"
+    video = project / "data" / "short.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"fake video")
+    extract_kwargs = []
+
+    def fake_extract(path, out_dir, **kwargs):
+        extract_kwargs.append(kwargs)
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        frame = out_dir / "kf_001.jpg"
+        frame.write_bytes(b"jpg")
+        return [frame]
+
+    monkeypatch.delenv("OPERATION_VIDEO_ROOTS", raising=False)
+    prepared = prepare_session_operation_item(
+        {
+            "query": "q",
+            "video_path": "data/short.mp4",
+            "task_start_time": 11.0,
+        },
+        session_name="invalid-start-timing",
+        item_index=0,
+        total_items=1,
+        base_dir=project,
+        runs_dir=tmp_path / "runs",
+        probe_fn=lambda _: 10.0,
+        extract_fn=fake_extract,
+    )
+
+    assert extract_kwargs == [{}]
+    assert "task_start_time" not in prepared
+    assert prepared["video_prepare_warnings"] == [
+        "task_start_time=11 秒超出视频时长 10 秒，已忽略该值并使用默认开始时间"
+    ]
