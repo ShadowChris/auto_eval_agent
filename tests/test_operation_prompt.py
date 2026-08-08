@@ -130,7 +130,7 @@ def test_operation_prompt_judges_evidence_by_sufficiency_not_container() -> None
     assert "没有展示可判断对错的具体结果状态时" in prompt
     assert "最终画面或初始状态直接满足 query 即可" in prompt
     assert "关键帧未展示全部过渡过程不等于步骤错误" in prompt
-    assert "逐个生效目标说明最终状态、对应证据或阻塞" in prompt
+    assert "将每个生效目标归入：已完成、等待用户、缺少前置条件" in prompt
     assert "不主动进行外部事实核验" in prompt
     assert "是否与录屏、结果卡、上下文或可信先验存在明确冲突" in prompt
     assert "自动操作卡片、进度、目标入口和操作轨迹属于过程证据" not in prompt
@@ -171,18 +171,85 @@ def test_operation_prompt_injects_completion_marker_and_podcast_knowledge() -> N
     assert "不得仅凭该标识判为 ok" in prompt
     assert "该标识是系统流程状态，不是 agent 的自然语言回复" in prompt
     assert "不得仅因它与实际任务结果不同而标记回复与界面不一致" in prompt
+    assert "任务执行面板中的步骤文案、勾选标记" in prompt
+    assert "步骤显示“已完成”只证明该步骤结束" in prompt
+    assert "不能用于标记回复与界面不一致或回复内容自相矛盾" in prompt
+    assert "同一面板另有“当前操作需要你的确认”" in prompt
+    assert "随后出现的超时终止不改变这一根因" in prompt
     assert "出现可识别的播客系统结果卡" in prompt
     assert "卡片仍显示“生成中”或尚未自动播放" in prompt
     assert "与卡片仍在生成具体音频内容不构成回复与界面不一致" in prompt
     assert "没有播客结果卡时，不能判完成" in prompt
 
 
-def test_operation_prompt_requires_explicit_user_interaction_for_login_blocker() -> None:
+def test_operation_prompt_distinguishes_guided_user_wait_from_silent_stall() -> None:
     _, prompt = _operation_prompt()
 
-    assert "第三方应用页面自身显示登录入口不等于 agent 已提示用户" in prompt
-    assert "停在登录页或其他阻塞页面" in prompt
-    assert "停在第三方应用的登录页、首页等中间状态" in prompt
+    assert "对未完成目标必须识别其最后有效状态" in prompt
+    assert "界面、任务执行过程文字或 agent 最终回答明确提示用户登录、授权、验证" in prompt
+    assert "普通登录入口、设置页、应用首页、加载状态、任务超时或终止本身" in prompt
+    assert "没有明确指引、最终回答为空且流程停止或超时" in prompt
+    assert "超时或终止只是结果，不能单独证明等待用户" in prompt
+    assert "缺少用户后续操作和最终结果只是阻塞的必然后果" in prompt
+    assert "已经明确等待用户的目标，不得再因用户未响应" in prompt
+    assert "不应要求 agent 代替用户点击同意或输入凭据" in prompt
+    assert "不评价是否存在其他更优的免询问策略" in prompt
+    assert "agent 明确说明助手、设备或系统不支持" in prompt
+    assert "没有可信先验或可见证据反驳" in prompt
+    assert "必须同时检查按时间顺序的视觉证据和 agent 文本自述" in prompt
+    assert "不得只依据其中一路下结论" in prompt
+    assert "任务执行过程文字或 agent 最终回答" in prompt
+    assert "返回桌面或返回助手界面" in prompt
+    assert "缺少完成任务所需的信息并指引用户提供" in prompt
+    assert "泛化能力常识、相似能力或裁判设想的替代策略" in prompt
+
+
+def test_operation_prompt_keeps_action_task_open_while_waiting_for_user() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "原始任务的完成边界" in prompt
+    assert "预订、下单、发送、发布等实际动作" in prompt
+    assert "前置查询结果只是执行过程" in prompt
+    assert "不能提前判 ok" in prompt
+    assert "即使前置查询、搜索、导航到目标页或内容准备等步骤已经正确完成" in prompt
+    assert "只要原始任务仍需用户答复后才能继续" in prompt
+    assert "按时间顺序检查全部关键帧" in prompt
+    assert "通读完整 agent 自述" in prompt
+    assert "已完成、等待用户、缺少前置条件、静默停滞" in prompt
+    assert "阻塞发生前是否已有与用户未响应无关" in prompt
+    assert "禁止把任务面板的步骤、“已完成”或“超时，任务终止”当成 agent 回复" in prompt
+    assert "必须引用冲突的具体 agent 自然语言回复" in prompt
+
+
+def test_operation_prompt_requires_blocker_evidence_gate_before_correctness() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "必须先完成“阻塞证据门控”" in prompt
+    assert "逐帧扫描并逐字摘录面向用户的登录、授权、同意" in prompt
+    assert "协议说明配合“取消/同意”等按钮" in prompt
+    assert "从完整 agent 文本中逐字摘录“无法/缺少/未提供/请提供" in prompt
+    assert "不得在未逐条处理已看见指引文字的情况下声称“没有引导”" in prompt
+    assert "阻塞证据门控的映射是强约束" in prompt
+    assert "【视觉指引扫描】" in prompt
+    assert "【文本指引扫描】" in prompt
+    assert "【独立错误检查】" in prompt
+    assert "【强制映射】" in prompt
+    assert "只有能够逐字引用的、直接要求或询问用户采取下一步" in prompt
+    assert "普通“登录”入口、“查看”按钮、“手动操作中”状态" in prompt
+    assert "不得根据图标、模式名称、页面类型或预期交互推测" in prompt
+    assert "不得意译或补写原文中没有的询问" in prompt
+
+
+def test_operation_prompt_scopes_blocker_and_requires_direct_playback_evidence() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "用户阻塞只作用于确实依赖该次用户答复的目标" in prompt
+    assert "不能自动豁免其他相互独立的目标" in prompt
+    assert "不得仅因任务采用串行执行" in prompt
+    assert "搜索结果卡、影视详情卡、播放按钮" in prompt
+    assert "不能证明播放动作已经发生" in prompt
+    assert "播放器界面、播放进度、暂停按钮" in prompt
+    assert "【结果证据专项】" in prompt
 
 
 def test_operation_prompt_requires_issue_types_and_low_level_flag() -> None:
