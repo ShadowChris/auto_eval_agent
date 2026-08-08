@@ -24,7 +24,7 @@ judges:
     base_url: https://api.siliconflow.cn/v1
     api_key_env: SILICON_FLOW_API_KEY
     model: Qwen/Qwen3.5-397B-A17B
-    temperature: 1            # kimi-for-coding-openai 限定 temperature 只能为 1（其余裁判默认 0）
+    temperature: 0
     persona: end_user              # 与 judge_1(strict_expert) 形成视角差异
     enable_web_search: true
     enable_fetch: true
