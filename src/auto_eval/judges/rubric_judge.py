@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config import RubricDim
+from ..expert_knowledge import render_expert_knowledge
 from ..llm_stream import build_openai_client, stream_chat_completion
 from ..media import encode_frame
 from ..observability import bind_chain_context, log_event
@@ -15,7 +16,7 @@ from ..schema import EvalItem, OperationSingleScore, SingleScore
 
 logger = logging.getLogger("auto_eval.classify")
 from .base import JudgeClient, JudgeOutputParseError
-from .operation_fields import normalize_operation_fields
+from .operation_fields import hoist_misnested_operation_fields, normalize_operation_fields
 from .prompts import (
     OPERATION_SYSTEM,
     OPERATION_USER,
@@ -119,12 +120,14 @@ class RubricJudge:
         dims: list[RubricDim],
         skill_router=None,
         evaluation_time: datetime | None = None,
+        expert_knowledge=None,
     ):
         self.client = client
         self.dims = dims
         self.scale = dims[0].scale if dims else 5
         self.skill_router = skill_router
         self.evaluation_time = evaluation_time
+        self.expert_knowledge = expert_knowledge
 
     async def score(self, item: EvalItem, model_name: str, answer: str, run_idx: int = 0,
                     eval_mode: str = "result", process_dims=None, competitor: str | None = None,
@@ -165,6 +168,7 @@ class RubricJudge:
                 dims=dims,
                 scale=dims[0].scale if dims else 5,
                 policy=policy,
+                expert_knowledge_text=render_expert_knowledge(self.expert_knowledge),
             )
             user = OPERATION_USER.render(
                 question=item.question,
@@ -229,6 +233,8 @@ class RubricJudge:
                     judge=self.client.cfg.name,
                     model=self.client.model,
                 )
+        if eval_mode == "operation":
+            data = hoist_misnested_operation_fields(data)
         rubric_raw = data.get("rubric") or {}
         rubric, rubric_reasons, na_dimensions = _flatten_rubric(rubric_raw, dim_names=[d.name for d in dims])
         if data.get("total") is not None:

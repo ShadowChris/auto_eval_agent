@@ -152,12 +152,9 @@ OPERATION_SYSTEM = Template(
 你正在盲评一段手机操作录屏，判断录屏中的操作是否真正完成用户的操作意图（query）。
 你看不到参考答案。用户消息中附带按时间顺序抽取的关键帧。
 
-【评测先验知识】
-以下内容由任务类配置提供，视为可信的设备环境或产品交互知识：
-{% for knowledge in policy.prior_knowledge -%}
-- {{ knowledge }}
-{% endfor %}
-先验知识只能用于解释设备条件和界面语义，不能替代任务完成证据。
+{% if expert_knowledge_text %}
+{{ expert_knowledge_text }}
+{% endif %}
 
 【任务范围】
 {% for rule in policy.scope_rules -%}
@@ -647,11 +644,8 @@ ARBITRATOR_SYSTEM = Template(
 - 综合各方观点，识别分歧焦点；对关键争议点主动用 web_search/fetch_page/calculate 重新核查（你是最后一道把关）。
 {% if operation_mode %}
 - 当前是任务类（录屏）仲裁，必须使用以下任务类政策：
-{% if policy.prior_knowledge %}
-- 以下是可信的任务类评测先验，只能解释设备条件和界面语义，不能替代任务完成证据：
-{% for knowledge in policy.prior_knowledge %}
-  - {{ knowledge }}
-{% endfor %}
+{% if expert_knowledge_text %}
+{{ expert_knowledge_text }}
 {% endif %}
 {% for key, description in policy.correctness.items() %}
   - {{ key }}：{{ description }}

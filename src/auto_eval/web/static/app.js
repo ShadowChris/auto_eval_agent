@@ -3,6 +3,7 @@ import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 
 createApp({
   setup() {
+    const workspacePage = ref("evaluation");
     const modes = [
       { key: "single", label: "垂域问答类" },
       { key: "compare", label: "两回答对比" },
@@ -71,6 +72,13 @@ createApp({
     const historyPage = ref(1);
     const historyPageSize = ref(10);
     const historyJumpPage = ref("");
+    const knowledgePublished = ref(null);
+    const knowledgeDraft = ref({ name: "任务类专家经验", description: "", version: 1, categories: [] });
+    const knowledgeCategoryKey = ref("");
+    const knowledgeHasDraft = ref(false);
+    const knowledgeBusy = ref(false);
+    const knowledgeMessage = ref("");
+    const knowledgeError = ref(false);
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
@@ -178,6 +186,168 @@ createApp({
       return historyItems.value.slice(start, start + historyPageSize.value);
     });
     const skillOverviewRows = computed(() => summary.value?.by_skill?.overview || []);
+    const selectedKnowledgeCategory = computed(() =>
+      knowledgeDraft.value.categories.find((category) => category.key === knowledgeCategoryKey.value)
+      || knowledgeDraft.value.categories[0]
+      || null
+    );
+    const knowledgeRuleCount = computed(() =>
+      knowledgeDraft.value.categories.reduce((total, category) => total + category.rules.length, 0)
+    );
+    const knowledgePromptPreview = computed(() => {
+      const lines = [
+        "【专家经验】",
+        "以下是可信的产品能力、前置条件和界面语义知识，仅使用与当前任务直接相关的条目。专家经验可以帮助解释录屏，但不能代替任务完成证据；判断能力范围时，专家经验优先于 Agent 自述；判断本次执行状态时，以录屏中的直接证据为准。",
+        "",
+      ];
+      knowledgeDraft.value.categories.forEach((category) => {
+        lines.push(`### ${category.name}`);
+        category.rules.filter((rule) => String(rule).trim()).forEach((rule) => lines.push(`- ${String(rule).trim()}`));
+        lines.push("");
+      });
+      return lines.join("\n").trim();
+    });
+
+    function cloneKnowledge(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function knowledgeErrorText(data) {
+      if (typeof data?.detail === "string") return data.detail;
+      if (Array.isArray(data?.detail)) return data.detail.map((item) => item.msg || JSON.stringify(item)).join("；");
+      return "未知错误";
+    }
+
+    async function loadKnowledge() {
+      knowledgeBusy.value = true;
+      knowledgeMessage.value = "";
+      try {
+        const response = await fetch("/api/knowledge/operation");
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(knowledgeErrorText(data));
+        knowledgePublished.value = cloneKnowledge(data.published);
+        knowledgeDraft.value = cloneKnowledge(data.draft);
+        knowledgeHasDraft.value = Boolean(data.has_unpublished_changes);
+        knowledgeCategoryKey.value = knowledgeDraft.value.categories[0]?.key || "";
+      } catch (error) {
+        knowledgeError.value = true;
+        knowledgeMessage.value = `加载失败：${error.message}`;
+      } finally {
+        knowledgeBusy.value = false;
+      }
+    }
+
+    async function openKnowledgePage() {
+      workspacePage.value = "knowledge";
+      if (!knowledgePublished.value) await loadKnowledge();
+    }
+
+    async function saveKnowledgeDraft(showMessage = true) {
+      knowledgeBusy.value = true;
+      knowledgeMessage.value = "";
+      try {
+        const response = await fetch("/api/knowledge/operation/draft", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(knowledgeDraft.value),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(knowledgeErrorText(data));
+        knowledgeDraft.value = cloneKnowledge(data.draft);
+        knowledgeHasDraft.value = true;
+        knowledgeError.value = false;
+        if (showMessage) knowledgeMessage.value = "草稿已保存；当前批跑仍使用已发布版本。";
+        return true;
+      } catch (error) {
+        knowledgeError.value = true;
+        knowledgeMessage.value = `保存失败：${error.message}`;
+        return false;
+      } finally {
+        knowledgeBusy.value = false;
+      }
+    }
+
+    async function publishKnowledge() {
+      if (!(await saveKnowledgeDraft(false))) return;
+      knowledgeBusy.value = true;
+      try {
+        const response = await fetch("/api/knowledge/operation/publish", { method: "POST" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(knowledgeErrorText(data));
+        knowledgePublished.value = cloneKnowledge(data.published);
+        knowledgeDraft.value = cloneKnowledge(data.published);
+        knowledgeHasDraft.value = false;
+        knowledgeError.value = false;
+        knowledgeMessage.value = `已发布 v${data.published.version}，新启动的评测任务将使用此版本。`;
+      } catch (error) {
+        knowledgeError.value = true;
+        knowledgeMessage.value = `发布失败：${error.message}`;
+      } finally {
+        knowledgeBusy.value = false;
+      }
+    }
+
+    async function discardKnowledgeDraft() {
+      if (!confirm("确认放弃当前专家经验草稿？")) return;
+      knowledgeBusy.value = true;
+      try {
+        const response = await fetch("/api/knowledge/operation/draft", { method: "DELETE" });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(knowledgeErrorText(data));
+        knowledgeDraft.value = cloneKnowledge(data.draft);
+        knowledgeHasDraft.value = false;
+        knowledgeCategoryKey.value = knowledgeDraft.value.categories[0]?.key || "";
+        knowledgeError.value = false;
+        knowledgeMessage.value = "草稿已放弃，已恢复到发布版本。";
+      } catch (error) {
+        knowledgeError.value = true;
+        knowledgeMessage.value = `放弃失败：${error.message}`;
+      } finally {
+        knowledgeBusy.value = false;
+      }
+    }
+
+    function addKnowledgeCategory() {
+      const used = new Set(knowledgeDraft.value.categories.map((category) => category.key));
+      let index = knowledgeDraft.value.categories.length + 1;
+      while (used.has(`category_${index}`)) index += 1;
+      const category = { key: `category_${index}`, name: "新经验类别", description: "", rules: ["请填写一条专家经验。"] };
+      knowledgeDraft.value.categories.push(category);
+      knowledgeCategoryKey.value = category.key;
+    }
+
+    function removeKnowledgeCategory() {
+      if (knowledgeDraft.value.categories.length <= 1) {
+        alert("专家经验库至少需要保留一个类别。");
+        return;
+      }
+      const category = selectedKnowledgeCategory.value;
+      if (!category || !confirm(`确认删除类别“${category.name}”？`)) return;
+      const index = knowledgeDraft.value.categories.findIndex((item) => item.key === category.key);
+      knowledgeDraft.value.categories.splice(index, 1);
+      knowledgeCategoryKey.value = knowledgeDraft.value.categories[Math.max(0, index - 1)]?.key || "";
+    }
+
+    function addKnowledgeRule() {
+      selectedKnowledgeCategory.value?.rules.push("请填写一条专家经验。");
+    }
+
+    function removeKnowledgeRule(index) {
+      const category = selectedKnowledgeCategory.value;
+      if (!category || category.rules.length <= 1) {
+        alert("每个类别至少需要保留一条规则。");
+        return;
+      }
+      category.rules.splice(index, 1);
+    }
+
+    function moveKnowledgeRule(index, direction) {
+      const rules = selectedKnowledgeCategory.value?.rules;
+      if (!rules) return;
+      const target = index + direction;
+      if (target < 0 || target >= rules.length) return;
+      [rules[index], rules[target]] = [rules[target], rules[index]];
+    }
 
     function progressStageRank(progressItem) {
       if (progressItem.status === "done") return 4;
@@ -1449,6 +1619,7 @@ createApp({
     });
 
     return {
+      workspacePage,
       modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
@@ -1473,6 +1644,11 @@ createApp({
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,
+      knowledgePublished, knowledgeDraft, knowledgeCategoryKey, knowledgeHasDraft, knowledgeBusy,
+      knowledgeMessage, knowledgeError, selectedKnowledgeCategory, knowledgeRuleCount,
+      knowledgePromptPreview, openKnowledgePage, loadKnowledge, saveKnowledgeDraft, publishKnowledge,
+      discardKnowledgeDraft, addKnowledgeCategory, removeKnowledgeCategory, addKnowledgeRule,
+      removeKnowledgeRule, moveKnowledgeRule,
     };
   },
 }).mount("#app");

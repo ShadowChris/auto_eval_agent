@@ -6,6 +6,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from auto_eval.media import select_keyframe_times, probe_duration, extract_scene_keyframes, encode_frame
 from auto_eval.schema import EvalItem
 from auto_eval.judges.prompts import OPERATION_SYSTEM, OPERATION_USER
+from auto_eval.expert_knowledge import render_expert_knowledge
 from auto_eval.judges.rubric_judge import RubricJudge
 from auto_eval.web.parse_input import parse_text, parse_jsonl
 from auto_eval.web.runner import _to_evalitem
@@ -29,8 +30,9 @@ s = OPERATION_SYSTEM.render(
     dims=op_dims,
     scale=op_dims[0].scale,
     policy=op_skill.operation_policy,
+    expert_knowledge_text=render_expert_knowledge(cfg.expert_knowledge["operation"]),
 )
-assert "操作完成度" in s and "评测先验知识" in s, "模板渲染异常"
+assert "操作完成度" in s and "专家经验" in s, "模板渲染异常"
 assert all(d.name in s for d in op_dims), "维度未全部渲染进 prompt"
 u = OPERATION_USER.render(
     question="set alarm",

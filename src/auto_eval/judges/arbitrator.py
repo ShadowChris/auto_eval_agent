@@ -8,8 +8,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from ..schema import EvalItem, OperationSingleScore, SingleScore
+from ..expert_knowledge import render_expert_knowledge
 from .base import JudgeClient, JudgeOutputParseError
-from .operation_fields import normalize_operation_fields
+from .operation_fields import hoist_misnested_operation_fields, normalize_operation_fields
 from .prompts import (
     ARBITRATOR_SYSTEM,
     ARBITRATOR_USER,
@@ -22,9 +23,11 @@ _VALID = {"right", "wrong", "partial", "unclear"}
 
 
 class Arbitrator:
-    def __init__(self, client: JudgeClient, evaluation_time: datetime | None = None):
+    def __init__(self, client: JudgeClient, evaluation_time: datetime | None = None,
+                 expert_knowledge=None):
         self.client = client
         self.evaluation_time = evaluation_time
+        self.expert_knowledge = expert_knowledge
 
     async def arbitrate(
         self,
@@ -41,6 +44,7 @@ class Arbitrator:
             operation_mode=operation_mode,
             dims=dims or [],
             policy=policy,
+            expert_knowledge_text=render_expert_knowledge(self.expert_knowledge),
         )
         judges_summary = [
             {
@@ -80,6 +84,8 @@ class Arbitrator:
                     judge=self.client.cfg.name,
                     model=self.client.model,
                 )
+        if operation_mode:
+            data = hoist_misnested_operation_fields(data)
         rubric = {
             k: int(v) for k, v in (data.get("rubric") or {}).items() if isinstance(v, (int, float))
         }

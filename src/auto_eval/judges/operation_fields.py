@@ -73,6 +73,35 @@ _FALLBACK_ISSUE = {
     "others": "其他未归类情况",
 }
 
+_MISNESTED_TOP_LEVEL_FIELDS = (
+    "task_type",
+    "total",
+    "correctness",
+    "issue_types",
+    "error_type",
+    "is_low_level",
+    "rationale",
+    "confidence",
+)
+
+
+def hoist_misnested_operation_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """容错模型把顶层任务类字段误放进 rubric 的常见单层括号错误。"""
+    rubric = data.get("rubric")
+    if not isinstance(rubric, dict):
+        return data
+    nested = [name for name in _MISNESTED_TOP_LEVEL_FIELDS if name in rubric]
+    if not nested:
+        return data
+    normalized = dict(data)
+    normalized_rubric = dict(rubric)
+    for name in nested:
+        if name not in normalized:
+            normalized[name] = normalized_rubric[name]
+        normalized_rubric.pop(name, None)
+    normalized["rubric"] = normalized_rubric
+    return normalized
+
 
 def _as_issue_list(value: Any) -> list[str]:
     if value is None:

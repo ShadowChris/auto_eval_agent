@@ -19,7 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from ..config import load_config
+from ..config import ExpertKnowledgeBase, load_config
+from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
 from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
 from .parse_input import Mode, parse_jsonl, parse_text
@@ -63,6 +64,13 @@ def _load():
 
 def cfg():
     return _state["cfg"]
+
+
+def _operation_knowledge_store() -> ExpertKnowledgeStore:
+    return ExpertKnowledgeStore(
+        CONFIG_DIR / "knowledge" / "operation.yaml",
+        RUNS_DIR / "knowledge_drafts" / "operation.yaml",
+    )
 
 
 class ParseReq(BaseModel):
@@ -151,6 +159,57 @@ def api_config():
         "models": [m.name for m in c.models],
         "rubrics": [d.name for d in c.rubrics],
         "scale": c.rubrics[0].scale if c.rubrics else 5,
+    }
+
+
+@app.get("/api/knowledge/operation")
+def api_operation_knowledge():
+    store = _operation_knowledge_store()
+    published = store.published()
+    draft = store.draft()
+    effective = draft or published
+    return {
+        "published": published.model_dump(mode="json"),
+        "draft": effective.model_dump(mode="json"),
+        "has_unpublished_changes": draft is not None,
+        "prompt_preview": render_expert_knowledge(effective),
+    }
+
+
+@app.put("/api/knowledge/operation/draft")
+def api_save_operation_knowledge_draft(knowledge: ExpertKnowledgeBase):
+    saved = _operation_knowledge_store().save_draft(knowledge)
+    return {
+        "ok": True,
+        "draft": saved.model_dump(mode="json"),
+        "prompt_preview": render_expert_knowledge(saved),
+    }
+
+
+@app.delete("/api/knowledge/operation/draft")
+def api_discard_operation_knowledge_draft():
+    store = _operation_knowledge_store()
+    store.discard_draft()
+    published = store.published()
+    return {
+        "ok": True,
+        "draft": published.model_dump(mode="json"),
+        "prompt_preview": render_expert_knowledge(published),
+    }
+
+
+@app.post("/api/knowledge/operation/publish")
+def api_publish_operation_knowledge():
+    try:
+        published = _operation_knowledge_store().publish()
+    except FileNotFoundError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    # 新任务读取新版本；已经启动的任务仍持有原 AppConfig，保证单次批跑可复现。
+    _state["cfg"] = load_config(CONFIG_DIR)
+    return {
+        "ok": True,
+        "published": published.model_dump(mode="json"),
+        "prompt_preview": render_expert_knowledge(published),
     }
 
 

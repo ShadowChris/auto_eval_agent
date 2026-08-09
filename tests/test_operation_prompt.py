@@ -4,7 +4,9 @@ import pytest
 from pydantic import ValidationError
 
 from auto_eval.config import load_config
+from auto_eval.expert_knowledge import render_expert_knowledge
 from auto_eval.judges.operation_fields import (
+    hoist_misnested_operation_fields,
     map_legacy_operation_result,
     normalize_operation_fields,
 )
@@ -15,23 +17,29 @@ from auto_eval.schema import OperationSingleScore
 
 def _operation_prompt():
     config_dir = Path(__file__).resolve().parents[1] / "config"
-    operation = load_config(config_dir).domain_skills["operation"]
+    config = load_config(config_dir)
+    operation = config.domain_skills["operation"]
     prompt = OPERATION_SYSTEM.render(
         persona="测试裁判",
         dims=operation.rubrics,
         scale=5,
         policy=operation.operation_policy,
+        expert_knowledge_text=render_expert_knowledge(
+            config.expert_knowledge["operation"]
+        ),
     )
     return operation, prompt
 
 
 def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     operation, prompt = _operation_prompt()
+    config = load_config(Path(__file__).resolve().parents[1] / "config")
 
     assert [dim.name for dim in operation.rubrics] == ["操作完成度", "步骤正确性"]
     assert [dim.weight for dim in operation.rubrics] == [0.7, 0.3]
     assert operation.operation_policy is not None
-    assert operation.operation_policy.prior_knowledge
+    assert config.expert_knowledge["operation"].version == 2
+    assert config.expert_knowledge["operation"].categories
     assert operation.operation_policy.scope_rules
     assert operation.operation_policy.evidence_rules
     assert list(operation.operation_policy.correctness) == [
@@ -101,6 +109,28 @@ def test_operation_prompt_handles_conditional_tasks_and_causality() -> None:
     assert "所有未完成目标都被外部条件阻塞时判 no_support" in prompt
 
 
+def test_operation_output_hoists_fields_accidentally_nested_in_rubric() -> None:
+    data = {
+        "task_type": "complex",
+        "rubric": {
+            "操作完成度": {"total": 2, "reason": "仅完成一个目标"},
+            "步骤正确性": {"total": 3, "reason": "另一目标未执行"},
+            "total": 2.3,
+            "correctness": "nok",
+            "issue_types": ["应执行目标未执行"],
+            "is_low_level": "no",
+            "rationale": "存在独立的可归责错误。",
+        },
+    }
+
+    normalized = hoist_misnested_operation_fields(data)
+
+    assert normalized["correctness"] == "nok"
+    assert normalized["issue_types"] == ["应执行目标未执行"]
+    assert normalized["total"] == 2.3
+    assert set(normalized["rubric"]) == {"操作完成度", "步骤正确性"}
+
+
 def test_operation_prompt_distinguishes_state_setting_from_action_prerequisite() -> None:
     _, prompt = _operation_prompt()
 
@@ -153,7 +183,15 @@ def test_operation_prompt_separates_collapsed_window_from_plain_text_claim() -> 
 def test_operation_prompt_ignores_recording_infrastructure() -> None:
     operation, prompt = _operation_prompt()
 
-    assert "【评测先验知识】" in prompt
+    assert "【专家经验】" in prompt
+    assert "判断能力范围时，专家经验优先于 Agent 自述" in prompt
+    assert "判断本次执行状态时，以录屏中的直接证据为准" in prompt
+    assert "证书与凭据" in prompt
+    assert "来电播报功能" in prompt
+    assert "始终播报" in prompt
+    assert "仅耳机" in prompt
+    assert "耳机与汽车" in prompt
+    assert "不播报" in prompt
     assert "来自评测录屏工具，不是 agent 操作" in prompt
     assert "顶部状态栏或灵动岛的红点和计时不能证明相机正在录像" in prompt
     assert "相机应用内部的停止或暂停按钮" in prompt
@@ -195,13 +233,49 @@ def test_operation_prompt_distinguishes_guided_user_wait_from_silent_stall() -> 
     assert "不应要求 agent 代替用户点击同意或输入凭据" in prompt
     assert "不评价是否存在其他更优的免询问策略" in prompt
     assert "agent 明确说明助手、设备或系统不支持" in prompt
-    assert "没有可信先验或可见证据反驳" in prompt
+    assert "没有可信专家经验或可见证据反驳" in prompt
     assert "必须同时检查按时间顺序的视觉证据和 agent 文本自述" in prompt
     assert "不得只依据其中一路下结论" in prompt
     assert "任务执行过程文字或 agent 最终回答" in prompt
     assert "返回桌面或返回助手界面" in prompt
     assert "缺少完成任务所需的信息并指引用户提供" in prompt
     assert "泛化能力常识、相似能力或裁判设想的替代策略" in prompt
+    assert "必要性、因果性和时效性" in prompt
+    assert "先走错或执行失败后询问用户换路径" in prompt
+    assert "早先指引已经完成、关闭或越过" in prompt
+    assert "通常可以通过其他网络、应用、入口或方法完成" in prompt
+    assert "不强制要求 agent 再重复说明" in prompt
+
+
+def test_operation_prompt_does_not_expand_goal_or_treat_recovery_question_as_blocker() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "不得擅自扩大 query 的完成边界" in prompt
+    assert "可以按打开、查看或展示该功能入口理解" in prompt
+    assert "query 已提供继续执行所需信息" in prompt
+    assert "只是错误后的恢复询问" in prompt
+    assert "不能把此前错误改写为等待用户" in prompt
+
+
+def test_operation_prompt_distinguishes_empty_query_result_from_missing_action_object() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "区分“查询结果为空”和“动作缺少目标对象”" in prompt
+    assert "未找到、无记录、暂无结果" in prompt
+    assert "没有可恢复应用、目标文件、剪贴板内容或活动对象" in prompt
+    assert "不能因为成功进入页面或展示空状态就判 ok" in prompt
+
+
+def test_operation_prompt_models_shared_clarification_dependencies() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "多个目标共享同一个必须由用户补充" in prompt
+    assert "不要求 agent 在询问前先打开应用" in prompt
+    assert "自动接听、日程、联系人或地址、机票酒店门票" in prompt
+    assert "已经展示一个航班、酒店或商品候选项" in prompt
+    assert "合理搜索未找到 query 指定对象后" in prompt
+    assert "不相关关键词" in prompt
+    assert "按 no_support / 待用户澄清处理" in prompt
 
 
 def test_operation_prompt_keeps_action_task_open_while_waiting_for_user() -> None:
@@ -267,14 +341,19 @@ def test_operation_prompt_requires_issue_types_and_low_level_flag() -> None:
 
 def test_operation_arbitrator_reuses_the_same_policy() -> None:
     operation, _ = _operation_prompt()
+    config = load_config(Path(__file__).resolve().parents[1] / "config")
     prompt = ARBITRATOR_SYSTEM.render(
         operation_mode=True,
         dims=operation.rubrics,
         policy=operation.operation_policy,
+        expert_knowledge_text=render_expert_knowledge(
+            config.expert_knowledge["operation"]
+        ),
     )
 
     assert "- ok：" in prompt
     assert "当前任务类录屏使用的评测手机未安装 SIM 卡" in prompt
+    assert "支持开启和关闭家人共享" in prompt
     assert "未展示可验证结果" in prompt
     assert "缺少前置条件" in prompt
     assert "任务执行窗口未展开" in prompt

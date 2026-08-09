@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260806_result_warnings">
+  <link rel="stylesheet" href="/static/style.css?v=20260808_expert_knowledge">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -23,6 +23,13 @@
 <body>
 <div id="app">
   <h1>auto_eval 评估台 <small>批量输入 query · 批量输出评估结果</small></h1>
+
+  <div class="workspace-tabs">
+    <button :class="{active: workspacePage==='evaluation'}" @click="workspacePage='evaluation'">评估任务</button>
+    <button :class="{active: workspacePage==='knowledge'}" @click="openKnowledgePage">任务类专家经验</button>
+  </div>
+
+  <div v-show="workspacePage==='evaluation'">
 
   <div class="tabs">
     <button v-for="m in modes" :class="{active: mode===m.key}" @click="switchMode(m.key)">{{ m.label }}</button>
@@ -515,8 +522,78 @@
       @mouseleave="hideCellTooltip"
     >{{ cellTooltip.text }}</div>
   </section>
+  </div>
+
+  <section v-if="workspacePage==='knowledge'" class="knowledge-page">
+    <div class="knowledge-topbar">
+      <div>
+        <h2>任务类专家经验</h2>
+        <p class="hint" v-if="knowledgePublished">
+          已发布 v{{ knowledgePublished.version }} · {{ knowledgeDraft.categories.length }} 个类别 · {{ knowledgeRuleCount }} 条规则
+          <span v-if="knowledgeHasDraft" class="knowledge-draft-badge">有未发布草稿</span>
+        </p>
+      </div>
+      <div class="knowledge-actions">
+        <button @click="discardKnowledgeDraft" :disabled="knowledgeBusy || !knowledgeHasDraft">放弃草稿</button>
+        <button @click="saveKnowledgeDraft" :disabled="knowledgeBusy">保存草稿</button>
+        <button class="primary" @click="publishKnowledge" :disabled="knowledgeBusy">发布更改</button>
+      </div>
+    </div>
+
+    <p v-if="knowledgeMessage" :class="knowledgeError ? 'err' : 'ok'">{{ knowledgeMessage }}</p>
+    <p v-if="knowledgeBusy" class="running">正在处理专家经验…</p>
+
+    <div v-if="knowledgeDraft.categories.length" class="knowledge-shell">
+      <aside class="knowledge-sidebar">
+        <div class="knowledge-side-heading">
+          <span>经验类别</span>
+          <button title="新增类别" @click="addKnowledgeCategory">＋</button>
+        </div>
+        <button
+          v-for="category in knowledgeDraft.categories"
+          :key="category.key"
+          class="knowledge-category"
+          :class="{active: knowledgeCategoryKey===category.key}"
+          @click="knowledgeCategoryKey=category.key"
+        >
+          <span>{{ category.name }}</span><small>{{ category.rules.length }}</small>
+        </button>
+      </aside>
+
+      <main v-if="selectedKnowledgeCategory" class="knowledge-editor">
+        <div class="knowledge-category-fields">
+          <label>类别标识<input v-model.trim="selectedKnowledgeCategory.key" disabled></label>
+          <label>类别名称<input v-model.trim="selectedKnowledgeCategory.name"></label>
+          <label>类别说明<textarea v-model.trim="selectedKnowledgeCategory.description" rows="2"></textarea></label>
+        </div>
+        <div class="knowledge-rule-heading">
+          <strong>规则</strong>
+          <button @click="addKnowledgeRule">＋ 新增规则</button>
+        </div>
+        <div class="knowledge-rule-list">
+          <div v-for="(rule,index) in selectedKnowledgeCategory.rules" :key="index" class="knowledge-rule-row">
+            <span class="knowledge-rule-index">{{ index+1 }}</span>
+            <textarea v-model.trim="selectedKnowledgeCategory.rules[index]" rows="2"></textarea>
+            <div class="knowledge-rule-actions">
+              <button title="上移" @click="moveKnowledgeRule(index,-1)" :disabled="index===0">↑</button>
+              <button title="下移" @click="moveKnowledgeRule(index,1)" :disabled="index===selectedKnowledgeCategory.rules.length-1">↓</button>
+              <button class="btn-danger" title="删除" @click="removeKnowledgeRule(index)">删除</button>
+            </div>
+          </div>
+        </div>
+        <button class="btn-danger knowledge-delete-category" @click="removeKnowledgeCategory">删除当前类别</button>
+      </main>
+
+      <aside class="knowledge-preview">
+        <h3>Prompt 注入预览</h3>
+        <p class="hint">只展示实际注入裁判的文本；类别标识、说明和版本等管理字段不会注入。</p>
+        <pre>{{ knowledgePromptPreview }}</pre>
+        <p class="hint">发布后仅影响新启动的评测任务，运行中的批跑继续使用启动时版本。</p>
+      </aside>
+    </div>
+  </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260806_result_warnings"></script>
+  <script type="module" src="/static/app.js?v=20260808_expert_knowledge"></script>
 </body>
 </html>

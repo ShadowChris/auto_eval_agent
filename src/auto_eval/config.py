@@ -175,6 +175,51 @@ class OperationPolicy(BaseModel):
         return self
 
 
+class ExpertKnowledgeCategory(BaseModel):
+    """一组可由人工逐条维护的专家经验。"""
+
+    key: str
+    name: str
+    description: str = ""
+    rules: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_category(self):
+        self.key = self.key.strip()
+        self.name = self.name.strip()
+        self.description = self.description.strip()
+        self.rules = [str(rule).strip() for rule in self.rules if str(rule).strip()]
+        if not self.key or not self.name:
+            raise ValueError("专家经验类别的 key 和 name 不能为空")
+        if not self.rules:
+            raise ValueError(f"专家经验类别[{self.key}]至少需要一条规则")
+        return self
+
+
+class ExpertKnowledgeBase(BaseModel):
+    """按类别组织的轻量专家经验库；只保存事实，不保存评测标签。"""
+
+    name: str
+    description: str = ""
+    version: int = 1
+    categories: list[ExpertKnowledgeCategory] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_knowledge_base(self):
+        self.name = self.name.strip()
+        self.description = self.description.strip()
+        if not self.name:
+            raise ValueError("专家经验库 name 不能为空")
+        if self.version < 1:
+            raise ValueError("专家经验库 version 必须大于等于 1")
+        keys = [category.key for category in self.categories]
+        if len(keys) != len(set(keys)):
+            raise ValueError("专家经验类别 key 不能重复")
+        if not self.categories:
+            raise ValueError("专家经验库至少需要一个类别")
+        return self
+
+
 class DomainSkill(BaseModel):
     name: str = ""
     display: str = ""  # 分类候选展示名（如中文），缺失回落 name；不参与分类的 Skill（default）可留空
@@ -216,6 +261,7 @@ class AppConfig(BaseModel):
     rubrics: list[RubricDim]
     process_rubrics: list[RubricDim] = Field(default_factory=list)  # 过程盲评维度
     domain_skills: dict[str, DomainSkill] = Field(default_factory=dict)  # 垂域 Skill
+    expert_knowledge: dict[str, ExpertKnowledgeBase] = Field(default_factory=dict)
     visual_modes: dict[str, VisualModeProfile] = Field(default_factory=dict)
     eval_options: EvalOptions = Field(default_factory=EvalOptions)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
@@ -267,6 +313,17 @@ def _load_visual_modes(config_dir):
     return profiles
 
 
+def _load_expert_knowledge(config_dir):
+    knowledge_dir = Path(config_dir) / "knowledge"
+    if not knowledge_dir.is_dir():
+        return {}
+    knowledge = {}
+    for path in sorted(knowledge_dir.glob("*.yaml")):
+        data = dict(_read_yaml(path) or {})
+        knowledge[path.stem] = ExpertKnowledgeBase(**data)
+    return knowledge
+
+
 def load_config(config_dir: str | Path) -> AppConfig:
     """读取 config_dir 下的 models/judges/rubrics.yaml（eval_options/ensemble 内联在 judges.yaml）。"""
     config_dir = Path(config_dir)
@@ -288,6 +345,7 @@ def load_config(config_dir: str | Path) -> AppConfig:
     rubrics = _parse_rubrics(rubrics_data.get("rubrics"))
     process_rubrics = _parse_rubrics(rubrics_data.get("process_rubrics"))
     domain_skills = _load_skills(config_dir)
+    expert_knowledge = _load_expert_knowledge(config_dir)
     visual_modes = _load_visual_modes(config_dir)
     eval_options = EvalOptions(**(judges_data.get("eval_options") or {}))
     ensemble = EnsembleConfig(**(judges_data.get("ensemble") or {}))
@@ -297,6 +355,7 @@ def load_config(config_dir: str | Path) -> AppConfig:
         rubrics=rubrics,
         process_rubrics=process_rubrics,
         domain_skills=domain_skills,
+        expert_knowledge=expert_knowledge,
         visual_modes=visual_modes,
         eval_options=eval_options,
         ensemble=ensemble,

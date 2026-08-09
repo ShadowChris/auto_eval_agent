@@ -57,7 +57,13 @@ class EvalEngine:
         ]
         self.skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
         self.rubric_judges = [
-            RubricJudge(c, cfg.rubrics, self.skill_router, evaluation_time=self.evaluation_time)
+            RubricJudge(
+                c,
+                cfg.rubrics,
+                self.skill_router,
+                evaluation_time=self.evaluation_time,
+                expert_knowledge=cfg.expert_knowledge.get("operation"),
+            )
             for c in self.clients
         ]
         # 轻量分类客户端配置：优先 eval_options，回落第一个裁判的 base_url / api_key
@@ -119,7 +125,11 @@ class EvalEngine:
         return v
 
     async def _arbitrate(self, item: EvalItem, answer: str, v: Verdict, scores: list) -> Verdict:
-        arbitrator = Arbitrator(self.clients[0], evaluation_time=self.evaluation_time)
+        arbitrator = Arbitrator(
+            self.clients[0],
+            evaluation_time=self.evaluation_time,
+            expert_knowledge=self.cfg.expert_knowledge.get("operation"),
+        )
         try:
             arb = await arbitrator.arbitrate(item, answer, scores)
         except Exception:

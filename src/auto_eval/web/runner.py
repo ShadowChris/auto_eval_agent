@@ -125,8 +125,15 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         for j in judges_cfg
     ]
     skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
+    operation_knowledge = cfg.expert_knowledge.get("operation")
     rubrics = [
-        RubricJudge(c, cfg.rubrics, skill_router, evaluation_time=evaluation_time)
+        RubricJudge(
+            c,
+            cfg.rubrics,
+            skill_router,
+            evaluation_time=evaluation_time,
+            expert_knowledge=operation_knowledge,
+        )
         for c in clients
     ]
     pair_judges = [PairwiseJudge(c, evaluation_time=evaluation_time) for c in clients]
@@ -160,7 +167,11 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         online_runner = build_runner(mc)
     process_dims = cfg.process_rubrics
     arbitrator = (
-        Arbitrator(clients[0], evaluation_time=evaluation_time)
+        Arbitrator(
+            clients[0],
+            evaluation_time=evaluation_time,
+            expert_knowledge=operation_knowledge,
+        )
         if len(judges_cfg) >= 2
         else None
     )
