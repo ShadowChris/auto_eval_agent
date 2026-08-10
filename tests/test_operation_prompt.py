@@ -105,7 +105,7 @@ def test_operation_prompt_handles_conditional_tasks_and_causality() -> None:
     assert "对每个目标优先识别最直接根因" in prompt
     assert "同一个目标不要同时记录根因和其必然后果" in prompt
     assert "优先标记三方应用跳转中断" in prompt
-    assert "不得使用日志或内部规划把黑盒不可确认的“错误应用”作为判错依据" in prompt
+    assert "不能覆盖已经发生的错误路径、无关操作或执行失败" in prompt
     assert "所有未完成目标都被外部条件阻塞时判 no_support" in prompt
 
 
@@ -226,9 +226,12 @@ def test_operation_prompt_distinguishes_guided_user_wait_from_silent_stall() -> 
     assert "对未完成目标必须识别其最后有效状态" in prompt
     assert "界面、任务执行过程文字或 agent 最终回答明确提示用户登录、授权、验证" in prompt
     assert "没有任何用户指引、最终回答为空且流程停止或超时" in prompt
-    assert "第三方应用登录、授权或身份验证场景按黑盒可见证据判断" in prompt
+    assert "只有同时满足以下条件时才判 nok / 三方应用跳转中断" in prompt
     assert "明确反馈本次任务已因等待而超时、终止" in prompt
-    assert "普通登录入口、最终回答为空、没有任何用户指引或终止反馈" in prompt
+    assert "界面、任务执行文字和 agent 均无任何澄清或用户操作提示" in prompt
+    assert "agent 最终回答为空" in prompt
+    assert "没有因等待用户而超时或终止的反馈" in prompt
+    assert "回复非空不自动等于 no_support" in prompt
     assert "缺少用户后续操作和最终结果只是阻塞的必然后果" in prompt
     assert "已经明确等待用户的目标，不得再因用户未响应" in prompt
     assert "agent 明确说明助手、设备或系统不支持" in prompt
@@ -239,11 +242,13 @@ def test_operation_prompt_distinguishes_guided_user_wait_from_silent_stall() -> 
     assert "返回桌面或助手界面" in prompt
     assert "缺少完成任务所需的信息并指引用户提供" in prompt
     assert "泛化能力常识、相似能力或裁判设想的替代策略" in prompt
-    assert "必要性、可见因果和时效性" in prompt
-    assert "先发生可见错误或执行失败后再询问用户换路径" in prompt
-    assert "早先指引已经完成、关闭或越过" in prompt
+    assert "判 no_support 前必须逐项写明" in prompt
+    assert "先发生可见错误后再询问用户换路径" in prompt
+    assert "用户实际答复、选择、确认、完成登录授权" in prompt
     assert "通常可以通过其他网络、应用、入口或方法完成" in prompt
     assert "不强制要求 agent 再重复说明" in prompt
+    assert "仅返回桌面或助手界面不算解除" in prompt
+    assert "无法继续”“请自行操作”“相关工具已返回结果" in prompt
 
 
 def test_operation_prompt_does_not_expand_goal_or_treat_recovery_question_as_blocker() -> None:
@@ -254,6 +259,28 @@ def test_operation_prompt_does_not_expand_goal_or_treat_recovery_question_as_blo
     assert "query 已提供继续执行所需信息" in prompt
     assert "只是错误后的恢复询问" in prompt
     assert "不能把此前可见错误改写为等待用户" in prompt
+    assert "专家经验已确认能力或页面存在时" in prompt
+    assert "用户不负责选择 agent 的搜索、导航、工具或补救策略" in prompt
+    assert "需要我继续到设置中查找吗" in prompt
+    assert "换关键词、换入口还是上报" in prompt
+
+
+def test_operation_prompt_requires_complete_blocker_qualification() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "【阻塞资格表】" in prompt
+    assert "用户必须补充的信息或完成的具体动作" in prompt
+    assert "最后有效状态中该阻塞是否仍未解除" in prompt
+    assert "只有 A/B/C 成立且 D 为否" in prompt
+
+
+def test_operation_prompt_rechecks_task_after_blocker_is_released() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "应用内容、搜索结果、商品详情" in prompt
+    assert "旧阻塞立即解除" in prompt
+    assert "解除后必须重新评价剩余目标" in prompt
+    assert "即使后续执行错误或不完整" in prompt
 
 
 def test_operation_prompt_distinguishes_empty_query_result_from_missing_action_object() -> None:
@@ -276,6 +303,14 @@ def test_operation_prompt_models_shared_clarification_dependencies() -> None:
     assert "按 no_support / 待用户澄清处理" in prompt
 
 
+def test_operation_prompt_does_not_infer_missing_object_from_partial_list() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "当前画面只展示列表的一部分" in prompt
+    assert "不足以证明该对象客观不存在" in prompt
+    assert "完整搜索后明确显示无结果" in prompt
+
+
 def test_operation_prompt_keeps_action_task_open_while_waiting_for_user() -> None:
     _, prompt = _operation_prompt()
 
@@ -288,7 +323,7 @@ def test_operation_prompt_keeps_action_task_open_while_waiting_for_user() -> Non
     assert "按时间顺序检查全部关键帧" in prompt
     assert "通读完整 agent 自述" in prompt
     assert "已完成、等待用户、缺少前置条件、静默停滞" in prompt
-    assert "阻塞前是否已有黑盒可见、与用户未响应无关" in prompt
+    assert "阻塞前是否已有足以独立导致失败的可见错误" in prompt
     assert "禁止把任务面板的步骤、“已完成”或“超时，任务终止”当成 agent 回复" in prompt
     assert "必须引用冲突的具体 agent 自然语言回复" in prompt
 
@@ -303,11 +338,11 @@ def test_operation_prompt_requires_blocker_evidence_gate_before_correctness() ->
     assert "阻塞证据门控的映射是强约束" in prompt
     assert "【视觉指引扫描】" in prompt
     assert "【文本指引扫描】" in prompt
-    assert "【独立错误检查】" in prompt
-    assert "【强制映射】" in prompt
+    assert "【阻塞资格表】" in prompt
+    assert "【时序与强制映射】" in prompt
     assert "只有能够逐字引用的完整句子或协议提示" in prompt
     assert "普通“登录”入口、“查看”按钮、“手动操作中”状态" in prompt
-    assert "不得使用日志、内部规划或 skill 调用推断黑盒不可见" in prompt
+    assert "泛化终止语只有在同时说明具体能力限制" in prompt
     assert "不得意译或补写原文中没有的询问" in prompt
 
 
@@ -324,14 +359,16 @@ def test_operation_prompt_follows_serial_execution_chain_and_requires_direct_pla
     assert "【结果证据专项】" in prompt
 
 
-def test_operation_prompt_uses_black_box_login_feedback_gate() -> None:
+def test_operation_prompt_uses_explicit_login_feedback_gate() -> None:
     _, prompt = _operation_prompt()
 
-    assert "第三方登录场景不得使用日志、内部规划或 skill 调用推断本应打开哪个应用" in prompt
     assert "录屏停在登录、授权或身份验证页面" in prompt
     assert "本次任务超时/终止" in prompt
-    assert "仅有普通登录入口、最终回答为空且没有任何反馈" in prompt
+    assert "只有普通登录入口或登录页面、三路证据均无澄清提示" in prompt
+    assert "agent 最终回答为空、没有等待反馈且流程静默停止" in prompt
     assert "三方应用跳转中断" in prompt
+    assert "不得使用日志、内部规划或 skill 调用推断" not in prompt
+    assert "不得使用日志或内部规划" not in prompt
 
 
 def test_operation_prompt_requires_issue_types_and_low_level_flag() -> None:
