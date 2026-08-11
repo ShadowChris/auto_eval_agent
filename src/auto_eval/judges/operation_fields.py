@@ -62,6 +62,7 @@ _ALIASES = {
     "外部服务不可用": "缺少前置条件",
     "不具备完成条件": "缺少前置条件",
     "录屏证据缺失": "录屏数据不完整",
+    "无验证结果": "未展示可验证结果",
     "证据冲突": "评测证据冲突",
     "未归因": "其他执行问题",
     "其他不可评估原因": "其他未归类情况",
@@ -196,6 +197,21 @@ def normalize_operation_fields(
     """规范 correctness、中文问题数组和低级错误标识。"""
     normalized_correctness = normalize_operation_correctness(correctness, issue_types)
     issues = _as_issue_list(issue_types)
+
+    # 新标准：仅缺少结果证据属于评测侧无法确认，主判 others；如果同一复杂
+    # 任务还存在独立的可归责错误，则保留 nok，并把证据不足作为次要问题。
+    if normalized_correctness == "nok" and "未展示可验证结果" in issues:
+        if allowed_issue_types:
+            issue_catalog = operation_issue_catalog(allowed_issue_types)
+            has_independent_nok = any(
+                issue_catalog.get(issue) == {"nok"} for issue in issues
+            )
+        else:
+            has_independent_nok = any(
+                issue != "未展示可验证结果" for issue in issues
+            )
+        if not has_independent_nok:
+            normalized_correctness = "others"
 
     if allowed_issue_types:
         catalog = operation_issue_catalog(allowed_issue_types)

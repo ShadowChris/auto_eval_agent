@@ -38,7 +38,7 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     assert [dim.name for dim in operation.rubrics] == ["操作完成度", "步骤正确性"]
     assert [dim.weight for dim in operation.rubrics] == [0.7, 0.3]
     assert operation.operation_policy is not None
-    assert config.expert_knowledge["operation"].version == 2
+    assert config.expert_knowledge["operation"].version == 3
     assert config.expert_knowledge["operation"].categories
     assert operation.operation_policy.scope_rules
     assert operation.operation_policy.evidence_rules
@@ -174,7 +174,8 @@ def test_operation_prompt_separates_collapsed_window_from_plain_text_claim() -> 
     assert "任务执行窗口始终处于带“查看/点击查看”入口的缩略状态" in prompt
     assert "判 others，优先标记任务执行窗口未展开" in prompt
     assert "相关评分维度填 null" in prompt
-    assert "模型收到的画面没有可验证结果时判 nok" in prompt
+    assert "模型收到的画面不足以验证结果" in prompt
+    assert "判 others" in prompt
     assert "标记未展示可验证结果" in prompt
     assert "不得推测是否由抽帧遗漏造成" in prompt
     assert "任务执行窗口未展开" in prompt
@@ -218,6 +219,33 @@ def test_operation_prompt_injects_completion_marker_and_podcast_knowledge() -> N
     assert "卡片仍显示“生成中”或尚未自动播放" in prompt
     assert "与卡片仍在生成具体音频内容不构成回复与界面不一致" in prompt
     assert "没有播客结果卡时，不能判完成" in prompt
+
+
+def test_operation_prompt_maps_fixed_failure_messages() -> None:
+    operation, prompt = _operation_prompt()
+
+    assert "无法为你继续操作了" in prompt
+    assert "小艺算力不够了，请稍后再试" in prompt
+    assert "遇到一点小问题，请稍后再试" in prompt
+    assert "“无验证结果”映射为 others / 未展示可验证结果" in prompt
+    assert "仅仅未展示可验证结果不属于可归责执行错误" in prompt
+    assert operation.operation_policy.issue_types["未展示可验证结果"].allowed_correctness == [
+        "nok",
+        "others",
+    ]
+    assert "结果验证异常" not in operation.operation_policy.issue_types
+
+
+def test_operation_prompt_injects_torch_and_document_generation_knowledge() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "Excel 等文档生成任务耗时较长" in prompt
+    assert "文档类型和内容主题相符" in prompt
+    assert "只有泛化的“正在生成”文字而没有文档结果卡时不能判完成" in prompt
+    assert "手电筒开启后" in prompt
+    assert "手电筒图标元素" in prompt
+    assert "右侧会显示“已开启”" in prompt
+    assert "可以作为手电筒已经开启的直接结果证据" in prompt
 
 
 def test_operation_prompt_distinguishes_guided_user_wait_from_silent_stall() -> None:
@@ -355,8 +383,24 @@ def test_operation_prompt_follows_serial_execution_chain_and_requires_direct_pla
     assert "阻塞前已经发生可见错误" in prompt
     assert "搜索结果卡、影视详情卡、播放按钮" in prompt
     assert "不能证明播放动作已经发生" in prompt
-    assert "播放器界面、播放进度、暂停按钮" in prompt
+    assert "普通应用跳转、打开视频应用、模糊的应用加载画面" in prompt
+    assert "播放专属的直接信号" in prompt
+    assert "正在播放/播放中" in prompt
+    assert "不能仅因画面跳转或模糊而降级为 others" in prompt
+    assert "判 nok / 应执行目标未执行" in prompt
+    assert "已经观察到上述播放专属启动信号" in prompt
     assert "【结果证据专项】" in prompt
+
+
+def test_operation_prompt_distinguishes_action_preparation_from_core_trigger() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "不可省略的核心提交或触发动作" in prompt
+    assert "必须区分前置准备和核心动作执行" in prompt
+    assert "进入对应应用、跳转目标页面、找到目标对象" in prompt
+    assert "不能证明核心动作已经执行" in prompt
+    assert "目标专属的直接触发、执行中或执行完成反馈" in prompt
+    assert "普通应用跳转或模糊的应用加载画面" in prompt
 
 
 def test_operation_prompt_uses_explicit_login_feedback_gate() -> None:
@@ -451,7 +495,10 @@ def test_operation_output_fields_are_normalized() -> None:
     ) == ("nok", ["其他执行问题"], "no")
     assert normalize_operation_fields(
         "nok", ["完成证据不足"], "yes", "complex", allowed
-    ) == ("nok", ["未展示可验证结果"], "no")
+    ) == ("others", ["未展示可验证结果"], "no")
+    assert normalize_operation_fields(
+        "nok", ["应执行目标未执行", "完成证据不足"], "yes", "complex", allowed
+    ) == ("nok", ["应执行目标未执行", "未展示可验证结果"], "no")
     assert normalize_operation_fields(
         "ok", ["内部过程信息泄露"], "yes", "simple", allowed
     ) == ("ok", ["内部过程信息泄露"], "no")
@@ -482,7 +529,7 @@ def test_legacy_operation_results_map_at_read_time() -> None:
         ["路径冗余"],
     )
     assert map_legacy_operation_result("wrong", "仅文字无状态证据") == (
-        "nok",
+        "others",
         ["未展示可验证结果"],
     )
     assert map_legacy_operation_result("unclear", "待权限授权") == (

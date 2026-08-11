@@ -30,7 +30,7 @@ def test_operation_expert_knowledge_loads_separately_from_policy() -> None:
     knowledge = config.expert_knowledge["operation"]
 
     assert knowledge.name == "任务类专家经验"
-    assert knowledge.version == 2
+    assert knowledge.version == 3
     assert any(
         "来电播报功能" in rule
         for category in knowledge.categories
