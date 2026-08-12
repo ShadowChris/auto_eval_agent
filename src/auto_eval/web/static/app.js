@@ -1193,6 +1193,13 @@ createApp({
       if (!connectedTaskId) return;
       const es = new EventSource(`/api/eval/${connectedTaskId}/stream`);
       activeEventSource = es;
+      es.addEventListener("task_state", (e) => {
+        if (taskId.value !== connectedTaskId) return;
+        const d = JSON.parse(e.data);
+        total.value = Number.isFinite(Number(d.total)) ? Number(d.total) : total.value;
+        progress.value = Number.isFinite(Number(d.progress)) ? Number(d.progress) : progress.value;
+        running.value = isActiveHistoryStatus(d.status);
+      });
       es.addEventListener("item_progress", (e) => {
         if (taskId.value !== connectedTaskId) return;
         const d = JSON.parse(e.data);
@@ -1547,8 +1554,12 @@ createApp({
       itemProgress.value = d.item_progress || {};
       progressEvents.value = d.progress_events || {};
       summary.value = d.summary || null;
-      total.value = items.value.length || results.value.length;
-      progress.value = d.done_total ?? results.value.length;
+      total.value = Number.isFinite(Number(d.total))
+        ? Number(d.total)
+        : (items.value.length || results.value.length);
+      progress.value = Number.isFinite(Number(d.done_total))
+        ? Number(d.done_total)
+        : results.value.length;
       running.value = isActiveHistoryStatus(d.status);
       runError.value = d.status === "cancelled"
         ? (d.error || "任务已中断")

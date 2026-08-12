@@ -178,22 +178,31 @@ def _preview(data: dict) -> str:
 
 def snapshot_payload(data: dict) -> dict:
     data = _with_operation_compat(data)
+    items = data.get("items") or []
+    results = data.get("results") or []
+    try:
+        saved_done_total = int(data.get("done_total") or 0)
+    except (TypeError, ValueError):
+        saved_done_total = 0
+    done_total = max(saved_done_total, len(results))
     return {
         "task_id": data.get("task_id"),
         "session_name": data.get("session_name"),
         "dataset_name": data.get("dataset_name") or "",
         "note": data.get("note") or "",
         "mode": data.get("mode"),
-        "items": data.get("items") or [],
+        "items": items,
         "options": data.get("options") or {},
         "status": data.get("status"),
-        "results": data.get("results") or [],
+        "results": results,
         "item_progress": data.get("item_progress") or {},
         "progress_events": data.get("progress_events") or {},
         "summary": data.get("summary") or {},
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
-        "done_total": int(data.get("done_total") or len(data.get("results") or [])),
+        # 总进度作为历史详情的显式契约，供新标签页直接恢复。
+        "done_total": done_total,
+        "total": len(items),
         "error": data.get("error"),
     }
 

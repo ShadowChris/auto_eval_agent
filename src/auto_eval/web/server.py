@@ -329,6 +329,17 @@ async def api_stream(task_id: str):
 
     async def event_gen():
         try:
+            # 先回放任务级状态，新标签页无需等待下一条结果即可
+            # 显示“评估中 done/total”。
+            yield _sse(
+                "task_state",
+                {
+                    "status": task.status,
+                    "progress": max(task.done_total, len(task.results)),
+                    "total": len(task.items),
+                    "error": task.error,
+                },
+            )
             # 回放有界事件历史，供刷新/重新加载后恢复当前页面状态。
             for item_events in list(task.progress_events.values()):
                 for progress_event in item_events:
@@ -338,7 +349,11 @@ async def api_stream(task_id: str):
             for result in list(task.results):
                 yield _sse(
                     "result",
-                    {"progress": task.done_total, "total": len(task.items), "result": result},
+                    {
+                        "progress": max(task.done_total, len(task.results)),
+                        "total": len(task.items),
+                        "result": result,
+                    },
                 )
             if task.status == "done":
                 yield _sse("done", {"summary": task.summary, "total": len(task.items)})
@@ -371,7 +386,7 @@ def api_history(limit: int = 50):
         row.update({
             "status": live.status,
             "total": len(live.items),
-            "done": live.done_total,
+            "done": max(live.done_total, len(live.results)),
             "error": live.error,
         })
     return {"items": rows}

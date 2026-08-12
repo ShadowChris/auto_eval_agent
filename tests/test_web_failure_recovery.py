@@ -157,6 +157,53 @@ def test_progress_keeps_started_at_after_evaluation_begins():
     assert completed["started_at"] == 1_788_517_600_000
 
 
+def test_running_snapshot_exposes_explicit_total_progress():
+    task = Task(
+        id="running-progress",
+        mode="operation",
+        items=[
+            {"id": "q0", "query": "q0"},
+            {"id": "q1", "query": "q1"},
+            {"id": "q2", "query": "q2"},
+        ],
+        options={},
+        status="running",
+        results=[{"index": 0, "item_id": "q0", "correctness": "ok"}],
+        # 兼容早期快照中 done_total 未及时刷新的情况。
+        done_total=0,
+    )
+
+    payload = history.snapshot_payload(history.task_to_snapshot(task))
+
+    assert payload["status"] == "running"
+    assert payload["done_total"] == 1
+    assert payload["total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_stream_replays_task_level_progress_before_item_events(monkeypatch):
+    task = Task(
+        id="stream-progress",
+        mode="operation",
+        items=[{"query": f"q{index}"} for index in range(10)],
+        options={},
+        status="running",
+        results=[{"index": 0, "item_id": "q0", "correctness": "ok"}],
+        done_total=1,
+    )
+    monkeypatch.setattr(server, "get_task", lambda _: task)
+
+    response = await server.api_stream(task.id)
+    first_chunk = await anext(response.body_iterator)
+    await response.body_iterator.aclose()
+    text = first_chunk.decode() if isinstance(first_chunk, bytes) else first_chunk
+
+    assert "event: task_state" in text
+    assert '"status": "running"' in text
+    assert '"progress": 1' in text
+    assert '"total": 10' in text
+
+
 def test_eval_error_keeps_original_and_repaired_model_outputs(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "RUNS_DIR", tmp_path)
     error = JudgeOutputParseError(

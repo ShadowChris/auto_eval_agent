@@ -116,6 +116,9 @@ def test_history_note_ui_supports_multiline_editing_and_full_display():
     assert "resetEvaluationView();\n      mode.value = k;" in js
     assert "if (running.value) connectSSE();" in js
     assert "new EventSource(`/api/eval/${connectedTaskId}/stream`)" in js
+    assert 'es.addEventListener("task_state"' in js
+    assert "total.value = Number.isFinite(Number(d.total))" in js
+    assert "progress.value = Number.isFinite(Number(d.done_total))" in js
 
 
 def test_history_note_api_limits_length(monkeypatch):
