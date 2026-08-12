@@ -23,6 +23,8 @@ CardSuitability = Literal[
     "not_applicable",
 ]
 ProblemSolved = Literal["ok", "nok", "need_review"]
+CompareWinner = Literal["answer1", "answer2", "tie"]
+ConflictVerdict = Literal["yes", "no", "unclear"]
 
 
 # --------------------------------------------------------------------------- #
@@ -141,6 +143,35 @@ class RichContentObservation(BaseModel):
     problem_solved: str = ""  # Part 2：是否解决了用户问题（"ok"/"nok"/"need_review"）
     problem_solved_reason: str = ""  # Part 2：评价的原因
     answer_issues: str = ""  # Part 2：回答的内容有什么问题（分类标签：具体描述）
+    rationale: str = ""
+
+
+class VisualCompareObservation(BaseModel):
+    """一次多模态视觉对比评测的完整结果。
+
+    对比两个产品回答录屏，从五个维度评判优劣，并检查内容冲突。
+    """
+
+    visual_description: str = ""
+    answer_coverage_1: AnswerCoverage = "unclear"
+    answer_coverage_2: AnswerCoverage = "unclear"
+
+    relevance: CompareWinner | None = None
+    relevance_reason: str = ""
+    safety: CompareWinner | None = None
+    safety_reason: str = ""
+    content_quality: CompareWinner | None = None
+    content_quality_reason: str = ""
+    need_closure: CompareWinner | None = None
+    need_closure_reason: str = ""
+    personalization: CompareWinner | None = None
+    personalization_reason: str = ""
+
+    has_conflict: ConflictVerdict = "unclear"
+    conflict_reason: str = ""
+
+    needs_review: bool = False
+    review_reason: str = ""
     rationale: str = ""
 
 

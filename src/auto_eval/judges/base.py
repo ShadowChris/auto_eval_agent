@@ -291,7 +291,7 @@ class JudgeClient:
             with bind_chain_context(
                 module="模型裁判", judge=judge_label, round=rounds
             ):
-                kwargs = {"model": self.model, "messages": messages, "temperature": self.cfg.temperature}
+                kwargs = {"model": self.model, "messages": messages, **self._sampling_kwargs()}
                 if self.has_tools:
                     kwargs["tools"] = self.tool_defs
                     kwargs["tool_choice"] = "auto"
@@ -422,7 +422,7 @@ class JudgeClient:
                     progress_message=f"{judge_label} · 强制生成最终判定",
                 )
                 resp = await self._llm_create(
-                    {"model": self.model, "messages": messages, "temperature": self.cfg.temperature},
+                    {"model": self.model, "messages": messages, **self._sampling_kwargs()},
                     stream_callback=stream_callback,
                 )
             msg = resp.choices[0].message
@@ -482,6 +482,15 @@ class JudgeClient:
         except Exception:
             # 日志失败不应影响评测主流程
             logger.exception("写入裁判调用日志失败: path=%s", self.trace_path)
+
+    def _sampling_kwargs(self) -> dict:
+        """构造采样参数：只包含配置里非空的项（None=不发送，避免不支持该参数的网关 400）。"""
+        k: dict = {"temperature": self.cfg.temperature}
+        if self.cfg.top_p is not None:
+            k["top_p"] = self.cfg.top_p
+        if self.cfg.seed is not None:
+            k["seed"] = self.cfg.seed
+        return k
 
     async def _llm_create(self, kwargs: dict, max_attempts: int | None = None,
                           stream_callback: Callable[[str], None] | None = None):

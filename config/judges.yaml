@@ -10,7 +10,7 @@ judges:
     api_key_env: PROXY_API_KEY
     model: kimi-for-coding-openai
     persona: strict_expert
-    temperature: 1            # 当前兼容端点使用 temperature=1（其余裁判默认 0）
+    temperature: 1            # 代理(litellm)强制限定：temperature 只能为 1、top_p 只能为 0.95（探针 probe_sampling.py 实测 2026-08-11）。本端点无法用采样参数降噪，稳定性依赖集成 trim_mean + 可选 eval_options.repeat；切勿在此配 top_p（会被网关 400）
     enable_web_search: true          # 开启 agent loop 联网查证
     enable_fetch: true               # 允许抓取网页正文深挖
     enable_calculate: true           # 允许算术核查
@@ -24,7 +24,8 @@ judges:
     base_url: https://api.siliconflow.cn/v1
     api_key_env: SILICON_FLOW_API_KEY
     model: Qwen/Qwen3.5-397B-A17B
-    temperature: 1            # kimi-for-coding-openai 限定 temperature 只能为 1（其余裁判默认 0）
+    temperature: 0            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）；原先误抄成 1
+    seed: 42                  # 固定种子 + temperature=0 → 可复现，消除"时好时坏"
     persona: end_user              # 与 judge_1(strict_expert) 形成视角差异
     enable_web_search: true
     enable_fetch: true
@@ -40,6 +41,8 @@ judges:
     api_key_env: PROXY_API_KEY
     model: deepseek-v4-pro-openai
     persona: product_expert
+    temperature: 0            # 探针实测支持低温采样（默认即 0，显式声明）
+    seed: 42                  # 固定种子，可复现
     enable_web_search: true
     enable_fetch: true
     enable_calculate: true

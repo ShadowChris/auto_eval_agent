@@ -101,9 +101,10 @@ def _rich_content_times(obj: dict) -> dict[str, float]:
 
 def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 ||| 分隔的粘贴文本。返回 (items, errors)。"""
-    if mode in ("operation", "rich_content", "rich_content_quality"):
-        label = "任务类" if mode == "operation" else "垂域视觉评测"
-        return [], [f"{label}评测请逐题上传视频或导入 JSONL，不支持文本粘贴解析"]
+    if mode in ("operation", "rich_content", "rich_content_quality", "compare"):
+        label_map = {"operation": "任务类", "rich_content": "垂域视觉评测", "rich_content_quality": "垂域视觉综合评测", "compare": "垂域视觉对比"}
+        label = label_map.get(mode, "该")
+        return [], [f"{label}评测请导入 JSONL（含视频路径），不支持文本粘贴解析"]
     items: list[dict] = []
     errors: list[str] = []
     for ln, raw in enumerate(text.splitlines(), 1):
@@ -121,12 +122,7 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
                     item["competitor"] = parts[2]  # 第3段：竞品结果（产品专家用）
                 if len(parts) >= 4 and parts[3]:
                     item["reference"] = parts[3]  # 第4段：参考答案
-            elif mode == "compare":
-                if len(parts) < 3:
-                    raise ValueError("对比模式每行至少需 query ||| answerA ||| answerB")
-                item = {"query": parts[0], "answer_a": parts[1], "answer_b": parts[2]}
-                if len(parts) >= 4 and parts[3]:
-                    item["reference"] = parts[3]
+# compare mode now handled in parse_jsonl (video-only)
             elif mode == "online":
                 if len(parts) < 1 or not parts[0]:
                     raise ValueError("在线模式每行至少需 query")
@@ -184,12 +180,52 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             if obj.get("competitor"):
                 item["competitor"] = obj["competitor"]
         elif mode == "compare":
-            aa = obj.get("answer_a") or obj.get("answerA")
-            ab = obj.get("answer_b") or obj.get("answerB")
-            if aa is None or ab is None:
-                errors.append(f"第 {ln} 行 compare 模式缺少 answer_a/answer_b")
+            video1 = obj.get("video1")
+            video2 = obj.get("video2")
+            if not isinstance(video1, str) or not video1.strip():
+                errors.append(f"第 {ln} 行 compare 模式缺少 video1")
                 continue
-            item["answer_a"], item["answer_b"] = aa, ab
+            if not isinstance(video2, str) or not video2.strip():
+                errors.append(f"第 {ln} 行 compare 模式缺少 video2")
+                continue
+            item["video1"] = video1.strip()
+            item["video2"] = video2.strip()
+            try:
+                ct = _rich_content_times(obj)
+            except ValueError as exc:
+                errors.append(f"第 {ln} 行 {exc}")
+                continue
+            item.update(ct)
+            for ctx_field in ("context1", "context2"):
+                val = obj.get(ctx_field)
+                if val is not None:
+                    if not isinstance(val, str):
+                        errors.append(f"第 {ln} 行 {ctx_field} 必须是字符串")
+                        continue
+                    if val.strip():
+                        item[ctx_field] = val.strip()
+            for ans_field in ("answer1", "answer2"):
+                val = obj.get(ans_field)
+                if val is not None:
+                    if not isinstance(val, str):
+                        errors.append(f"第 {ln} 行 {ans_field} 必须是字符串")
+                        continue
+                    if val.strip():
+                        item[ans_field] = val.strip()
+            if not obj.get("category"):
+                item["category"] = "default"
+            item["source_line"] = ln
+            item_id = obj.get("id")
+            if item_id is not None:
+                if not isinstance(item_id, str) or not item_id.strip():
+                    errors.append(f"第 {ln} 行 id 必须是非空字符串")
+                    continue
+                item_id = item_id.strip()
+                if item_id in video_item_ids:
+                    errors.append(f"第 {ln} 行 id 重复：{item_id}")
+                    continue
+                video_item_ids.add(item_id)
+                item["id"] = item_id
         elif mode == "process":
             a = obj.get("answer")
             tr = obj.get("trace")

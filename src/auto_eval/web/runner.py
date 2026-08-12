@@ -1,4 +1,4 @@
-﻿"""评估执行：分发三种模式 + 并发 + 推 SSE 事件 + 元评测汇总。
+"""评估执行：分发三种模式 + 并发 + 推 SSE 事件 + 元评测汇总。
 
 复用 auto_eval 核心：RubricJudge / PairwiseJudge / aggregate_* / build_runner / ground_truth。
 """
@@ -23,6 +23,7 @@ from ..judges import (
     RichContentJudge,
     RubricJudge,
     SkillRouter,
+    VisualCompareJudge,
     _format_visual_findings_for_rubric,
     ensure_classified,
 )
@@ -42,6 +43,7 @@ from .history import save_task
 from .operation_media import (
     prepare_session_operation_item,
     prepare_session_rich_content_item,
+    prepare_session_visual_compare_item,
 )
 from .tasks import Task
 
@@ -131,6 +133,13 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         if rich_profile is not None
         else []
     )
+    # 垂域视觉对比：双视频多模态对比裁判
+    compare_judges = (
+        [VisualCompareJudge(client, rich_profile) for client in clients]
+        if rich_profile is not None
+        else []
+    )
+
     # rich_content_quality：挂卡识别裁判可独立于回答评测裁判
     visual_judge = None
     if task.mode == "rich_content_quality" and rich_profile is not None:
@@ -213,7 +222,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                 )
                 last_error = None
                 res = None
-                if task.mode in ("operation", "rich_content", "rich_content_quality") and not item_dict.get("frames"):
+                if task.mode in ("operation", "rich_content", "rich_content_quality", "compare") and not item_dict.get("frames"):
                     try:
                         log_event(
                             "视频准备",
@@ -222,7 +231,12 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                             progress=3,
                             progress_message="正在校验视频并分析场景",
                         )
-                        if task.mode in ("rich_content", "rich_content_quality"):
+                        if task.mode == "compare":
+                            if rich_profile is None:
+                                raise ValueError("缺少 rich_content 视觉模式配置")
+                            prepare_call = prepare_session_visual_compare_item
+                            prepare_kwargs = {"profile": rich_profile}
+                        elif task.mode in ("rich_content", "rich_content_quality"):
                             if rich_profile is None:
                                 raise ValueError("缺少 rich_content 视觉模式配置")
                             prepare_call = prepare_session_rich_content_item
@@ -244,12 +258,17 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                         item_dict.clear()
                         item_dict.update(prepared)
                         _persist_task(task)
+                        _frame_dir = ""
+                        if item_dict.get("frames"):
+                            _frame_dir = str(Path(item_dict["frames"][0]).parent)
+                        elif item_dict.get("frames1"):
+                            _frame_dir = str(Path(item_dict["frames1"][0]).parent)
                         log_event(
                             "视频准备",
                             "关键帧提取完成",
                             details={
                                 "关键帧数": item_dict.get("frame_count"),
-                                "抽帧目录": str(Path(item_dict["frames"][0]).parent),
+                                "抽帧目录": _frame_dir,
                             },
                             progress=12,
                             progress_message=f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
@@ -283,6 +302,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                                     online_runner, process_dims, arbitrator,
                                     rich_judges=rich_judges,
                                     visual_judge=visual_judge,
+                                    compare_judges=compare_judges,
                                     task=task,
                                 ),
                                 timeout=eval_timeout,
@@ -419,6 +439,7 @@ async def _eval_one(
     arbitrator=None,
     rich_judges=None,
     visual_judge=None,
+    compare_judges=None,
     task=None,
 ) -> dict:
     t0 = time.perf_counter()
@@ -437,7 +458,7 @@ async def _eval_one(
     classify_api_key = _env_key or _judge_key or "EMPTY"  # 绝不为 None
     # 富内容视觉识别不依赖问答垂域分类；数据有明确垂域时直接使用 category，
     # 未提供时保留 default，避免每条视频在视觉调用前再多跑一次分类模型。
-    if mode not in ("rich_content", "rich_content_quality") and classify_model and classify_base_url:
+    if mode not in ("rich_content", "rich_content_quality", "compare") and classify_model and classify_base_url:
         skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
         try:
             await asyncio.wait_for(
@@ -647,30 +668,49 @@ async def _eval_one(
         _maybe_meta(out, item, enriched_answer, v)
 
     elif mode == "compare":
-        aa, ab = item_dict["answer_a"], item_dict["answer_b"]
-        out["answer_a"], out["answer_b"] = aa, ab
-        pairs = []
-        for pj in pair_judges:
-            pairs.append(await pj.compare_once(item, "A", aa, "B", ab, order="ab"))
-            if cfg.eval_options.pairwise_bidirectional:
-                pairs.append(await pj.compare_once(item, "A", aa, "B", ab, order="ba"))
-        pr = aggregate_pairs(pairs, cfg.ensemble, cfg.ensemble.flag_low_agreement)
+        if not compare_judges:
+            raise ValueError("没有可用的垂域视觉对比评测裁判")
+        frames1 = item_dict.get("frames1") or []
+        frames2 = item_dict.get("frames2") or []
+        if not frames1 or not frames2:
+            raise ValueError("垂域视觉对比评测缺少关键帧")
+
+        answer1 = str(item_dict.get("answer1") or "").strip()
+        answer2 = str(item_dict.get("answer2") or "").strip()
+        context1 = str(item_dict.get("context1") or "").strip()
+        context2 = str(item_dict.get("context2") or "").strip()
+
+        out["answer1"] = answer1
+        out["answer2"] = answer2
+        out["context1"] = context1
+        out["context2"] = context2
+        out["has_video"] = True
+
+        compare_result = await compare_judges[0].evaluate(
+            question=item.question,
+            context=(item.context or "").strip(),
+            context1=context1,
+            answer1=answer1,
+            frames1=[str(p) for p in frames1],
+            context2=context2,
+            answer2=answer2,
+            frames2=[str(p) for p in frames2],
+        )
+        out.update(compare_result)
         log_event(
             "结果聚合",
-            "成功" if pr is not None else "失败",
-            level=logging.INFO if pr is not None else logging.ERROR,
-            details={"裁判结果数": len(pairs), "胜者": pr.winner if pr else None},
+            "视觉对比完成",
+            details={
+                "相关性": compare_result.get("relevance"),
+                "安全合规": compare_result.get("safety"),
+                "内容质量": compare_result.get("content_quality"),
+                "需求闭环": compare_result.get("need_closure"),
+                "个性化": compare_result.get("personalization"),
+                "内容冲突": compare_result.get("has_conflict"),
+            },
             progress=90,
-            progress_message="正在聚合对比结果",
+            progress_message="垂域视觉对比评测完成",
         )
-        if pr is None:
-            out["error"] = "裁判无成对输出"
-        else:
-            out.update(
-                winner=pr.winner, a_wins=pr.a_wins, b_wins=pr.b_wins, ties=pr.ties,
-                bidirectional_consistent=pr.bidirectional_consistent,
-                rationale=pr.rationale, low_agreement=pr.low_agreement,
-            )
 
     else:  # online
         with bind_chain_context(module="被测模型", round=0):
@@ -773,11 +813,20 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
             summary["meta_n"] = len(has_meta)
             summary["judge_accuracy"] = round(agreed / len(has_meta), 3)
     elif task.mode == "compare":
-        a = sum(r.get("a_wins", 0) for r in ok)
-        b = sum(r.get("b_wins", 0) for r in ok)
-        t = sum(r.get("ties", 0) for r in ok)
-        tot = a + b + t
-        summary["a_winrate"] = round((a + 0.5 * t) / tot, 3) if tot else None
+        for dim in ["relevance", "safety", "content_quality", "need_closure", "personalization"]:
+            a_wins = sum(1 for r in ok if r.get(dim) == "answer1")
+            b_wins = sum(1 for r in ok if r.get(dim) == "answer2")
+            ties = sum(1 for r in ok if r.get(dim) == "tie")
+            na = sum(1 for r in ok if r.get(dim) is None)
+            total = a_wins + b_wins + ties
+            summary[f"{dim}_answer1_wins"] = a_wins
+            summary[f"{dim}_answer2_wins"] = b_wins
+            summary[f"{dim}_ties"] = ties
+            summary[f"{dim}_na"] = na
+            summary[f"{dim}_answer1_rate"] = round(a_wins / total, 3) if total else None
+        summary["conflict_yes"] = sum(1 for r in ok if r.get("has_conflict") == "yes")
+        summary["conflict_no"] = sum(1 for r in ok if r.get("has_conflict") == "no")
+        summary["conflict_unclear"] = sum(1 for r in ok if r.get("has_conflict") == "unclear")
     # 按垂域总览（compare 是两回答对比、无 correctness，不聚合）；失败不拖垮核心 summary
     if task.mode != "compare":
         try:

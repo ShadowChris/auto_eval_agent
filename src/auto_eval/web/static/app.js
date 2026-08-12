@@ -5,7 +5,7 @@ createApp({
   setup() {
     const modes = [
       { key: "single", label: "垂域问答类" },
-      { key: "compare", label: "两回答对比" },
+      { key: "compare", label: "垂域视觉对比" },
       { key: "online", label: "接模型在线评估" },
       { key: "process", label: "过程盲评(含轨迹)" },
       { key: "operation", label: "任务类（录屏）" },
@@ -16,7 +16,7 @@ createApp({
       return modes.find((item) => item.key === key)?.label || key;
     }
     const mode = ref("single");
-    const isVideoMode = computed(() => ["operation", "rich_content", "rich_content_quality"].includes(mode.value));
+    const isVideoMode = computed(() => ["operation", "rich_content", "rich_content_quality", "compare"].includes(mode.value));
     const text = ref("");
     const fileText = ref("");
     const isJsonl = ref(false);
@@ -79,7 +79,7 @@ createApp({
       () =>
         ({
           single: "每行一题：query [||| @context: 背景] ||| answer [||| competitor] [||| reference]   （context 可选且视为可信前提）",
-          compare: "每行一题：query [||| @context: 背景] ||| answerA ||| answerB [||| reference]",
+          compare: "逐题导入 JSONL：id(可选)、query、context(可选)、video1、video2、context1/context2(可选)、answer1/answer2(可选)、content_start_time/content_end_time(可选，单位秒)",
           online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
           operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
@@ -104,7 +104,7 @@ createApp({
       if (!items.value.length) return [];
       const keys = ["query", "context"];
       if (mode.value === "single") keys.push("answer", "reference");
-      else if (mode.value === "compare") keys.push("answer_a", "answer_b", "reference");
+      else if (mode.value === "compare") keys.push("video1", "video2", "answer1", "answer2");
       else if (mode.value === "process") keys.push("answer", "trace", "reference");
       else keys.push("reference");
       return keys.filter((k) => items.value.some((it) => it[k] != null && it[k] !== ""));
@@ -370,14 +370,17 @@ createApp({
         : [];
       if (mode.value === "compare")
         return [
+          { key: "item_id", label: "题号" },
           { key: "query", label: "题目" },
           ...contextCols,
-          { key: "answer_a", label: "回答 A" },
-          { key: "answer_b", label: "回答 B" },
-          { key: "winner", label: "胜者" },
-          { key: "bidirectional_consistent", label: "双向一致" },
+          { key: "relevance", label: "相关性" },
+          { key: "safety", label: "安全合规" },
+          { key: "content_quality", label: "内容质量" },
+          { key: "need_closure", label: "需求闭环" },
+          { key: "personalization", label: "个性化一致性" },
+          { key: "has_conflict", label: "内容冲突" },
           { key: "rationale", label: "理由" },
-        { key: "latency_s", label: "耗时" },
+          { key: "latency_s", label: "耗时" },
         ];
       if (mode.value === "operation")
         return [
@@ -666,7 +669,7 @@ createApp({
       fileText.value = "";
       isJsonl.value = false;
       datasetName.value = "";
-      if (["operation", "rich_content", "rich_content_quality"].includes(k)) {
+      if (["operation", "rich_content", "rich_content_quality", "compare"].includes(k)) {
         opItems.value = [newOpItem()];
         opPage.value = 1;
         opJumpPage.value = "";
@@ -742,16 +745,19 @@ createApp({
       opJumpPage.value = "";
       try {
         const content = await file.text();
+        console.log("[onOpManifestFile] mode:", mode.value, "file size:", content.length);
         const parseResponse = await fetch("/api/parse", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ mode: mode.value, jsonl: content }),
         });
         const parsed = await parseResponse.json().catch(() => ({}));
+        console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
         if (!parseResponse.ok) throw new Error(parsed.detail || "JSONL 解析请求失败");
         const importErrors = [...(parsed.errors || [])];
         if (!(parsed.items || []).length) {
           errors.value = importErrors.length ? importErrors : ["JSONL 中没有可导入的数据"];
+          console.warn("[onOpManifestFile] no items parsed");
           return;
         }
 
@@ -766,8 +772,14 @@ createApp({
             context: item.context || "",
             category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
-            videoPath: item.video_path || "",
-            answer: (mode.value === "rich_content" || mode.value === "rich_content_quality") ? (item.answer_text || "") : (item.answer || ""),
+            videoPath: item.video_path || item.video1 || "",
+            answer: (mode.value === "rich_content" || mode.value === "rich_content_quality") ? (item.answer_text || "") : (mode.value === "compare" ? (item.answer1 || "") : (item.answer || "")),
+            answer1: item.answer1 || "",
+            answer2: item.answer2 || "",
+            context1: item.context1 || "",
+            context2: item.context2 || "",
+            video1Path: item.video1 || "",
+            video2Path: item.video2 || "",
             taskStartTime: item.task_start_time ?? null,
             taskEndTime: item.task_end_time ?? null,
             contentStartTime: item.content_start_time ?? null,
@@ -776,8 +788,10 @@ createApp({
             sourceData: item.source_data || null,
           }));
           opPage.value = 1;
+          console.log("[onOpManifestFile] opItems mapped:", opItems.value.length, "first videoPath:", opItems.value[0]?.videoPath, "first query:", opItems.value[0]?.query);
         }
       } catch (error) {
+        console.error("[onOpManifestFile] error:", error);
         errors.value = ["批量导入失败：" + (error?.message || String(error))];
       } finally {
         opPreparing.value = false;
@@ -785,10 +799,15 @@ createApp({
     }
 
     const canSubmit = computed(() => {
-      if (isVideoMode.value)
-        return !opPreparing.value && opItems.value.some(
+      if (isVideoMode.value) {
+        const ok = !opPreparing.value && opItems.value.some(
           (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
         );
+        if (mode.value === "compare") {
+          console.log("[canSubmit] compare mode:", "opPreparing:", opPreparing.value, "opItems count:", opItems.value.length, "first item query:", opItems.value[0]?.query, "first item videoPath:", opItems.value[0]?.videoPath, "first item video1Path:", opItems.value[0]?.video1Path, "result:", ok);
+        }
+        return ok;
+      }
       return !!text.value;
     });
 
@@ -819,19 +838,30 @@ createApp({
           return;
         }
         items.value = valid.map((it, idx) => {
+          const prefix = mode.value === "operation" ? "op" : mode.value === "compare" ? "cmp" : "rich";
           const item = {
-            id: it.id || `${mode.value === "operation" ? "op" : "rich"}${idx + 1}`,
+            id: it.id || `${prefix}${idx + 1}`,
             query: it.query.trim(),
             context: (it.context || "").trim(),
-            video_path: it.videoPath,
           };
-          if (mode.value === "operation") {
-            item.category = "operation";
-            item.answer = (it.answer || "").trim();
-          } else {
-            // rich_content / rich_content_quality
+          if (mode.value === "compare") {
+            item.video1 = it.video1Path || it.videoPath || "";
+            item.video2 = it.video2Path || "";
+            item.context1 = (it.context1 || "").trim();
+            item.context2 = (it.context2 || "").trim();
+            item.answer1 = (it.answer1 || it.answer || "").trim();
+            item.answer2 = (it.answer2 || "").trim();
             item.category = (it.category || "").trim() || "default";
-            item.answer_text = (it.answer || "").trim();
+          } else {
+            item.video_path = it.videoPath;
+            if (mode.value === "operation") {
+              item.category = "operation";
+              item.answer = (it.answer || "").trim();
+            } else {
+              // rich_content / rich_content_quality
+              item.category = (it.category || "").trim() || "default";
+              item.answer_text = (it.answer || "").trim();
+            }
           }
           if ((it.frames || []).length) {
             item.media = [it.videoPath];
@@ -1045,6 +1075,20 @@ createApp({
       if (c.key === "arbitrated") return v ? `⚖️是(${r.arbitrator_confidence ?? "-"})` : "";
       if (c.key === "bidirectional_consistent") return v ? "是" : "否(位置偏差)";
       if (c.key === "winner") return v === "a" ? "A" : v === "b" ? "B" : "平";
+      // 垂域视觉对比维度渲染
+      if (["relevance", "safety", "content_quality", "need_closure", "personalization"].includes(c.key)) {
+        if (v === "answer1") return "产品1更优";
+        if (v === "answer2") return "产品2更优";
+        if (v === "tie") return "平手";
+        if (v == null) return "N/A";
+        return v || "";
+      }
+      if (c.key === "has_conflict") {
+        if (v === "yes") return "有冲突";
+        if (v === "no") return "无冲突";
+        if (v === "unclear") return "不清楚";
+        return v || "";
+      }
       if (c.key === "correctness") {
         if (mode.value === "operation")
           return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 完成但有瑕疵", unclear: "? 无法判断" }[v] || v) || "";

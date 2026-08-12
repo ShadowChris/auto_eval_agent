@@ -24,14 +24,20 @@ class OpenAICompatRunner(BaseRunner):
         self.model = cfg.model or cfg.name
 
     async def _call(self, prompt: str, **kw) -> dict:
+        req = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.cfg.temperature,
+            "max_tokens": self.cfg.max_tokens or 4096,
+        }
+        # None=不发送，避免不支持该参数的网关 400
+        if self.cfg.top_p is not None:
+            req["top_p"] = self.cfg.top_p
+        if self.cfg.seed is not None:
+            req["seed"] = self.cfg.seed
         resp = await stream_chat_completion(
             self.client,
-            {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.cfg.temperature,
-                "max_tokens": self.cfg.max_tokens or 4096,
-            },
+            req,
             include_usage=self.cfg.stream_include_usage,
             total_timeout_s=self.cfg.total_timeout_s,
             max_attempts=self.cfg.max_attempts,

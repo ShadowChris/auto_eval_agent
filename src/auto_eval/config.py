@@ -17,6 +17,8 @@ class ModelConfig(BaseModel):
     # 通用
     concurrency: int = 4
     temperature: float = 0.0
+    top_p: float | None = None  # None=不发送，避免不支持该参数的网关 400
+    seed: int | None = None  # None=不发送；同 seed 可复现但不降跨 seed 方差
     max_tokens: int | None = None
     rpm: int | None = None  # 每分钟请求数上限
     tpm: int | None = None  # 每分钟 token 数上限
@@ -63,6 +65,8 @@ class JudgeConfig(BaseModel):
     enable_calculate: bool = True  # 允许裁判用算术求值核查计算题
     enable_python: bool = False  # 允许裁判执行代码核查编程题（注意安全，默认关）
     temperature: float = 0.0
+    top_p: float | None = None  # None=不发送，避免不支持该参数的网关 400
+    seed: int | None = None  # None=不发送；同 seed 可复现但不降跨 seed 方差
     concurrency: int = 4
     connect_timeout_s: float = 10.0
     read_timeout_s: float = 90.0

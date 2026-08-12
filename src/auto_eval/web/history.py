@@ -229,10 +229,7 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
         rows["抽帧清单"] = frame_rows
     rows["运行信息"] = [_run_info(snapshot)]
     if mode == "compare":
-        rows["逐题结果"] = _result_rows(
-            aligned_results,
-            _all_dim_names(results, cfg),
-        )
+        rows["逐题结果"] = _visual_compare_export_rows(aligned_results)
     else:
         for name, skill_rows, dim_names in _per_skill_sheets(results, cfg):
             rows[name] = _result_rows(skill_rows, dim_names)
@@ -559,6 +556,49 @@ def _format_ts(value) -> str:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
     return str(value or "")
+
+def _visual_compare_export_rows(results: list[dict]) -> list[dict]:
+    """垂域视觉对比导出：维度对比结论 + 内容冲突。"""
+    _COMPARE_COLUMNS: list[tuple[str, str]] = [
+        ("item_id", "题号"),
+        ("query", "题目"),
+        ("context", "背景"),
+        ("context1", "产品1背景"),
+        ("answer1", "产品1回答"),
+        ("context2", "产品2背景"),
+        ("answer2", "产品2回答"),
+        ("relevance", "相关性"),
+        ("safety", "安全合规"),
+        ("content_quality", "内容质量"),
+        ("need_closure", "需求闭环"),
+        ("personalization", "个性化一致性"),
+        ("has_conflict", "内容冲突"),
+        ("rationale", "理由"),
+        ("latency_s", "耗时"),
+    ]
+    _DISPLAY_MAP = {
+        "relevance": {"answer1": "产品1更优", "answer2": "产品2更优", "tie": "平手"},
+        "safety": {"answer1": "产品1更优", "answer2": "产品2更优", "tie": "平手"},
+        "content_quality": {"answer1": "产品1更优", "answer2": "产品2更优", "tie": "平手"},
+        "need_closure": {"answer1": "产品1更优", "answer2": "产品2更优", "tie": "平手"},
+        "personalization": {"answer1": "产品1更优", "answer2": "产品2更优", "tie": "平手"},
+        "has_conflict": {"yes": "有冲突", "no": "无冲突", "unclear": "不清楚"},
+    }
+    rows = []
+    for r in results:
+        row = {}
+        for key, label in _COMPARE_COLUMNS:
+            v = r.get(key)
+            if v is None:
+                row[label] = "N/A"
+            elif key in _DISPLAY_MAP and v in _DISPLAY_MAP[key]:
+                row[label] = _DISPLAY_MAP[key][v]
+            elif key == "latency_s" and v is not None:
+                row[label] = f"{v}秒"
+            else:
+                row[label] = v if v != "" else ""
+        rows.append(row)
+    return rows
 
 
 def _result_rows(results: list[dict], dim_names: list[str] | None = None) -> list[dict]:

@@ -6,15 +6,18 @@ from .pairwise_judge import PairwiseJudge
 from .rubric_judge import RubricJudge, ensure_classified
 from .rich_content_judge import RichContentJudge, _format_visual_findings_for_rubric
 from .skill_router import SkillRouter
+from .visual_compare_judge import VisualCompareJudge, visual_compare_result_fields
 
 __all__ = [
     "JudgeClient",
     "JudgeReply",
     "RubricJudge",
     "RichContentJudge",
+    "VisualCompareJudge",
     "PairwiseJudge",
     "Arbitrator",
     "SkillRouter",
     "aggregate_scores",
     "aggregate_pairs",
+    "visual_compare_result_fields",
 ]

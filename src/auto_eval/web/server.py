@@ -115,7 +115,24 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
     selected_judges = [judge for judge in app_cfg.judges if judge.name in selected]
     if not selected_judges:
         selected_judges = app_cfg.judges[:1]
-    if req.mode not in ("single", "process") or not selected_judges:
+    if req.mode not in ("single", "process", "compare") or not selected_judges:
+        return
+    # compare（垂域视觉对比）校验：每条必须有 video1 和 video2
+    if req.mode == "compare":
+        missing = [
+            index + 1
+            for index, item in enumerate(req.items)
+            if not str(item.get("video1") or "").strip()
+            or not str(item.get("video2") or "").strip()
+        ]
+        if missing:
+            preview = "、".join(map(str, missing[:8]))
+            suffix = "…" if len(missing) > 8 else ""
+            raise HTTPException(
+                422,
+                f"垂域视觉对比每道题需要 video1 和 video2 视频路径，"
+                f"第 {preview}{suffix} 条缺少视频路径。",
+            )
         return
     if not all(judge.persona == "product_expert" for judge in selected_judges):
         return
@@ -234,7 +251,7 @@ async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation
     video_path = video_dir / f"{video_id}{suffix}"
     video_path.write_bytes(data)
     duration = probe_duration(video_path)
-    if mode == "rich_content":
+    if mode in ("rich_content", "compare"):
         return {
             "video_id": video_id,
             "video_path": str(video_path),

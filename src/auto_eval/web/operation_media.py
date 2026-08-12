@@ -359,3 +359,90 @@ def prepare_session_rich_content_item(
     if not frames:
         raise ValueError(f"视频抽帧失败：{raw_path}")
     return _prepared_item(item, video_path, frames, duration)
+
+
+def prepare_session_visual_compare_item(
+    item: dict,
+    *,
+    profile,
+    session_name: str,
+    item_index: int,
+    total_items: int,
+    base_dir = PROJECT_ROOT,
+    runs_dir = RUNS_DIR,
+    probe_fn = probe_duration,
+    extract_fn = extract_scene_keyframes,
+) -> dict:
+    """按 Web 会话准备垂域视觉对比评测的双视频关键帧。
+
+    为两个视频分别抽帧，帧路径存入 frames1 / frames2。
+    """
+    # Video 1
+    raw_path1 = str(item.get("video1") or "").strip()
+    if not raw_path1:
+        raise ValueError("缺少 video1")
+    video_path1 = resolve_operation_video_path(raw_path1, base_dir=base_dir)
+    duration1 = float(probe_fn(video_path1))
+    if duration1 <= 0:
+        raise ValueError(f"无法读取视频1或视频时长为0：{raw_path1}")
+
+    # Video 2
+    raw_path2 = str(item.get("video2") or "").strip()
+    if not raw_path2:
+        raise ValueError("缺少 video2")
+    video_path2 = resolve_operation_video_path(raw_path2, base_dir=base_dir)
+    duration2 = float(probe_fn(video_path2))
+    if duration2 <= 0:
+        raise ValueError(f"无法读取视频2或视频时长为0：{raw_path2}")
+
+    # 使用与 rich_content 相同的抽帧参数
+    from ..config import VisualModeProfile
+    extract_kwargs, cache_key = _rich_content_timing(item, duration1, profile)
+
+    width = max(3, len(str(max(total_items, 1))))
+    sequence = str(item_index + 1).zfill(width)
+    item_name = _safe_name(
+        str(item.get("id") or f"q{item_index + 1}"),
+        f"q{item_index + 1}",
+    )
+    safe_session = _safe_name(session_name, "visual_compare_session")
+    base_frame_dir = (
+        runs_dir / "videos" / "imported" / safe_session / f"{sequence}_{item_name}"
+    )
+
+    # 抽 video1 帧
+    frame_dir1 = base_frame_dir / "video1"
+    frames1 = _extract_frames(
+        video_path1, frame_dir1,
+        extract_fn=extract_fn,
+        cache_key=cache_key,
+        extract_kwargs=extract_kwargs,
+    )
+    if not frames1:
+        raise ValueError(f"视频1抽帧失败：{raw_path1}")
+
+    # 抽 video2 帧
+    frame_dir2 = base_frame_dir / "video2"
+    frames2 = _extract_frames(
+        video_path2, frame_dir2,
+        extract_fn=extract_fn,
+        cache_key=cache_key,
+        extract_kwargs=extract_kwargs,
+    )
+    if not frames2:
+        raise ValueError(f"视频2抽帧失败：{raw_path2}")
+
+    prepared = dict(item)
+    prepared.update({
+        "video1_path": str(video_path1),
+        "video2_path": str(video_path2),
+        "video_name": video_path1.name,
+        "media": [str(video_path1), str(video_path2)],
+        "frames1": [str(frame) for frame in frames1],
+        "frames2": [str(frame) for frame in frames2],
+        "frame_count": len(frames1) + len(frames2),
+        "duration": round(duration1, 2),
+        "duration1": round(duration1, 2),
+        "duration2": round(duration2, 2),
+    })
+    return prepared
