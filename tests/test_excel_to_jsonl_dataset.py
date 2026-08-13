@@ -60,3 +60,32 @@ def test_convert_csv_to_ordered_operation_jsonl(tmp_path: Path):
     assert exported[0]["分享链接"] == "https://example.test/1"
     assert "answer" not in exported[1]
     assert result.missing_video_ids == ["V1_录屏0805_simple_002"]
+
+
+def test_video_directory_is_optional_and_similarly_named_columns_are_ignored(
+    tmp_path: Path,
+):
+    video = tmp_path / "videos" / "record.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([{
+        "序号": "simple_001",
+        "query": "打开设置",
+        "文件路径": "",
+        "文件路径1": "这是备注，不参与路径拼接",
+        "原文件名": "record.mp4",
+    }]).to_csv(source, index=False, encoding="utf-8-sig")
+
+    result = convert_table(
+        source,
+        input_prefix="V1",
+        video_prefix=str(tmp_path / "videos"),
+        project_root=tmp_path,
+    )
+
+    exported = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert exported["video_path"] == str(video)
+    assert exported["文件路径1"] == "这是备注，不参与路径拼接"
+    assert result.missing_video_ids == []
+    assert result.warnings == []

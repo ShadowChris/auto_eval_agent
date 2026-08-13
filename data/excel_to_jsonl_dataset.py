@@ -4,7 +4,7 @@
 
 * id: ``<input_prefix>_<序号>``，例如 ``0730众测_simple_001``。
 * query/context/answer/task_start_time/task_end_time: 沿用原任务类转换规则。
-* video_path: ``<video_prefix>/<文件路径>/<原文件名>``。
+* video_path: ``<video_prefix>/[文件路径]/<原文件名>``，其中“文件路径”可选。
 * 未参与上述映射的输入列，按原列顺序平铺追加到每条 JSON 对象末尾。
 
 默认 context 地点为“浙江省杭州市滨江区滨康路101号”，可通过
@@ -273,7 +273,9 @@ def _build_video_path(
 ) -> tuple[str, str | None]:
     directory = row.get(VIDEO_DIRECTORY_COLUMN)
     filename = row.get(VIDEO_FILENAME_COLUMN)
-    if not _is_empty_path(directory) and not _is_empty_path(filename):
+    # “文件路径”只是 video_prefix 与文件名之间的可选子目录；
+    # 只要“原文件名”存在，即可构造确定的录屏路径。
+    if not _is_empty_path(filename):
         return _join_video_path(video_prefix, directory, filename), None
 
     explicit_video_path = row.get(VIDEO_PATH_COLUMN)
