@@ -347,6 +347,7 @@ _RICH_CONTENT_EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("problem_solved_reason", "评价的原因"),
     ("answer_issues", "回答的内容有什么问题"),
     ("rationale", "识别结论"),
+    ("analysis", "评价分析过程"),
     ("latency_s", "耗时"),
 ]
 

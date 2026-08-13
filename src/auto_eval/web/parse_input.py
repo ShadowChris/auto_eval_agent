@@ -8,7 +8,7 @@
   operation: {id?, query, context?, video_path, answer?,
               task_start_time?, task_end_time?}
   rich_content: {id?, query, context?, video_path, answer_text?,
-                 content_start_time?, content_end_time?, category?}
+                 task_start_time?, task_end_time?, category?}
 
 文本格式在 query 后支持可选的显式背景段：
   query ||| @context: 背景信息 ||| 其余原有字段
@@ -77,11 +77,24 @@ def _operation_times(obj: dict) -> dict[str, float]:
     return times
 
 
+# 旧字段名兼容读取：task_* 优先，缺省时回退到 content_*（历史数据集）
+_RICH_CONTENT_TIME_LEGACY = {
+    "task_start_time": "content_start_time",
+    "task_end_time": "content_end_time",
+}
+
+
 def _rich_content_times(obj: dict) -> dict[str, float]:
-    """读取富内容视频中回答内容的可选起止时间（单位：秒）。"""
+    """读取垂域视觉评测视频的可选任务起止时间（单位：秒）。
+
+    兼容旧的 ``content_start_time`` / ``content_end_time`` 字段：``task_*``
+    优先，仅在 ``task_*`` 缺省时回退读取旧字段。
+    """
     times: dict[str, float] = {}
-    for field in ("content_start_time", "content_end_time"):
+    for field in ("task_start_time", "task_end_time"):
         value = obj.get(field)
+        if value is None:
+            value = obj.get(_RICH_CONTENT_TIME_LEGACY[field])
         if value is None:
             continue
         if isinstance(value, bool) or not isinstance(value, Real):
@@ -92,10 +105,10 @@ def _rich_content_times(obj: dict) -> dict[str, float]:
         if normalized < 0:
             raise ValueError(f"{field} 不能小于 0")
         times[field] = normalized
-    start = times.get("content_start_time", 0.0)
-    end = times.get("content_end_time")
+    start = times.get("task_start_time", 0.0)
+    end = times.get("task_end_time")
     if end is not None and end <= start:
-        raise ValueError("content_end_time 必须大于 content_start_time")
+        raise ValueError("task_end_time 必须大于 task_start_time")
     return times
 
 

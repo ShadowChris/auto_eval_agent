@@ -16,6 +16,7 @@ from .prompts import (
     RICH_CONTENT_QUALITY_USER,
     RICH_CONTENT_SYSTEM,
     RICH_CONTENT_USER,
+    parse_analysis,
     parse_json_loose,
 )
 
@@ -329,5 +330,6 @@ class RichContentJudge:
             "tool_trace": reply.tool_trace,
             "truncated": reply.truncated,
             "judge_latency_ms": int((time.perf_counter() - started) * 1000),
+            "analysis": parse_analysis(reply.content),
         })
         return result

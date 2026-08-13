@@ -89,7 +89,7 @@
         </div>
         <p v-if="mode==='operation'" class="hint">示例：{"id":"op_001","query":"设置7点闹钟","context":"当前时间22:00","video_path":"data/videos/alarm.mp4","task_start_time":7,"task_end_time":28.5,"agent_statement":"已设置完成"}</p>
         <p v-if="mode==='compare'" class="hint">示例：{"id":"c001","query":"查询天气","context":"定位上海","video1":"./video_a.mp4","video2":"./video_b.mp4","context1":"产品A背景","answer1":"今天多云","context2":"产品B背景","answer2":"今天晴"}</p>
-        <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","content_start_time":0,"content_end_time":18.5}</p>
+        <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","task_start_time":0,"task_end_time":18.5}</p>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
       </div>
       <div v-if="mode!=='compare'" v-for="entry in pagedOpItems" :key="entry.item._uiKey" class="op-card"

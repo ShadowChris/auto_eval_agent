@@ -79,11 +79,11 @@ createApp({
       () =>
         ({
           single: "每行一题：query [||| @context: 背景] ||| answer [||| competitor] [||| reference]   （context 可选且视为可信前提）",
-          compare: "逐题导入 JSONL：id(可选)、query、context(可选)、video1、video2、context1/context2(可选)、answer1/answer2(可选)、content_start_time/content_end_time(可选，单位秒)",
+          compare: "逐题导入 JSONL：id(可选)、query、context(可选)、video1、video2、context1/context2(可选)、answer1/answer2(可选)、task_start_time/task_end_time(可选，单位秒)",
           online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
           operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
-          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/content_start_time/content_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
+          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
           rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域视觉评测相同。",
         }[mode.value])
     );
@@ -691,7 +691,7 @@ createApp({
 
     // —— 任务类（录屏）评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, contentStartTime: null, contentEndTime: null, sourceLine: null, sourceData: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, uploading: false, uploadError: "" };
     }
     function addOpItem() {
       opItems.value.push(newOpItem());
@@ -782,8 +782,6 @@ createApp({
             video2Path: item.video2 || "",
             taskStartTime: item.task_start_time ?? null,
             taskEndTime: item.task_end_time ?? null,
-            contentStartTime: item.content_start_time ?? null,
-            contentEndTime: item.content_end_time ?? null,
             sourceLine: item.source_line ?? null,
             sourceData: item.source_data || null,
           }));
@@ -869,8 +867,6 @@ createApp({
           }
           if (Number.isFinite(it.taskStartTime)) item.task_start_time = it.taskStartTime;
           if (Number.isFinite(it.taskEndTime)) item.task_end_time = it.taskEndTime;
-          if (Number.isFinite(it.contentStartTime)) item.content_start_time = it.contentStartTime;
-          if (Number.isFinite(it.contentEndTime)) item.content_end_time = it.contentEndTime;
           if (Number.isFinite(it.sourceLine)) item.source_line = it.sourceLine;
           if (it.sourceData) item.source_data = it.sourceData;
           return item;

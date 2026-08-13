@@ -23,7 +23,6 @@ from ..paths import PROJECT_ROOT, RUNS_DIR
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 _TASK_TIME_FIELDS = ("task_start_time", "task_end_time")
-_CONTENT_TIME_FIELDS = ("content_start_time", "content_end_time")
 
 
 def _safe_name(value: str, fallback: str) -> str:
@@ -162,7 +161,7 @@ def _rich_content_timing(
 ) -> tuple[dict, str]:
     """校验富内容视频时间窗，并构造专用抽帧配置和缓存键。"""
     supplied: dict[str, float] = {}
-    for field in _CONTENT_TIME_FIELDS:
+    for field in _TASK_TIME_FIELDS:
         value = item.get(field)
         if value is None:
             continue
@@ -178,10 +177,10 @@ def _rich_content_timing(
         supplied[field] = normalized
 
     extraction = profile.extraction
-    start = supplied.get("content_start_time", extraction.default_start_time)
-    end = supplied.get("content_end_time")
+    start = supplied.get("task_start_time", extraction.default_start_time)
+    end = supplied.get("task_end_time")
     if end is not None and end <= start:
-        raise ValueError("content_end_time 必须大于 content_start_time")
+        raise ValueError("task_end_time 必须大于 task_start_time")
 
     config = KeyframeConfig(
         task_start_time=start,
@@ -197,12 +196,14 @@ def _rich_content_timing(
         auto_task_end_confidence_threshold=2.0,
         final_dedup_rms_threshold=0.004,
         final_dedup_changed_fraction_threshold=0.004,
+        # 垂域视觉（问答视频）不需要开头/结尾受保护采样。
+        protected_sample_interval=0.0,
     )
     cache_payload = {
         "algorithm_version": extraction.algorithm_version,
         "config": {
-            "content_start_time": start,
-            "content_end_time": end,
+            "task_start_time": start,
+            "task_end_time": end,
             "max_frames": extraction.max_frames,
             "sample_fps": extraction.sample_fps,
             "scene_threshold": extraction.scene_threshold,
