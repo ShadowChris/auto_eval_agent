@@ -54,6 +54,29 @@ JSONL 路径。有警告的数据仍会保序输出，便于后续在评测结�
 python data/excel_to_jsonl_dataset.py --help
 ```
 
+## 从评估 Excel 提取失败补充集
+
+`data/excel_eval_failed_subset.py` 读取评估导出 Excel 的“逐题结果”，
+选出 `error` 非空且不是“视频文件不存在”的评估失败数据，
+再按 `item_id` 从原始 JSONL 中提取完整数据。输出保持原数据集顺序，
+可直接在 Web 端重新评估。
+
+```bash
+python data/excel_eval_failed_subset.py \
+  "/path/to/数据集_eval_xxx.xlsx" \
+  "data/path/原始数据集.jsonl"
+```
+
+未指定 `--output` 时，默认输出到原始 JSONL 同目录：
+
+```text
+<原数据集名>_补充.jsonl
+```
+
+可用 `--sheet` 指定工作表；可重复使用 `--exclude-error` 自定义
+需要排除的错误文本。脚本会校验所有失败 `item_id` 均存在于原始
+JSONL，避免因数据集版本不一致而静默丢数据。
+
 ## FFmpeg 抽帧环境验证
 
 ```bash

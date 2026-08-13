@@ -3,6 +3,7 @@
 核心字段映射：
 
 * id: ``<input_prefix>_<序号>``，例如 ``0730众测_simple_001``。
+* 序号: 保留源表序号，例如 ``simple_001``。
 * query/context/answer/task_start_time/task_end_time: 沿用原任务类转换规则。
 * video_path: ``<video_prefix>/[文件路径]/<原文件名>``，其中“文件路径”可选。
 * 未参与上述映射的输入列，按原列顺序平铺追加到每条 JSON 对象末尾。
@@ -435,6 +436,7 @@ def convert_table(
 
         item: dict[str, Any] = {
             "id": item_id,
+            SEQUENCE_COLUMN: sequence,
             "query": query,
             "context": _build_context(
                 row,

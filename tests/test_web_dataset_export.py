@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
 
+import pytest
+
 from auto_eval.web import history, server
 
 
@@ -358,3 +360,119 @@ def test_xlsx_export_filename_contains_dataset_time_and_short_task_id(monkeypatc
     encoded_name = disposition.split("filename*=UTF-8''", 1)[1]
     assert unquote(encoded_name) == expected
     disposition.encode("latin-1")
+
+
+def test_jsonl_export_keeps_source_fields_and_nests_evaluation(
+    tmp_path: Path,
+    monkeypatch,
+):
+    snapshot = _snapshot(tmp_path)
+    monkeypatch.setattr(history, "PROJECT_ROOT", tmp_path)
+    snapshot.update({
+        "session_name": "session-1",
+        "status": "running",
+        "created_at": 1_786_002_524.0,
+        "updated_at": 1_786_002_600.0,
+        "options": {
+            "judges": ["judge_2"],
+            "model": "my_agent",
+            "concurrency": 8,
+            "eval_timeout_s": 300,
+        },
+    })
+    snapshot["items"][0]["source_data"]["人工标签"] = "重点复核"
+
+    rows = history.jsonl_export_rows(snapshot)
+
+    assert len(rows) == 3
+    completed = rows[0]
+    assert completed["id"] == "op_1"
+    assert completed["人工标签"] == "重点复核"
+    assert completed["dataset_index"] == 1
+    assert completed["source_line"] == 3
+    assert completed["frames_dir"].endswith("001_op_1")
+    assert completed["evaluation"]["status"] == "completed"
+    assert completed["evaluation"]["correctness"] == "ok"
+    assert completed["evaluation"]["rubric"] == {"操作完成度": 5, "步骤正确性": 4}
+    assert completed["evaluation"]["rubric_reasons"]["操作完成度"] == "已打开设置"
+    assert "query" not in completed["evaluation"]
+    assert "item_id" not in completed["evaluation"]
+    assert "评估状态" not in completed["evaluation"]
+    assert "used_search" not in completed["evaluation"]
+    assert completed["eval_run"]["task_id"] == "task-1"
+    assert completed["eval_run"]["judges"] == ["judge_2"]
+
+    failed = rows[1]
+    assert failed["evaluation"]["status"] == "failed"
+    assert failed["evaluation"]["error"] == "provider failed"
+    assert failed["evaluation"]["correctness"] is None
+
+    pending = rows[2]
+    assert pending["evaluation"]["status"] == "pending"
+    assert pending["evaluation"]["issue_types"] == []
+    assert pending["evaluation"]["rubric"] == {}
+
+    encoded = history.rows_to_jsonl(rows)
+    assert len(encoded.splitlines()) == 3
+    assert json.loads(encoded.splitlines()[0])["人工标签"] == "重点复核"
+
+
+def test_jsonl_export_recovers_sequence_from_legacy_item_id(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    snapshot["items"][0]["id"] = "rom6.1_录屏_simple_001"
+    snapshot["items"][0]["source_data"]["id"] = "rom6.1_录屏_simple_001"
+    snapshot["results"][0]["item_id"] = "rom6.1_录屏_simple_001"
+
+    rows = history.jsonl_export_rows(snapshot)
+
+    assert rows[0]["序号"] == "simple_001"
+
+
+def test_jsonl_export_rejects_source_field_name_conflicts(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    snapshot["items"][0]["source_data"]["evaluation"] = {"人工标签": "nok"}
+
+    with pytest.raises(ValueError, match="保留字段.*evaluation"):
+        history.jsonl_export_rows(snapshot)
+
+
+def test_jsonl_export_api_uses_dataset_filename(monkeypatch):
+    created_at = 1_786_002_524.0
+    snapshot = {
+        "task_id": "91f98ac3d82d",
+        "dataset_name": "任务类_0726_v2_众测.jsonl",
+        "created_at": created_at,
+        "mode": "operation",
+        "status": "done",
+        "items": [{"id": "q1", "query": "打开设置"}],
+        "results": [{"index": 0, "item_id": "q1", "correctness": "ok"}],
+    }
+    monkeypatch.setattr(server, "get_task", lambda _: None)
+    monkeypatch.setattr(server, "load_snapshot", lambda _: snapshot)
+
+    response = server.api_export("91f98ac3d82d", "jsonl")
+
+    timestamp = datetime.fromtimestamp(created_at).strftime("%Y%m%d_%H%M%S")
+    disposition = response.headers["content-disposition"]
+    assert f'filename="eval_{timestamp}_91f98ac3.jsonl"' in disposition
+    encoded_name = disposition.split("filename*=UTF-8''", 1)[1]
+    assert unquote(encoded_name) == (
+        f"任务类_0726_v2_众测_eval_{timestamp}_91f98ac3.jsonl"
+    )
+
+
+def test_export_rejects_unknown_format_instead_of_returning_csv(monkeypatch):
+    snapshot = {
+        "task_id": "task-1",
+        "mode": "operation",
+        "items": [],
+        "results": [],
+    }
+    monkeypatch.setattr(server, "get_task", lambda _: None)
+    monkeypatch.setattr(server, "load_snapshot", lambda _: snapshot)
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server.api_export("task-1", "json-lines")
+
+    assert exc_info.value.status_code == 400
+    assert "json-lines" in str(exc_info.value.detail)

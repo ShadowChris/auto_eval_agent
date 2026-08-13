@@ -51,6 +51,7 @@ def test_convert_csv_to_ordered_operation_jsonl(tmp_path: Path):
         "V1_录屏0805_simple_001",
         "V1_录屏0805_simple_002",
     ]
+    assert [row["序号"] for row in exported] == ["simple_001", "simple_002"]
     assert exported[0]["query"] == "打开设置"
     assert exported[0]["answer"] == "已打开设置"
     assert exported[0]["context"] == (

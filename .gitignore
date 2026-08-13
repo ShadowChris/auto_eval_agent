@@ -11,6 +11,7 @@ data/
 !data/
 data/*
 !data/excel_to_jsonl_dataset.py
+!data/excel_eval_failed_subset.py
 test_tmp/
 
 # Python

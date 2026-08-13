@@ -1591,6 +1591,9 @@ createApp({
     function exportJson() {
       window.open(`/api/eval/${taskId.value}/export?format=json`);
     }
+    function exportJsonl() {
+      window.open(`/api/eval/${taskId.value}/export?format=jsonl`);
+    }
     function exportXlsx() {
       window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
     }
@@ -1644,7 +1647,7 @@ createApp({
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       isActiveHistoryStatus, historyStatusLabel,

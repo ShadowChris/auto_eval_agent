@@ -207,6 +207,196 @@ def snapshot_payload(data: dict) -> dict:
     }
 
 
+_JSONL_RESERVED_SOURCE_FIELDS = {
+    "dataset_index",
+    "source_line",
+    "frames_dir",
+    "evaluation",
+    "eval_run",
+}
+
+_JSONL_DUPLICATE_RESULT_FIELDS = {
+    "index",
+    "item_id",
+    "query",
+    "context",
+    "answer",
+    "has_video",
+    "category",
+    "category_display",
+    "category_source",
+    "评估状态",
+}
+
+_JSONL_INTERNAL_RESULT_FIELDS = {
+    "tool_trace",
+    "used_search",
+    "truncated",
+    "low_agreement",
+    "arbitrated",
+    "arbitrator_confidence",
+}
+
+_JSONL_EVALUATION_DEFAULTS: tuple[tuple[str, Any], ...] = (
+    ("task_type", None),
+    ("correctness", None),
+    ("issue_types", []),
+    ("is_low_level", None),
+    ("total", None),
+    ("rubric", {}),
+    ("rubric_reasons", {}),
+    ("na_dimensions", []),
+    ("rationale", ""),
+    ("latency_s", None),
+    ("video_prepare_warnings", []),
+)
+
+_LEGACY_SEQUENCE_RE = re.compile(
+    r"(?:^|_)((?:simple|complex)_\d+(?:_v\d+)?)$",
+    re.IGNORECASE,
+)
+
+
+def _jsonl_eval_run(snapshot: dict) -> dict:
+    options = snapshot.get("options") or {}
+    return {
+        "task_id": snapshot.get("task_id"),
+        "session_name": snapshot.get("session_name") or "",
+        "dataset_name": snapshot.get("dataset_name") or "",
+        "mode": snapshot.get("mode") or "",
+        "status": snapshot.get("status") or "",
+        "created_at": _format_ts(snapshot.get("created_at")),
+        "updated_at": _format_ts(snapshot.get("updated_at")),
+        "judges": list(options.get("judges") or []),
+        "visual_judge": options.get("visual_judge") or "",
+        "model": options.get("model") or "",
+        "concurrency": options.get("concurrency"),
+        "eval_timeout_s": options.get("eval_timeout_s"),
+    }
+
+
+def _jsonl_evaluation(
+    result: dict | None,
+    progress: dict,
+    task_status: str,
+) -> dict:
+    if result is not None:
+        status = "failed" if result.get("error") else "completed"
+    else:
+        progress_status = str(progress.get("status") or "")
+        if progress_status == "error":
+            status = "failed"
+        elif progress_status == "cancelled" or task_status == "cancelled":
+            status = "cancelled"
+        elif progress_status == "running":
+            status = "running"
+        else:
+            status = "pending"
+
+    error = (result or {}).get("error") or progress.get("error")
+    if not error and status == "failed":
+        error = progress.get("message") or "评估失败"
+    evaluation: dict[str, Any] = {
+        "status": status,
+        "error": error or None,
+    }
+    for key, default in _JSONL_EVALUATION_DEFAULTS:
+        value = (result or {}).get(key, default)
+        # 防止可变默认值被调用方意外共享修改。
+        evaluation[key] = dict(value) if isinstance(value, dict) else (
+            list(value) if isinstance(value, list) else value
+        )
+
+    excluded = _JSONL_DUPLICATE_RESULT_FIELDS | _JSONL_INTERNAL_RESULT_FIELDS
+    for key, value in (result or {}).items():
+        if key not in excluded and key not in evaluation and key != "error":
+            evaluation[key] = value
+    return evaluation
+
+
+def _jsonl_sequence(source: dict, item: dict, item_id: str) -> str:
+    """读取原始序号；兼容旧转换脚本只将序号拼入 id 的历史数据。"""
+    for value in (source.get("序号"), item.get("序号")):
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    match = _LEGACY_SEQUENCE_RE.search(item_id)
+    return match.group(1) if match else ""
+
+
+def jsonl_export_rows(snapshot: dict) -> list[dict]:
+    """生成一题一行的完整 JSONL 数据。
+
+    原始输入字段保留在第一层；系统评估结果和批跑元信息分别放入
+    ``evaluation`` 与 ``eval_run``，避免覆盖源数据自带的 status/error。
+    """
+    snapshot = _with_operation_compat(snapshot)
+    items = snapshot.get("items") or []
+    results = _results_with_identity(snapshot)
+    by_index: dict[int, dict] = {}
+    by_item_id: dict[str, dict] = {}
+    for result in results:
+        try:
+            index = int(result.get("index"))
+        except (TypeError, ValueError):
+            index = -1
+        if index >= 0:
+            by_index[index] = result
+        item_id = str(result.get("item_id") or "").strip()
+        if item_id:
+            by_item_id[item_id] = result
+
+    eval_run = _jsonl_eval_run(snapshot)
+    item_progress = snapshot.get("item_progress") or {}
+    rows: list[dict] = []
+    for index, item in enumerate(items):
+        source = _source_data_for_item(item)
+        conflicts = sorted(_JSONL_RESERVED_SOURCE_FIELDS.intersection(source))
+        if conflicts:
+            item_id = item.get("id") or f"q{index}"
+            raise ValueError(
+                f"数据 {item_id} 包含 JSONL 导出保留字段：{', '.join(conflicts)}"
+            )
+
+        row = dict(source)
+        item_id = str(item.get("id") or row.get("id") or f"q{index}")
+        row.setdefault("id", item_id)
+        sequence = _jsonl_sequence(source, item, item_id)
+        if sequence:
+            row.setdefault("序号", sequence)
+        row.setdefault("query", item.get("query") or item.get("question") or "")
+        if item.get("context") is not None:
+            row.setdefault("context", item.get("context"))
+        if item.get("answer") is not None:
+            row.setdefault("answer", item.get("answer"))
+        if item.get("video_path") is not None:
+            row.setdefault("video_path", _project_relative_path(item.get("video_path")))
+
+        frames = [Path(str(path)) for path in (item.get("frames") or [])]
+        frames_dir = _project_relative_path(frames[0].parent) if frames else ""
+        result = by_index.get(index) or by_item_id.get(item_id)
+        progress = item_progress.get(str(index)) or item_progress.get(index) or {}
+        row.update({
+            "dataset_index": index + 1,
+            "source_line": item.get("source_line") or index + 1,
+            "frames_dir": frames_dir,
+            "evaluation": _jsonl_evaluation(
+                result,
+                progress,
+                str(snapshot.get("status") or ""),
+            ),
+            "eval_run": dict(eval_run),
+        })
+        rows.append(row)
+    return rows
+
+
+def rows_to_jsonl(rows: list[dict]) -> str:
+    return "".join(
+        json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
+        for row in rows
+    )
+
+
 def _with_operation_compat(data: dict) -> dict:
     """按读取时兼容旧任务判定，不修改磁盘上的历史快照。"""
     if data.get("mode") != "operation":

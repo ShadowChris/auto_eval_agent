@@ -28,10 +28,12 @@ from .history import (
     build_xlsx,
     delete_snapshot,
     export_rows,
+    jsonl_export_rows,
     list_snapshots,
     load_item_judge_calls,
     load_snapshot,
     rows_to_csv,
+    rows_to_jsonl,
     save_task,
     snapshot_payload,
     task_to_snapshot,
@@ -477,8 +479,12 @@ def _download_stem(value: str, fallback: str) -> str:
     return safe[:120] or fallback
 
 
-def _xlsx_download_names(data: dict, task_id: str) -> tuple[str, str]:
-    """返回 XLSX 的 ASCII 回退文件名和 UTF-8 完整文件名。"""
+def _eval_download_names(
+    data: dict,
+    task_id: str,
+    extension: str,
+) -> tuple[str, str]:
+    """返回评估导出的 ASCII 回退文件名和 UTF-8 完整文件名。"""
     raw_dataset_name = str(data.get("dataset_name") or "").replace("\\", "/")
     dataset_stem = Path(raw_dataset_name).stem if raw_dataset_name else ""
     safe_dataset = _download_stem(dataset_stem, "")[:80]
@@ -490,7 +496,7 @@ def _xlsx_download_names(data: dict, task_id: str) -> tuple[str, str]:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     short_task_id = _download_stem(str(task_id), "task")[:8]
-    suffix = f"eval_{timestamp}_{short_task_id}.xlsx"
+    suffix = f"eval_{timestamp}_{short_task_id}.{extension.lstrip('.')}"
     utf8_name = f"{safe_dataset}_{suffix}" if safe_dataset else suffix
     ascii_name = suffix
     return ascii_name, utf8_name
@@ -506,9 +512,26 @@ def api_export(task_id: str, format: str = "json"):
     if format == "json":
         return JSONResponse(snapshot_payload(data))
 
+    if format == "jsonl":
+        try:
+            content = rows_to_jsonl(jsonl_export_rows(data))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        ascii_name, utf8_name = _eval_download_names(data, task_id, "jsonl")
+        return StreamingResponse(
+            iter([content.encode("utf-8")]),
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+                ),
+            },
+        )
+
     if format == "xlsx":
         content = build_xlsx(data, cfg())
-        ascii_name, utf8_name = _xlsx_download_names(data, task_id)
+        ascii_name, utf8_name = _eval_download_names(data, task_id, "xlsx")
         return Response(
             content,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -537,13 +560,16 @@ def api_export(task_id: str, format: str = "json"):
             background=BackgroundTask(archive_path.unlink, missing_ok=True),
         )
 
-    sheets = export_rows(data, cfg())
-    csv_text = rows_to_csv(sheets.get("逐题结果") or [])
-    return StreamingResponse(
-        iter([csv_text.encode("utf-8-sig")]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.csv"},
-    )
+    if format == "csv":
+        sheets = export_rows(data, cfg())
+        csv_text = rows_to_csv(sheets.get("逐题结果") or [])
+        return StreamingResponse(
+            iter([csv_text.encode("utf-8-sig")]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=eval_{task_id}.csv"},
+        )
+
+    raise HTTPException(400, f"不支持的导出格式：{format}")
 
 
 @app.get("/api/eval/{task_id}/items/{item_index}/export")
