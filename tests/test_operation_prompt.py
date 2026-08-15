@@ -54,6 +54,9 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
         "no_support",
         "others",
     ]
+    assert operation.operation_policy.issue_types[
+        "录屏Query无法与输入Query一致核验"
+    ].allowed_correctness == ["others"]
     assert operation.rubrics[0].score_anchors[5].startswith(
         "整个 query 的所有生效目标完整闭环"
     )
@@ -79,6 +82,18 @@ def test_operation_prompt_uses_new_whole_query_decision_policy() -> None:
     assert "所有生效目标完成或正确跳过时判 ok" in prompt
     assert '"correctness": "ok|nok|no_support|others"' in prompt
     assert '"correctness": "right|wrong|partial|unclear"' not in prompt
+
+
+def test_operation_prompt_applies_query_alignment_gate_before_execution() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "【Query 一致性门禁】" in prompt
+    assert "录屏Query无法与输入Query一致核验" in prompt
+    assert "未展示完整、被遮挡、模糊、无法辨认" in prompt
+    assert "不进行同义改写推断" in prompt
+    assert "任务执行面板的规划或步骤、工具调用文字、agent 回复都不能代替" in prompt
+    assert "所有维度和总分填 null" in prompt
+    assert "停止后续任务执行评判" in prompt
 
 
 def test_operation_prompt_keeps_response_quality_issues_separate_from_correctness() -> None:
@@ -520,6 +535,13 @@ def test_operation_output_fields_are_normalized() -> None:
         "simple",
         allowed,
     ) == ("no_support", ["待用户澄清", "内部过程信息泄露"], "no")
+    assert normalize_operation_fields(
+        "nok",
+        ["录屏Query未完整展示", "应执行目标未执行"],
+        "yes",
+        "simple",
+        allowed,
+    ) == ("others", ["录屏Query无法与输入Query一致核验"], "no")
 
 
 def test_legacy_operation_results_map_at_read_time() -> None:

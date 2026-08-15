@@ -123,6 +123,32 @@ def test_aggregate_operation_all_na_keeps_total_empty():
     assert verdict.na_dimensions == ["操作完成度"]
 
 
+def test_aggregate_operation_query_alignment_issue_clears_scores():
+    dims = [
+        RubricDim(name="操作完成度", description="d", scale=5),
+        RubricDim(name="步骤正确性", description="d", scale=5),
+    ]
+    scores = [
+        OperationSingleScore(
+            item_id="i",
+            model="m",
+            judge="j1",
+            rubric={"操作完成度": 2, "步骤正确性": 3},
+            total=2.5,
+            task_type="simple",
+            correctness="others",
+            issue_types=["录屏Query无法与输入Query一致核验"],
+        )
+    ]
+
+    verdict = aggregate_operation_scores(scores, dims, EnsembleConfig(), 0.6)
+
+    assert verdict.rubric == {}
+    assert verdict.rubric_reasons == {}
+    assert verdict.na_dimensions == ["操作完成度", "步骤正确性"]
+    assert verdict.total is None
+
+
 def test_aggregate_pairs_winrate():
     # 3 个已归一化的比较：A 胜 2 次，B 胜 1 次
     pairs = [

@@ -16,7 +16,11 @@ from ..schema import EvalItem, OperationSingleScore, SingleScore
 
 logger = logging.getLogger("auto_eval.classify")
 from .base import JudgeClient, JudgeOutputParseError
-from .operation_fields import hoist_misnested_operation_fields, normalize_operation_fields
+from .operation_fields import (
+    QUERY_ALIGNMENT_ISSUE,
+    hoist_misnested_operation_fields,
+    normalize_operation_fields,
+)
 from .prompts import (
     OPERATION_SYSTEM,
     OPERATION_USER,
@@ -257,6 +261,11 @@ class RubricJudge:
                 task_type,
                 policy.issue_types if policy else None,
             )
+            if QUERY_ALIGNMENT_ISSUE in issue_types:
+                rubric = {}
+                rubric_reasons = {}
+                na_dimensions = [dim.name for dim in dims]
+                total = None
             return OperationSingleScore(
                 item_id=item.id,
                 model=model_name,

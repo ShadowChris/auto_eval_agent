@@ -15,7 +15,7 @@ from ..schema import (
     SingleScore,
     Verdict,
 )
-from .operation_fields import primary_operation_issue_types
+from .operation_fields import QUERY_ALIGNMENT_ISSUE, primary_operation_issue_types
 
 _rng = np.random.default_rng(20240622)
 
@@ -239,6 +239,12 @@ def aggregate_operation_scores(
         ]
         if parts:
             rubric_reasons[key] = " | ".join(parts[:3])
+
+    if QUERY_ALIGNMENT_ISSUE in issue_types:
+        rubric_mean = {}
+        rubric_reasons = {}
+        na_consensus = [dim.name for dim in dims]
+        total = None
 
     return OperationVerdict(
         item_id=scores[0].item_id,

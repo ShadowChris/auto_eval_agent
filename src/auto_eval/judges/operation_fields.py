@@ -7,6 +7,7 @@ from typing import Any
 from ..schema import OperationCorrectness
 
 _VALID_CORRECTNESS = {"ok", "nok", "no_support", "others"}
+QUERY_ALIGNMENT_ISSUE = "录屏Query无法与输入Query一致核验"
 _LEGACY_CORRECTNESS = {
     "right": "ok",
     "partial": "ok",
@@ -64,6 +65,9 @@ _ALIASES = {
     "录屏证据缺失": "录屏数据不完整",
     "无验证结果": "未展示可验证结果",
     "证据冲突": "评测证据冲突",
+    "录屏Query与输入Query不一致": QUERY_ALIGNMENT_ISSUE,
+    "录屏Query未完整展示": QUERY_ALIGNMENT_ISSUE,
+    "录屏未展示Query": QUERY_ALIGNMENT_ISSUE,
     "未归因": "其他执行问题",
     "其他不可评估原因": "其他未归类情况",
 }
@@ -197,6 +201,11 @@ def normalize_operation_fields(
     """规范 correctness、中文问题数组和低级错误标识。"""
     normalized_correctness = normalize_operation_correctness(correctness, issue_types)
     issues = _as_issue_list(issue_types)
+
+    # Query 对齐是评测输入门禁，而非 agent 执行问题。命中后不再混入
+    # 其他执行归因，确保下游可以稳定筛出配对异常样本。
+    if QUERY_ALIGNMENT_ISSUE in issues:
+        return "others", [QUERY_ALIGNMENT_ISSUE], "no"
 
     # 新标准：仅缺少结果证据属于评测侧无法确认，主判 others；如果同一复杂
     # 任务还存在独立的可归责错误，则保留 nok，并把证据不足作为次要问题。

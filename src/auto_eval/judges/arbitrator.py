@@ -10,7 +10,11 @@ from datetime import datetime
 from ..schema import EvalItem, OperationSingleScore, SingleScore
 from ..expert_knowledge import render_expert_knowledge
 from .base import JudgeClient, JudgeOutputParseError
-from .operation_fields import hoist_misnested_operation_fields, normalize_operation_fields
+from .operation_fields import (
+    QUERY_ALIGNMENT_ISSUE,
+    hoist_misnested_operation_fields,
+    normalize_operation_fields,
+)
 from .prompts import (
     ARBITRATOR_SYSTEM,
     ARBITRATOR_USER,
@@ -107,6 +111,9 @@ class Arbitrator:
                 task_type,
                 policy.issue_types if policy else None,
             )
+            if QUERY_ALIGNMENT_ISSUE in issue_types:
+                rubric = {}
+                total = None
             return {
                 "task_type": task_type,
                 "correctness": correctness,
