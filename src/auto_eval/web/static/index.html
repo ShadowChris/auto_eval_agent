@@ -36,7 +36,7 @@
   </div>
 
   <details class="history-section">
-    <summary>历史记录（{{ historyItems.length }}）<button @click.stop="loadHistory" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
+    <summary>历史记录（{{ historyTotal }}）<button @click.stop="loadHistory" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
     <p class="hint">批跑由服务端持续执行，刷新页面后可从这里加载实时进度；服务进程重启或手动中断时会保留已完成的题目。</p>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
@@ -50,7 +50,10 @@
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
             <td>{{ h.preview }}</td>
             <td style="white-space:nowrap">
-              <button @click="loadHistoryTask(h.task_id)">加载</button>
+              <button
+                @click="loadHistoryTask(h.task_id)"
+                :disabled="loadingHistoryTaskId===h.task_id"
+              >{{ loadingHistoryTaskId===h.task_id ? '加载中…' : '加载' }}</button>
               <button v-if="isActiveHistoryStatus(h.status)" @click="cancelHistoryTask(h)" class="btn-warning">中断</button>
               <button @click="delHistory(h.task_id)" class="btn-danger" :disabled="isActiveHistoryStatus(h.status)">删除</button>
             </td>

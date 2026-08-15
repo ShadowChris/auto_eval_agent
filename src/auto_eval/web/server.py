@@ -13,11 +13,12 @@ from typing import Literal
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
+from starlette.middleware.gzip import GZipMiddleware
 
 from ..config import ExpertKnowledgeBase, load_config
 from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
@@ -30,6 +31,7 @@ from .history import (
     export_rows,
     jsonl_export_rows,
     list_snapshots,
+    list_snapshots_page,
     load_item_judge_calls,
     load_snapshot,
     rows_to_csv,
@@ -56,6 +58,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 load_dotenv(BASE_DIR / ".env", override=True)  # 注入 .env 的 key；以 .env 为准覆盖旧 shell 环境变量
 
 app = FastAPI(title="auto_eval 评估台")
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 _state: dict = {}
 
 
@@ -146,8 +149,9 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
         )
 
 
-def _sse(event: str, data) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+def _sse(event: str, data, *, event_id: int | None = None) -> str:
+    id_line = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{id_line}event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @app.get("/api/config")
@@ -323,11 +327,23 @@ async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation
 
 
 @app.get("/api/eval/{task_id}/stream")
-async def api_stream(task_id: str):
+async def api_stream(
+    task_id: str,
+    after: int | None = None,
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+):
     task = get_task(task_id)
     if not task:
         raise HTTPException(404, "task not found")
     event_queue = task.subscribe()
+
+    header_cursor: int | None = None
+    try:
+        header_cursor = int(last_event_id) if last_event_id else None
+    except (TypeError, ValueError):
+        header_cursor = None
+    cursors = [cursor for cursor in (after, header_cursor) if cursor is not None]
+    replay_after = max(cursors) if cursors else None
 
     async def event_gen():
         try:
@@ -342,45 +358,110 @@ async def api_stream(task_id: str):
                     "error": task.error,
                 },
             )
-            # 回放有界事件历史，供刷新/重新加载后恢复当前页面状态。
-            for item_events in list(task.progress_events.values()):
-                for progress_event in item_events:
-                    yield _sse("progress_event", progress_event)
-            for progress_item in list(task.item_progress.values()):
-                yield _sse("item_progress", progress_item)
-            for result in list(task.results):
-                yield _sse(
-                    "result",
-                    {
-                        "progress": max(task.done_total, len(task.results)),
-                        "total": len(task.items),
-                        "result": result,
-                    },
-                )
-            if task.status == "done":
-                yield _sse("done", {"summary": task.summary, "total": len(task.items)})
-                return
-            if task.status == "error":
-                yield _sse("error", {"message": task.error})
-                return
-            if task.status == "cancelled":
-                yield _sse("cancelled", {"message": task.error or "任务已中断"})
+            delivered_cursor = max(0, replay_after or 0)
+            terminal_replayed = False
+            if replay_after is None:
+                # 兼容旧客户端：没有事件游标时仍回放完整页面状态。
+                for item_events in list(task.progress_events.values()):
+                    for progress_event in item_events:
+                        yield _sse("progress_event", progress_event)
+                for progress_item in list(task.item_progress.values()):
+                    yield _sse("item_progress", progress_item)
+                for result in list(task.results):
+                    yield _sse(
+                        "result",
+                        {
+                            "progress": max(task.done_total, len(task.results)),
+                            "total": len(task.items),
+                            "result": result,
+                        },
+                    )
+            else:
+                # 新页面先加载快照，SSE 只补发快照游标之后的增量事件。
+                # 先订阅再复制日志，队列中的重复事件由 cursor 去重。
+                for message in list(task.event_log):
+                    cursor = int(message.get("cursor") or 0)
+                    if cursor <= delivered_cursor:
+                        continue
+                    yield _sse(
+                        message["event"],
+                        message["data"],
+                        event_id=cursor,
+                    )
+                    delivered_cursor = cursor
+                    terminal_replayed = message["event"] in {
+                        "done", "error", "cancelled",
+                    }
+
+            if task.status in {"done", "error", "cancelled"}:
+                if not terminal_replayed:
+                    if task.status == "done":
+                        yield _sse(
+                            "done",
+                            {"summary": task.summary, "total": len(task.items)},
+                            event_id=task.event_cursor or None,
+                        )
+                    elif task.status == "error":
+                        yield _sse(
+                            "error",
+                            {"message": task.error},
+                            event_id=task.event_cursor or None,
+                        )
+                    else:
+                        yield _sse(
+                            "cancelled",
+                            {"message": task.error or "任务已中断"},
+                            event_id=task.event_cursor or None,
+                        )
                 return
             # 每个 SSE 连接使用独立队列，刷新或多标签页不会互相抢事件。
             while True:
-                msg = await event_queue.get()
-                yield _sse(msg["event"], msg["data"])
+                try:
+                    msg = await asyncio.wait_for(event_queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # 注释心跳不会触发前端事件，但可防止端口转发/代理断开空闲流。
+                    yield ": keep-alive\n\n"
+                    continue
+                cursor = int(msg.get("cursor") or 0)
+                if cursor and cursor <= delivered_cursor:
+                    continue
+                yield _sse(
+                    msg["event"],
+                    msg["data"],
+                    event_id=cursor or None,
+                )
+                delivered_cursor = max(delivered_cursor, cursor)
                 if msg["event"] in ("done", "error", "cancelled"):
                     break
         finally:
             task.unsubscribe(event_queue)
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/api/history")
-def api_history(limit: int = 50):
-    rows = list_snapshots(limit=limit)
+def api_history(
+    limit: int = 50,
+    page: int | None = None,
+    page_size: int | None = None,
+):
+    if page_size is not None:
+        safe_page = max(1, int(page or 1))
+        safe_size = max(1, min(int(page_size), 100))
+        rows, history_total = list_snapshots_page(safe_page, safe_size)
+        response_page_size = safe_size
+    else:
+        rows = list_snapshots(limit=limit)
+        history_total = len(rows)
+        response_page_size = len(rows)
     for row in rows:
         live = get_live_task(str(row.get("task_id") or ""))
         if live is None:
@@ -391,18 +472,28 @@ def api_history(limit: int = 50):
             "done": max(live.done_total, len(live.results)),
             "error": live.error,
         })
-    return {"items": rows}
+    return {
+        "items": rows,
+        "total": history_total,
+        "page": max(1, int(page or 1)),
+        "page_size": response_page_size,
+    }
 
 
 @app.get("/api/history/{task_id}")
-def api_history_detail(task_id: str):
+def api_history_detail(task_id: str, compact: bool = False):
     task = get_task(task_id)
     if task:
-        return snapshot_payload(task_to_snapshot(task))
+        # 先读游标再构建快照：两者之间产生的事件最多重复，
+        # 不会因游标超前而丢失。
+        event_cursor = task.event_cursor
+        payload = snapshot_payload(task_to_snapshot(task), compact=compact)
+        payload["event_cursor"] = event_cursor
+        return payload
     data = load_snapshot(task_id)
     if not data:
         raise HTTPException(404, "task not found")
-    return snapshot_payload(data)
+    return snapshot_payload(data, compact=compact)
 
 
 @app.delete("/api/history/{task_id}")

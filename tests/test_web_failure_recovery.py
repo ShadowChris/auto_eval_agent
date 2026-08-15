@@ -96,6 +96,24 @@ def test_save_task_failure_is_non_fatal_and_cleans_temp_files(tmp_path, monkeypa
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_runner_snapshot_persistence_is_throttled_but_forceable(monkeypatch):
+    task = Task(id="persist-throttle", mode="single", items=[], options={})
+    saved: list[str] = []
+    times = iter([10.0, 10.2, 10.3])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        runner,
+        "save_task",
+        lambda current: saved.append(current.id) or True,
+    )
+
+    assert runner._persist_task(task) is True
+    assert runner._persist_task(task) is True
+    assert runner._persist_task(task, force=True) is True
+
+    assert saved == [task.id, task.id]
+
+
 def test_progress_history_is_bounded_and_keeps_multi_judge_events():
     task = Task(id="multi-progress", mode="single", items=[], options={})
 
@@ -180,6 +198,39 @@ def test_running_snapshot_exposes_explicit_total_progress():
     assert payload["total"] == 3
 
 
+def test_compact_snapshot_omits_heavy_item_media_and_limits_progress_events():
+    task = Task(
+        id="compact-history",
+        mode="operation",
+        items=[{
+            "id": "q1",
+            "query": "打开设置",
+            "context": "背景",
+            "video_path": "/large/video.mp4",
+            "frames": [f"frame-{index}.jpg" for index in range(30)],
+            "source_data": {"大字段": "x" * 1000},
+        }],
+        options={},
+        event_cursor=42,
+        progress_events={
+            "0": [
+                {"item_index": 0, "sequence": index}
+                for index in range(30)
+            ],
+        },
+    )
+
+    payload = history.snapshot_payload(
+        history.task_to_snapshot(task),
+        compact=True,
+    )
+
+    assert payload["items"] == [{"id": "q1", "query": "打开设置", "context": "背景"}]
+    assert len(payload["progress_events"]["0"]) == 2
+    assert payload["progress_events"]["0"][0]["sequence"] == 28
+    assert payload["event_cursor"] == 42
+
+
 @pytest.mark.asyncio
 async def test_stream_replays_task_level_progress_before_item_events(monkeypatch):
     task = Task(
@@ -202,6 +253,40 @@ async def test_stream_replays_task_level_progress_before_item_events(monkeypatch
     assert '"status": "running"' in text
     assert '"progress": 1' in text
     assert '"total": 10' in text
+
+
+@pytest.mark.asyncio
+async def test_stream_with_cursor_only_replays_incremental_events(monkeypatch):
+    task = Task(
+        id="stream-cursor",
+        mode="operation",
+        items=[{"query": "q0"}],
+        options={},
+        status="running",
+    )
+    task.publish_nowait("progress_event", {"item_index": 0, "sequence": 1})
+    task.publish_nowait("item_progress", {"item_index": 0, "sequence": 2})
+    task.publish_nowait("result", {
+        "progress": 1,
+        "total": 1,
+        "result": {"index": 0, "query": "q0"},
+    })
+    monkeypatch.setattr(server, "get_task", lambda _: task)
+
+    response = await server.api_stream(task.id, after=2, last_event_id=None)
+    state_chunk = await anext(response.body_iterator)
+    result_chunk = await anext(response.body_iterator)
+    await response.body_iterator.aclose()
+    state_text = state_chunk.decode() if isinstance(state_chunk, bytes) else state_chunk
+    result_text = result_chunk.decode() if isinstance(result_chunk, bytes) else result_chunk
+
+    assert "event: task_state" in state_text
+    assert "event: progress_event" not in result_text
+    assert "event: item_progress" not in result_text
+    assert "id: 3" in result_text
+    assert "event: result" in result_text
+    assert response.headers["cache-control"] == "no-cache, no-transform"
+    assert response.headers["x-accel-buffering"] == "no"
 
 
 def test_eval_error_keeps_original_and_repaired_model_outputs(tmp_path, monkeypatch):
@@ -416,11 +501,15 @@ async def test_task_events_are_broadcast_to_each_sse_subscriber():
     assert await first.get() == {
         "event": "item_progress",
         "data": {"item_index": 0, "percent": 20},
+        "cursor": 1,
     }
     assert await second.get() == {
         "event": "item_progress",
         "data": {"item_index": 0, "percent": 20},
+        "cursor": 1,
     }
+    assert task.event_cursor == 1
+    assert task.event_log[-1]["cursor"] == 1
     task.unsubscribe(first)
     task.unsubscribe(second)
     assert not task.subscribers
@@ -488,3 +577,24 @@ def test_history_api_keeps_live_running_status(monkeypatch):
     assert row["status"] == "running"
     assert row["done"] == 1
     assert row["error"] is None
+
+
+def test_history_api_returns_server_paginated_total(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "list_snapshots_page",
+        lambda page, page_size: ([{
+            "task_id": "page-task",
+            "status": "done",
+            "done": 1,
+            "total": 1,
+        }], 37),
+    )
+    monkeypatch.setattr(server, "get_live_task", lambda _: None)
+
+    payload = server.api_history(page=2, page_size=10)
+
+    assert payload["total"] == 37
+    assert payload["page"] == 2
+    assert payload["page_size"] == 10
+    assert payload["items"][0]["task_id"] == "page-task"

@@ -69,6 +69,8 @@ createApp({
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
+    const loadingHistoryTaskId = ref("");
+    const historyTotal = ref(0);
     const historyPage = ref(1);
     const historyPageSize = ref(10);
     const historyJumpPage = ref("");
@@ -83,6 +85,8 @@ createApp({
     let tooltipHideTimer = null;
     let progressClockTimer = null;
     let activeEventSource = null;
+    let historyTaskLoadController = null;
+    const eventCursor = ref(0);
     const pageSize = 10;
     const opPageSize = 10;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
@@ -140,10 +144,13 @@ createApp({
       }));
     });
 
-    const progressRows = computed(() =>
-      items.value.map((item, index) => {
+    const progressRows = computed(() => {
+      const resultByIndex = new Map(
+        results.value.map((entry) => [Number(entry.index), entry]),
+      );
+      return items.value.map((item, index) => {
         const current = itemProgress.value[index] || {};
-        const result = results.value.find((entry) => entry.index === index);
+        const result = resultByIndex.get(index);
         const events = progressEvents.value[index] || [];
         const startedAt = Number(current.started_at || 0);
         const finishedAt = Number(current.finished_at || 0);
@@ -169,8 +176,8 @@ createApp({
           events,
           latestEvents: events.slice(-2),
         };
-      })
-    );
+      });
+    });
     const progressPageCount = computed(() => Math.max(1, Math.ceil(progressRows.value.length / pageSize)));
     const pagedProgressRows = computed(() => {
       const page = Math.min(progressPage.value, progressPageCount.value);
@@ -178,13 +185,9 @@ createApp({
       return progressRows.value.slice(start, start + pageSize);
     });
     const historyPageCount = computed(
-      () => Math.max(1, Math.ceil(historyItems.value.length / historyPageSize.value)),
+      () => Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value)),
     );
-    const pagedHistoryItems = computed(() => {
-      const page = Math.min(historyPage.value, historyPageCount.value);
-      const start = (page - 1) * historyPageSize.value;
-      return historyItems.value.slice(start, start + historyPageSize.value);
-    });
+    const pagedHistoryItems = computed(() => historyItems.value);
     const skillOverviewRows = computed(() => summary.value?.by_skill?.overview || []);
     const selectedKnowledgeCategory = computed(() =>
       knowledgeDraft.value.categories.find((category) => category.key === knowledgeCategoryKey.value)
@@ -381,17 +384,42 @@ createApp({
       };
     }
 
-    function appendProgressEvent(incoming) {
-      const index = incoming.item_index;
-      if (index == null) return;
-      const previous = progressEvents.value[index] || [];
-      const eventKey = incoming.sequence != null
+    function progressEventKey(incoming) {
+      return incoming.sequence != null
         ? `seq:${incoming.sequence}`
         : [
             incoming.updated_at, incoming.module, incoming.event,
             incoming.judge, incoming.round, incoming.message,
           ].join("|");
-      if (previous.some((entry) => entry._key === eventKey)) return;
+    }
+
+    function normalizeProgressEvents(rawEvents) {
+      return Object.fromEntries(
+        Object.entries(rawEvents || {}).map(([index, events]) => [
+          index,
+          (Array.isArray(events) ? events : []).map((event) => ({
+            ...event,
+            _key: event._key || progressEventKey(event),
+          })),
+        ]),
+      );
+    }
+
+    function appendProgressEvent(incoming) {
+      const index = incoming.item_index;
+      if (index == null) return;
+      const previous = progressEvents.value[index] || [];
+      const eventKey = progressEventKey(incoming);
+      if (previous.some((entry) => {
+        if (incoming.sequence != null && entry.sequence != null) {
+          return Number(entry.sequence) === Number(incoming.sequence);
+        }
+        const previousKey = entry._key || [
+          entry.updated_at, entry.module, entry.event,
+          entry.judge, entry.round, entry.message,
+        ].join("|");
+        return previousKey === eventKey;
+      })) return;
       progressEvents.value = {
         ...progressEvents.value,
         [index]: [...previous, { ...incoming, _key: eventKey }].slice(-100),
@@ -781,8 +809,11 @@ createApp({
       const [pageRef, countRef, jumpRef] = config;
       const page = Math.trunc(Number(requestedPage));
       if (!Number.isFinite(page)) return;
-      pageRef.value = Math.min(countRef.value, Math.max(1, page));
+      const nextPage = Math.min(countRef.value, Math.max(1, page));
+      const changed = pageRef.value !== nextPage;
+      pageRef.value = nextPage;
       jumpRef.value = "";
+      if (kind === "history" && changed) loadHistory();
     }
 
     function changePage(delta) {
@@ -821,6 +852,7 @@ createApp({
       if (![10, 20, 50].includes(historyPageSize.value)) historyPageSize.value = 10;
       historyPage.value = 1;
       historyJumpPage.value = "";
+      loadHistory();
     }
 
     function trunc(v) {
@@ -876,6 +908,7 @@ createApp({
       resultPage.value = 1;
       progressPage.value = 1;
       runError.value = "";
+      eventCursor.value = 0;
     }
 
     function switchMode(k) {
@@ -1141,6 +1174,7 @@ createApp({
         return;
       }
       taskId.value = d.task_id;
+      eventCursor.value = 0;
       loadHistory();
       connectSSE();
     }
@@ -1154,7 +1188,9 @@ createApp({
       const snapshotResults = snapshot?.results || results.value;
       const resultByIndex = new Map(snapshotResults.map((entry) => [entry.index, entry]));
       const snapshotProgress = snapshot?.item_progress || {};
-      progressEvents.value = snapshot?.progress_events || progressEvents.value;
+      progressEvents.value = snapshot?.progress_events
+        ? normalizeProgressEvents(snapshot.progress_events)
+        : progressEvents.value;
       const reconciled = {};
       items.value.forEach((item, index) => {
         const previous = itemProgress.value[index] || {};
@@ -1191,10 +1227,20 @@ createApp({
       disconnectSSE();
       const connectedTaskId = taskId.value;
       if (!connectedTaskId) return;
-      const es = new EventSource(`/api/eval/${connectedTaskId}/stream`);
+      const after = Math.max(0, Number(eventCursor.value) || 0);
+      const es = new EventSource(
+        `/api/eval/${connectedTaskId}/stream?after=${encodeURIComponent(after)}`,
+      );
       activeEventSource = es;
+      const rememberCursor = (event) => {
+        const cursor = Number(event.lastEventId);
+        if (Number.isFinite(cursor) && cursor > eventCursor.value) {
+          eventCursor.value = cursor;
+        }
+      };
       es.addEventListener("task_state", (e) => {
         if (taskId.value !== connectedTaskId) return;
+        rememberCursor(e);
         const d = JSON.parse(e.data);
         total.value = Number.isFinite(Number(d.total)) ? Number(d.total) : total.value;
         progress.value = Number.isFinite(Number(d.progress)) ? Number(d.progress) : progress.value;
@@ -1202,15 +1248,18 @@ createApp({
       });
       es.addEventListener("item_progress", (e) => {
         if (taskId.value !== connectedTaskId) return;
+        rememberCursor(e);
         const d = JSON.parse(e.data);
         mergeItemProgress(d);
       });
       es.addEventListener("progress_event", (e) => {
         if (taskId.value !== connectedTaskId) return;
+        rememberCursor(e);
         appendProgressEvent(JSON.parse(e.data));
       });
       es.addEventListener("result", (e) => {
         if (taskId.value !== connectedTaskId) return;
+        rememberCursor(e);
         const d = JSON.parse(e.data);
         const existing = results.value.findIndex((entry) => entry.index === d.result.index);
         if (existing >= 0) {
@@ -1235,8 +1284,9 @@ createApp({
           };
         }
       });
-      es.addEventListener("done", async () => {
+      es.addEventListener("done", async (e) => {
         if (taskId.value !== connectedTaskId) return;
+        rememberCursor(e);
         running.value = false;
         es.close();
         if (activeEventSource === es) activeEventSource = null;
@@ -1247,6 +1297,7 @@ createApp({
         if (taskId.value !== connectedTaskId) return;
         // 原生 EventSource 网络错误没有 data，让浏览器按协议自动重连并回放状态。
         if (!e.data) return;
+        rememberCursor(e);
         let message = "未知错误";
         try {
           const d = JSON.parse(e.data);
@@ -1261,6 +1312,7 @@ createApp({
       });
       es.addEventListener("cancelled", async (e) => {
         if (taskId.value !== connectedTaskId) return;
+        rememberCursor(e);
         let message = "任务已中断";
         try {
           message = JSON.parse(e.data).message || message;
@@ -1451,15 +1503,25 @@ createApp({
     async function loadHistory() {
       loadingHistory.value = true;
       try {
-        const r = await fetch("/api/history?limit=0");
+        const params = new URLSearchParams({
+          page: String(historyPage.value),
+          page_size: String(historyPageSize.value),
+        });
+        const r = await fetch(`/api/history?${params}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
         historyItems.value = d.items || [];
+        historyTotal.value = Number.isFinite(Number(d.total))
+          ? Number(d.total)
+          : historyItems.value.length;
         historyPage.value = Math.min(historyPage.value, historyPageCount.value);
         historyJumpPage.value = "";
         historyNoteDrafts.value = Object.fromEntries(
           historyItems.value.map((item) => [item.task_id, item.note || ""]),
         );
         historyNoteEditing.value = {};
+      } catch (error) {
+        console.error("历史记录加载失败", error);
       } finally {
         loadingHistory.value = false;
       }
@@ -1539,49 +1601,68 @@ createApp({
     }
 
     async function loadHistoryTask(id, scrollToResults = true) {
-      const r = await fetch(`/api/history/${id}`);
-      if (!r.ok) {
-        alert("历史记录加载失败");
-        return;
-      }
-      const d = await r.json();
-      disconnectSSE();
-      taskId.value = d.task_id || id;
-      mode.value = d.mode || mode.value;
-      datasetName.value = d.dataset_name || "";
-      items.value = d.items || [];
-      results.value = d.results || [];
-      itemProgress.value = d.item_progress || {};
-      progressEvents.value = d.progress_events || {};
-      summary.value = d.summary || null;
-      total.value = Number.isFinite(Number(d.total))
-        ? Number(d.total)
-        : (items.value.length || results.value.length);
-      progress.value = Number.isFinite(Number(d.done_total))
-        ? Number(d.done_total)
-        : results.value.length;
-      running.value = isActiveHistoryStatus(d.status);
-      runError.value = d.status === "cancelled"
-        ? (d.error || "任务已中断")
-        : d.status === "error"
-          ? (d.error ? `评估出错：${d.error}` : "评估出错")
-          : "";
-      activeSkill.value = "";
-      resultQuery.value = "";
-      correctnessFilter.value = "";
-      problemDimFilter.value = "";
-      resultPage.value = 1;
-      progressPage.value = 1;
-      barChartRefs.value = [];
-      const options = d.options || {};
-      if (Array.isArray(options.judges) && options.judges.length) selectedJudges.value = options.judges;
-      if (options.visual_judge) visualJudge.value = options.visual_judge;
-      if (options.model) selectedModel.value = options.model;
-      if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
-      renderCharts();
-      if (running.value) connectSSE();
-      if (scrollToResults) {
-        nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
+      if (loadingHistoryTaskId.value === id) return;
+      if (historyTaskLoadController) historyTaskLoadController.abort("superseded");
+      const controller = new AbortController();
+      historyTaskLoadController = controller;
+      loadingHistoryTaskId.value = id;
+      const timeout = setTimeout(() => controller.abort("timeout"), 30_000);
+      try {
+        const r = await fetch(`/api/history/${id}?compact=true`, { signal: controller.signal });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (controller.signal.aborted) return;
+        disconnectSSE();
+        taskId.value = d.task_id || id;
+        eventCursor.value = Math.max(0, Number(d.event_cursor) || 0);
+        mode.value = d.mode || mode.value;
+        datasetName.value = d.dataset_name || "";
+        items.value = d.items || [];
+        results.value = d.results || [];
+        itemProgress.value = d.item_progress || {};
+        progressEvents.value = normalizeProgressEvents(d.progress_events);
+        summary.value = d.summary || null;
+        total.value = Number.isFinite(Number(d.total))
+          ? Number(d.total)
+          : (items.value.length || results.value.length);
+        progress.value = Number.isFinite(Number(d.done_total))
+          ? Number(d.done_total)
+          : results.value.length;
+        running.value = isActiveHistoryStatus(d.status);
+        runError.value = d.status === "cancelled"
+          ? (d.error || "任务已中断")
+          : d.status === "error"
+            ? (d.error ? `评估出错：${d.error}` : "评估出错")
+            : "";
+        activeSkill.value = "";
+        resultQuery.value = "";
+        correctnessFilter.value = "";
+        problemDimFilter.value = "";
+        resultPage.value = 1;
+        progressPage.value = 1;
+        barChartRefs.value = [];
+        const options = d.options || {};
+        if (Array.isArray(options.judges) && options.judges.length) selectedJudges.value = options.judges;
+        if (options.visual_judge) visualJudge.value = options.visual_judge;
+        if (options.model) selectedModel.value = options.model;
+        if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
+        renderCharts();
+        if (running.value) connectSSE();
+        if (scrollToResults) {
+          nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
+        }
+      } catch (error) {
+        if (controller.signal.reason === "superseded") return;
+        const message = controller.signal.reason === "timeout"
+          ? "历史记录加载超时，请稍后重试"
+          : `历史记录加载失败：${error?.message || "未知错误"}`;
+        alert(message);
+      } finally {
+        clearTimeout(timeout);
+        if (historyTaskLoadController === controller) {
+          historyTaskLoadController = null;
+          loadingHistoryTaskId.value = "";
+        }
       }
     }
 
@@ -1637,7 +1718,7 @@ createApp({
       modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
-      historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, loadingHistoryTaskId, historyTotal, pageSize,
       historyPage, historyPageSize, historyPageCount, historyJumpPage,
       opPage, opPageSize, opPageCount, opJumpPage,
       previewPage, previewPageCount, previewJumpPage,

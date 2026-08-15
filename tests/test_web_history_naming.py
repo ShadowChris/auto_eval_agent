@@ -108,17 +108,42 @@ def test_history_note_ui_supports_multiline_editing_and_full_display():
     assert 'v-model.number="historyPageSize"' in html
     assert "changeHistoryPage(-1)" in html
     assert "jumpTablePage('history')" in html
-    assert 'fetch("/api/history?limit=0")' in js
+    assert "page_size: String(historyPageSize.value)" in js
+    assert "historyTotal.value = Number.isFinite(Number(d.total))" in js
     assert 'v-for="h in pagedHistoryItems"' in html
     assert 'cancelHistoryTask(h)' in html
     assert "historyStatusLabel(h.status)" in html
     assert "function resetEvaluationView()" in js
     assert "resetEvaluationView();\n      mode.value = k;" in js
     assert "if (running.value) connectSSE();" in js
-    assert "new EventSource(`/api/eval/${connectedTaskId}/stream`)" in js
+    assert "`/api/eval/${connectedTaskId}/stream?after=${encodeURIComponent(after)}`" in js
     assert 'es.addEventListener("task_state"' in js
+    assert "eventCursor.value = Math.max(0, Number(d.event_cursor) || 0)" in js
+    assert 'controller.abort("timeout")' in js
     assert "total.value = Number.isFinite(Number(d.total))" in js
     assert "progress.value = Number.isFinite(Number(d.done_total))" in js
+
+
+def test_history_page_reads_only_requested_snapshot_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(history, "HISTORY_DIR", tmp_path)
+    for index in range(3):
+        task = Task(
+            id=f"task-{index}",
+            mode="operation",
+            items=[{"query": f"q{index}"}],
+            options={},
+            session_name=f"20260815_12000{index}_operation_task-{index}",
+            dataset_name=f"dataset-{index}.jsonl",
+            created_at=float(index + 1),
+        )
+        assert history.save_task(task)
+
+    first, total = history.list_snapshots_page(page=1, page_size=2)
+    second, second_total = history.list_snapshots_page(page=2, page_size=2)
+
+    assert total == second_total == 3
+    assert [row["task_id"] for row in first] == ["task-2", "task-1"]
+    assert [row["task_id"] for row in second] == ["task-0"]
 
 
 def test_history_note_api_limits_length(monkeypatch):

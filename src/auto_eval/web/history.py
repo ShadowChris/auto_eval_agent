@@ -70,6 +70,7 @@ def task_to_snapshot(task) -> dict:
         "created_at": task.created_at,
         "updated_at": time.time(),
         "done_total": task.done_total,
+        "event_cursor": getattr(task, "event_cursor", 0),
         "error": task.error,
     }
 
@@ -168,6 +169,71 @@ def list_snapshots(limit: int = 50) -> list[dict]:
     rows.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
     return rows[:limit] if limit > 0 else rows
 
+
+def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict], int]:
+    """按会话文件名分页读取历史，避免每次刷新解析全部大快照。
+
+    新历史文件名以 ``YYYYMMDD_HHMMSS`` 开头，可直接按名称
+    倒序排列；旧文件放在其后并按修改时间排序。
+    """
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    safe_page = max(1, int(page or 1))
+    safe_size = max(1, min(int(page_size or 10), 100))
+    paths = list(HISTORY_DIR.glob("*.json"))
+
+    def sort_key(path: Path) -> tuple[int, str, float]:
+        dated = bool(re.match(r"^\d{8}_\d{6}_", path.name))
+        try:
+            modified = path.stat().st_mtime
+        except OSError:
+            modified = 0.0
+        return (1 if dated else 0, path.name if dated else "", modified)
+
+    paths.sort(key=sort_key, reverse=True)
+    total = len(paths)
+    start = (safe_page - 1) * safe_size
+    selected_paths = paths[start:start + safe_size]
+    rows: list[dict] = []
+    for path in selected_paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        status = data.get("status")
+        error = data.get("error")
+        if status in {"pending", "running"}:
+            status = "error"
+            error = error or "服务中断，已保留中断前完成的评估结果"
+        task_id = data.get("task_id") or path.stem
+        created_at = data.get("created_at")
+        session_name = data.get("session_name") or (
+            path.stem
+            if path.stem != _safe_name(str(task_id))
+            else make_session_name(
+                float(created_at or 0),
+                data.get("mode") or "unknown",
+                str(task_id),
+            )
+        )
+        rows.append({
+            "task_id": task_id,
+            "session_name": session_name,
+            "dataset_name": data.get("dataset_name") or "",
+            "note": data.get("note") or "",
+            "mode": data.get("mode"),
+            "status": status,
+            "total": len(data.get("items") or []),
+            "done": len([
+                result for result in (data.get("results") or [])
+                if "error" not in result
+            ]),
+            "created_at": created_at,
+            "updated_at": data.get("updated_at") or created_at,
+            "error": error,
+            "preview": _preview(data),
+        })
+    return rows, total
+
 def _preview(data: dict) -> str:
     items = data.get("items") or []
     if not items:
@@ -176,10 +242,24 @@ def _preview(data: dict) -> str:
     return q[:80] + ("…" if len(q) > 80 else "")
 
 
-def snapshot_payload(data: dict) -> dict:
+def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
     data = _with_operation_compat(data)
     items = data.get("items") or []
     results = data.get("results") or []
+    progress_events = data.get("progress_events") or {}
+    if compact:
+        item_fields = {
+            "id", "query", "question", "context", "category", "source_line",
+        }
+        items = [
+            {key: value for key, value in item.items() if key in item_fields}
+            for item in items
+        ]
+        # 历史恢复页只需要每题最近两条进度摘要；完整日志仍保留在快照中。
+        progress_events = {
+            str(index): list(events)[-2:]
+            for index, events in progress_events.items()
+        }
     try:
         saved_done_total = int(data.get("done_total") or 0)
     except (TypeError, ValueError):
@@ -196,13 +276,14 @@ def snapshot_payload(data: dict) -> dict:
         "status": data.get("status"),
         "results": results,
         "item_progress": data.get("item_progress") or {},
-        "progress_events": data.get("progress_events") or {},
+        "progress_events": progress_events,
         "summary": data.get("summary") or {},
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
         # 总进度作为历史详情的显式契约，供新标签页直接恢复。
         "done_total": done_total,
         "total": len(items),
+        "event_cursor": int(data.get("event_cursor") or 0),
         "error": data.get("error"),
     }
 

@@ -53,12 +53,23 @@ from .tasks import Task
 
 logger = logging.getLogger(__name__)
 MAX_PROGRESS_EVENTS_PER_ITEM = 100
+SNAPSHOT_PERSIST_INTERVAL_S = 1.0
 
 
-def _persist_task(task: Task) -> bool:
+def _persist_task(task: Task, *, force: bool = False) -> bool:
     """Persist without allowing history I/O to break the evaluation/SSE."""
+    now = time.monotonic()
+    if (
+        not force
+        and task.last_persist_at > 0
+        and now - task.last_persist_at < SNAPSHOT_PERSIST_INTERVAL_S
+    ):
+        return True
     try:
-        return bool(save_task(task))
+        saved = bool(save_task(task))
+        if saved:
+            task.last_persist_at = now
+        return saved
     except Exception:
         logger.exception("unexpected task snapshot failure: task_id=%s", task.id)
         return False
@@ -101,17 +112,17 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
 async def run_eval(task: Task, cfg: AppConfig) -> None:
     await task.publish("start", {"total": len(task.items), "mode": task.mode})
     task.status = "running"
-    _persist_task(task)
+    _persist_task(task, force=True)
     try:
         await _run(task, cfg)
         task.summary = _summarize(task, cfg)
         task.status = "done"
-        _persist_task(task)
+        _persist_task(task, force=True)
         await task.publish("done", {"summary": task.summary, "total": len(task.items)})
     except Exception as e:
         task.status = "error"
         task.error = f"{type(e).__name__}: {e}"
-        _persist_task(task)
+        _persist_task(task, force=True)
         await task.publish("error", {"message": task.error})
 
 

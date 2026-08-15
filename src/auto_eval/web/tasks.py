@@ -10,6 +10,9 @@ from typing import Any
 from .history import load_snapshot, make_session_name, save_task
 
 
+MAX_EVENT_LOG_SIZE = 20_000
+
+
 @dataclass
 class Task:
     id: str
@@ -29,12 +32,23 @@ class Task:
     created_at: float = field(default_factory=time.time)
     done_total: int = 0
     error: str | None = None
+    event_cursor: int = 0
+    event_log: list[dict] = field(default_factory=list, repr=False)
+    last_persist_at: float = field(default=0.0, repr=False)
 
     async def publish(self, event: str, data: dict) -> None:
         self.publish_nowait(event, data)
 
     def publish_nowait(self, event: str, data: dict) -> None:
-        message = {"event": event, "data": data}
+        self.event_cursor += 1
+        message = {
+            "event": event,
+            "data": data,
+            "cursor": self.event_cursor,
+        }
+        self.event_log.append(message)
+        if len(self.event_log) > MAX_EVENT_LOG_SIZE:
+            del self.event_log[:-MAX_EVENT_LOG_SIZE]
         for queue in list(self.subscribers):
             queue.put_nowait(message)
 
@@ -100,6 +114,7 @@ def get_task(task_id: str) -> Task | None:
         created_at=float(snapshot.get("created_at") or time.time()),
         done_total=int(snapshot.get("done_total") or len(snapshot.get("results") or [])),
         error=error,
+        event_cursor=int(snapshot.get("event_cursor") or 0),
     )
     TASKS[task.id] = task
     return task
