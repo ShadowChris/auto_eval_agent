@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from datetime import datetime
@@ -14,7 +15,13 @@ from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Header
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
@@ -54,6 +61,28 @@ from .tasks import get_live_task, get_task, new_task
 BASE_DIR = Path(__file__).resolve().parents[3]
 CONFIG_DIR = BASE_DIR / "config"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_VERSION_TOKEN = "__STATIC_ASSET_VERSION__"
+
+
+def _static_asset_version() -> str:
+    """按前端资源内容生成短版本号，发布新文件后自动改变 URL。"""
+    digest = hashlib.sha256()
+    for name in ("app.js", "style.css"):
+        digest.update((STATIC_DIR / name).read_bytes())
+    return digest.hexdigest()[:12]
+
+
+class VersionedStaticFiles(StaticFiles):
+    """版本化资源长期缓存；无版本参数的资源每次重新验证。"""
+
+    async def get_response(self, path: str, scope: dict) -> Response:
+        response = await super().get_response(path, scope)
+        query = scope.get("query_string") or b""
+        if response.status_code == 200 and b"v=" in query:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
 load_dotenv(BASE_DIR / ".env", override=True)  # 注入 .env 的 key；以 .env 为准覆盖旧 shell 环境变量
 
@@ -746,10 +775,22 @@ def api_export_item(task_id: str, item_index: int, format: str):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace(STATIC_VERSION_TOKEN, _static_asset_version())
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
 
 
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.mount(
+    "/static",
+    VersionedStaticFiles(directory=str(STATIC_DIR)),
+    name="static",
+)
 
 
 if __name__ == "__main__":
