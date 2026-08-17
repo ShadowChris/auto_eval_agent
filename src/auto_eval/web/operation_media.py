@@ -32,7 +32,7 @@ def _safe_name(value: str, fallback: str) -> str:
 
 
 def operation_video_roots(base_dir: Path = PROJECT_ROOT) -> list[Path]:
-    """返回批量清单允许读取的视频根目录。"""
+    """返回批量清单允许读取、解析相对路径的视频根目录。"""
     roots = [base_dir.resolve()]
     for raw in os.getenv("OPERATION_VIDEO_ROOTS", "").split(os.pathsep):
         if raw.strip():
@@ -40,7 +40,7 @@ def operation_video_roots(base_dir: Path = PROJECT_ROOT) -> list[Path]:
             if not root.is_absolute():
                 root = base_dir / root
             roots.append(root.resolve())
-    return roots
+    return list(dict.fromkeys(roots))
 
 
 def resolve_operation_video_path(
@@ -50,14 +50,35 @@ def resolve_operation_video_path(
 ) -> Path:
     """解析本地视频路径，并阻止读取未授权目录。"""
     candidate = Path(raw_path).expanduser()
-    if not candidate.is_absolute():
-        candidate = base_dir / candidate
-    candidate = candidate.resolve()
-    if not any(candidate.is_relative_to(root) for root in operation_video_roots(base_dir)):
-        raise ValueError(
-            "视频路径不在允许目录中；相对路径请以项目根目录为基准，"
-            "外部目录需通过 OPERATION_VIDEO_ROOTS 配置"
-        )
+    roots = operation_video_roots(base_dir)
+    if candidate.is_absolute():
+        candidate = candidate.resolve()
+        if not any(candidate.is_relative_to(root) for root in roots):
+            raise ValueError(
+                "视频路径不在允许目录中；外部目录需通过 "
+                "OPERATION_VIDEO_ROOTS 配置"
+            )
+    else:
+        attempted: list[Path] = []
+        matches: list[Path] = []
+        for root in roots:
+            resolved = (root / candidate).resolve()
+            if not resolved.is_relative_to(root):
+                continue
+            attempted.append(resolved)
+            if resolved.is_file():
+                matches.append(resolved)
+        if not matches:
+            locations = "\n".join(f"- {path}" for path in attempted)
+            suffix = f"；已按以下根目录查找：\n{locations}" if locations else ""
+            raise ValueError(f"视频文件不存在：{raw_path}{suffix}")
+        if len(matches) > 1:
+            locations = "\n".join(f"- {path}" for path in matches)
+            raise ValueError(
+                f"视频相对路径存在多个匹配：{raw_path}\n{locations}\n"
+                "请提供更完整的相对路径或绝对路径"
+            )
+        candidate = matches[0]
     if not candidate.is_file():
         raise ValueError(f"视频文件不存在：{raw_path}")
     if candidate.suffix.lower() not in VIDEO_EXTENSIONS:

@@ -4,7 +4,10 @@ from pathlib import Path
 import pytest
 
 from auto_eval.web import server
-from auto_eval.web.operation_media import prepare_session_operation_item
+from auto_eval.web.operation_media import (
+    prepare_session_operation_item,
+    resolve_operation_video_path,
+)
 from auto_eval.web.parse_input import parse_jsonl
 from auto_eval.web.server import OperationPrepareReq
 
@@ -158,6 +161,44 @@ def test_operation_video_path_cannot_escape_allowed_roots(
 
     with pytest.raises(ValueError, match="不在允许目录"):
         server._resolve_operation_video_path(str(outside))
+
+
+def test_operation_video_path_resolves_relative_path_from_external_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    video = external / "0815" / "video" / "alarm.mp4"
+    project.mkdir()
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"fake")
+    monkeypatch.setenv("OPERATION_VIDEO_ROOTS", str(external))
+
+    resolved = resolve_operation_video_path(
+        "0815/video/alarm.mp4",
+        base_dir=project,
+    )
+
+    assert resolved == video
+
+
+def test_operation_video_path_rejects_ambiguous_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    relative = Path("video/alarm.mp4")
+    for root in (project, external):
+        video = root / relative
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"fake")
+    monkeypatch.setenv("OPERATION_VIDEO_ROOTS", str(external))
+
+    with pytest.raises(ValueError, match="存在多个匹配") as exc_info:
+        resolve_operation_video_path(str(relative), base_dir=project)
+
+    assert str(project / relative) in str(exc_info.value)
+    assert str(external / relative) in str(exc_info.value)
 
 
 @pytest.mark.asyncio
