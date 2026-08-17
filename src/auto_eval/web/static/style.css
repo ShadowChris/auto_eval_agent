@@ -139,6 +139,13 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
   white-space: nowrap;
   text-align: center;
 }
+.history-table .history-duration-cell {
+  width: 100px;
+  min-width: 100px;
+  max-width: 100px;
+  white-space: nowrap;
+  text-align: center;
+}
 .preview-table td { white-space: normal; overflow-wrap: anywhere; }
 table.results td { max-width: 320px; word-break: break-all; }
 tr.trace td { background: #eff6ff !important; color: #1e40af; font-size: 12px; }

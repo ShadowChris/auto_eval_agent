@@ -355,6 +355,9 @@ async def api_stream(
                     "status": task.status,
                     "progress": max(task.done_total, len(task.results)),
                     "total": len(task.items),
+                    "started_at": task.started_at,
+                    "finished_at": task.finished_at,
+                    "duration_s": task.elapsed_s(),
                     "error": task.error,
                 },
             )
@@ -398,19 +401,26 @@ async def api_stream(
                     if task.status == "done":
                         yield _sse(
                             "done",
-                            {"summary": task.summary, "total": len(task.items)},
+                            {
+                                "summary": task.summary,
+                                "total": len(task.items),
+                                "duration_s": task.duration_s,
+                            },
                             event_id=task.event_cursor or None,
                         )
                     elif task.status == "error":
                         yield _sse(
                             "error",
-                            {"message": task.error},
+                            {"message": task.error, "duration_s": task.duration_s},
                             event_id=task.event_cursor or None,
                         )
                     else:
                         yield _sse(
                             "cancelled",
-                            {"message": task.error or "任务已中断"},
+                            {
+                                "message": task.error or "任务已中断",
+                                "duration_s": task.duration_s,
+                            },
                             event_id=task.event_cursor or None,
                         )
                 return
@@ -470,6 +480,9 @@ def api_history(
             "status": live.status,
             "total": len(live.items),
             "done": max(live.done_total, len(live.results)),
+            "started_at": live.started_at,
+            "finished_at": live.finished_at,
+            "duration_s": live.elapsed_s(),
             "error": live.error,
         })
     return {
@@ -517,6 +530,7 @@ async def api_eval_cancel(task_id: str):
     reason = "用户手动中断批跑"
     task.status = "cancelled"
     task.error = reason
+    task.mark_finished()
     updated_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
     for index, item in enumerate(task.items):
         key = str(index)
@@ -542,7 +556,10 @@ async def api_eval_cancel(task_id: str):
     execution = task.execution
     if execution is not None and not execution.done():
         execution.cancel()
-    await task.publish("cancelled", {"message": reason})
+    await task.publish(
+        "cancelled",
+        {"message": reason, "duration_s": task.duration_s},
+    )
     if not save_task(task):
         raise HTTPException(500, "任务已中断，但历史状态保存失败")
     return {"ok": True, "task_id": task.id, "status": task.status}

@@ -114,6 +114,47 @@ def test_runner_snapshot_persistence_is_throttled_but_forceable(monkeypatch):
     assert saved == [task.id, task.id]
 
 
+def test_task_tracks_batch_wall_clock_timing():
+    task = Task(id="timed-task", mode="operation", items=[], options={})
+
+    task.mark_started(now=100.0)
+    assert task.elapsed_s(now=112.25) == 12.25
+
+    task.mark_finished(now=125.75)
+
+    assert task.started_at == 100.0
+    assert task.finished_at == 125.75
+    assert task.duration_s == 25.75
+    assert task.elapsed_s(now=999.0) == 25.75
+
+
+@pytest.mark.asyncio
+async def test_run_eval_persists_batch_start_finish_and_duration(monkeypatch):
+    task = Task(id="run-timing", mode="single", items=[], options={})
+    times = iter([200.0, 245.5])
+    persisted = []
+
+    async def empty_run(current, cfg):
+        return None
+
+    monkeypatch.setattr("auto_eval.web.tasks.time.time", lambda: next(times))
+    monkeypatch.setattr(runner, "_run", empty_run)
+    monkeypatch.setattr(runner, "_summarize", lambda current, cfg: {"total": 0})
+    monkeypatch.setattr(
+        runner,
+        "_persist_task",
+        lambda current, force=False: persisted.append((current.status, force)) or True,
+    )
+
+    await runner.run_eval(task, SimpleNamespace())
+
+    assert task.status == "done"
+    assert task.started_at == 200.0
+    assert task.finished_at == 245.5
+    assert task.duration_s == 45.5
+    assert persisted == [("running", True), ("done", True)]
+
+
 def test_progress_history_is_bounded_and_keeps_multi_judge_events():
     task = Task(id="multi-progress", mode="single", items=[], options={})
 
@@ -525,6 +566,7 @@ async def test_cancel_running_task_persists_partial_results_and_notifies_subscri
         status="running",
         results=[{"index": 0, "item_id": "q0", "query": "done"}],
         done_total=1,
+        started_at=100.0,
         item_progress={"0": {"item_index": 0, "status": "done", "percent": 100}},
     )
     execution = asyncio.create_task(asyncio.sleep(60))
@@ -533,6 +575,7 @@ async def test_cancel_running_task_persists_partial_results_and_notifies_subscri
     saved = []
     monkeypatch.setattr(server, "get_live_task", lambda task_id: task if task_id == task.id else None)
     monkeypatch.setattr(server, "save_task", lambda current: saved.append(current.status) or True)
+    monkeypatch.setattr("auto_eval.web.tasks.time.time", lambda: 112.5)
 
     response = await server.api_eval_cancel(task.id)
     await asyncio.sleep(0)
@@ -540,6 +583,8 @@ async def test_cancel_running_task_persists_partial_results_and_notifies_subscri
     assert response["status"] == "cancelled"
     assert task.status == "cancelled"
     assert task.done_total == 1
+    assert task.finished_at == 112.5
+    assert task.duration_s == 12.5
     assert task.results == [{"index": 0, "item_id": "q0", "query": "done"}]
     assert task.item_progress["0"]["status"] == "done"
     assert task.item_progress["1"]["status"] == "cancelled"
@@ -562,6 +607,7 @@ def test_history_api_keeps_live_running_status(monkeypatch):
         options={},
         status="running",
         done_total=1,
+        started_at=100.0,
     )
     monkeypatch.setattr(server, "list_snapshots", lambda limit: [{
         "task_id": task.id,
@@ -571,11 +617,14 @@ def test_history_api_keeps_live_running_status(monkeypatch):
         "error": "服务中断",
     }])
     monkeypatch.setattr(server, "get_live_task", lambda task_id: task if task_id == task.id else None)
+    monkeypatch.setattr("auto_eval.web.tasks.time.time", lambda: 112.5)
 
     row = server.api_history(limit=50)["items"][0]
 
     assert row["status"] == "running"
     assert row["done"] == 1
+    assert row["started_at"] == 100.0
+    assert row["duration_s"] == 12.5
     assert row["error"] is None
 
 

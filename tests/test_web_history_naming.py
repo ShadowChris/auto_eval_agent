@@ -22,6 +22,9 @@ def test_new_history_name_is_time_sortable_and_loadable_by_task_id(tmp_path, mon
         note="首轮回归，留档",
         session_name=session_name,
         created_at=created_at,
+        started_at=created_at + 1,
+        finished_at=created_at + 66.5,
+        duration_s=65.5,
     )
 
     assert history.save_task(task)
@@ -31,6 +34,7 @@ def test_new_history_name_is_time_sortable_and_loadable_by_task_id(tmp_path, mon
     assert history.list_snapshots()[0]["session_name"] == session_name
     assert history.list_snapshots()[0]["dataset_name"] == "operation_cases.jsonl"
     assert history.list_snapshots()[0]["note"] == "首轮回归，留档"
+    assert history.list_snapshots()[0]["duration_s"] == 65.5
     assert history.delete_snapshot(task.id)
     assert not path.exists()
 
@@ -113,6 +117,11 @@ def test_history_note_ui_supports_multiline_editing_and_full_display():
     assert 'v-for="h in pagedHistoryItems"' in html
     assert 'cancelHistoryTask(h)' in html
     assert "historyStatusLabel(h.status)" in html
+    assert 'class="history-duration-cell">耗时</th>' in html
+    assert "formatHistoryDuration(h)" in html
+    assert "function formatHistoryDuration(item)" in js
+    assert 'if (rawSeconds == null) return "—";' in js
+    assert ".history-table .history-duration-cell" in css
     assert "function resetEvaluationView()" in js
     assert "resetEvaluationView();\n      mode.value = k;" in js
     assert "if (running.value) connectSSE();" in js
@@ -122,6 +131,28 @@ def test_history_note_ui_supports_multiline_editing_and_full_display():
     assert 'controller.abort("timeout")' in js
     assert "total.value = Number.isFinite(Number(d.total))" in js
     assert "progress.value = Number.isFinite(Number(d.done_total))" in js
+
+
+def test_legacy_history_without_timing_keeps_duration_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(history, "HISTORY_DIR", tmp_path)
+    (tmp_path / "legacy-no-timing.json").write_text(
+        json.dumps({
+            "task_id": "legacy-no-timing",
+            "mode": "single",
+            "items": [],
+            "results": [],
+            "status": "done",
+            "created_at": 1_700_000_000,
+            "updated_at": 1_700_003_600,
+        }),
+        encoding="utf-8",
+    )
+
+    row = history.list_snapshots()[0]
+
+    assert row["started_at"] is None
+    assert row["finished_at"] is None
+    assert row["duration_s"] is None
 
 
 def test_history_page_reads_only_requested_snapshot_window(tmp_path, monkeypatch):

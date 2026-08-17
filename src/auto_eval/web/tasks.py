@@ -30,6 +30,9 @@ class Task:
     subscribers: set[asyncio.Queue] = field(default_factory=set, repr=False)
     execution: asyncio.Task[Any] | None = field(default=None, repr=False)
     created_at: float = field(default_factory=time.time)
+    started_at: float | None = None
+    finished_at: float | None = None
+    duration_s: float | None = None
     done_total: int = 0
     error: str | None = None
     event_cursor: int = 0
@@ -59,6 +62,30 @@ class Task:
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
         self.subscribers.discard(queue)
+
+    def mark_started(self, now: float | None = None) -> None:
+        """记录批跑真正开始执行的时间，重复调用不覆盖首次时间。"""
+        if self.started_at is None:
+            self.started_at = time.time() if now is None else now
+        self.finished_at = None
+        self.duration_s = None
+
+    def mark_finished(self, now: float | None = None) -> None:
+        """记录批跑终止时间和实际墙钟耗时。"""
+        self.finished_at = time.time() if now is None else now
+        if self.started_at is not None:
+            self.duration_s = round(max(0.0, self.finished_at - self.started_at), 3)
+
+    def elapsed_s(self, now: float | None = None) -> float | None:
+        """返回已结束或运行中的批跑墙钟耗时。"""
+        if self.duration_s is not None:
+            return self.duration_s
+        if self.started_at is None:
+            return None
+        end = self.finished_at
+        if end is None:
+            end = time.time() if now is None else now
+        return round(max(0.0, end - self.started_at), 3)
 
 
 TASKS: dict[str, Task] = {}
@@ -112,6 +139,21 @@ def get_task(task_id: str) -> Task | None:
         progress_events=snapshot.get("progress_events") or {},
         summary=snapshot.get("summary") or {},
         created_at=float(snapshot.get("created_at") or time.time()),
+        started_at=(
+            float(snapshot["started_at"])
+            if snapshot.get("started_at") is not None
+            else None
+        ),
+        finished_at=(
+            float(snapshot["finished_at"])
+            if snapshot.get("finished_at") is not None
+            else None
+        ),
+        duration_s=(
+            float(snapshot["duration_s"])
+            if snapshot.get("duration_s") is not None
+            else None
+        ),
         done_total=int(snapshot.get("done_total") or len(snapshot.get("results") or [])),
         error=error,
         event_cursor=int(snapshot.get("event_cursor") or 0),

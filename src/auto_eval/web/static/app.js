@@ -1500,6 +1500,35 @@ createApp({
       return d.toLocaleString();
     }
 
+    function formatHistoryDuration(item) {
+      const startedAt = Number(item?.started_at);
+      const runningSeconds = isActiveHistoryStatus(item?.status) && startedAt > 0
+        ? clockNow.value / 1000 - startedAt
+        : null;
+      const storedSeconds = item?.duration_s == null
+        ? Number.NaN
+        : Number(item.duration_s);
+      const rawSeconds = runningSeconds != null
+        ? runningSeconds
+        : Number.isFinite(storedSeconds) && storedSeconds >= 0
+          ? storedSeconds
+          : null;
+      if (rawSeconds == null) return "—";
+      let seconds = Math.max(0, Math.round(rawSeconds));
+      const days = Math.floor(seconds / 86400);
+      seconds %= 86400;
+      const hours = Math.floor(seconds / 3600);
+      seconds %= 3600;
+      const minutes = Math.floor(seconds / 60);
+      seconds %= 60;
+      const parts = [];
+      if (days) parts.push(`${days}天`);
+      if (hours) parts.push(`${hours}小时`);
+      if (minutes) parts.push(`${minutes}分`);
+      if (seconds || !parts.length) parts.push(`${seconds}秒`);
+      return parts.join("");
+    }
+
     async function loadHistory() {
       loadingHistory.value = true;
       try {
@@ -1730,7 +1759,7 @@ createApp({
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
       trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
-      editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
+      editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
       changePreviewPage, changeProgressPage, changeOpPage, changeHistoryPage,

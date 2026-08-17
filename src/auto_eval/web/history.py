@@ -68,6 +68,9 @@ def task_to_snapshot(task) -> dict:
         "progress_events": task.progress_events,
         "summary": task.summary,
         "created_at": task.created_at,
+        "started_at": getattr(task, "started_at", None),
+        "finished_at": getattr(task, "finished_at", None),
+        "duration_s": getattr(task, "duration_s", None),
         "updated_at": time.time(),
         "done_total": task.done_total,
         "event_cursor": getattr(task, "event_cursor", 0),
@@ -120,6 +123,32 @@ def load_snapshot(task_id: str) -> dict | None:
         return None
 
 
+def _stored_timing(data: dict) -> dict[str, float | None]:
+    """读取已持久化的批跑时间；不使用 updated_at 猜测结束时间。"""
+    started_at = data.get("started_at")
+    finished_at = data.get("finished_at")
+    duration_s = data.get("duration_s")
+    try:
+        started_at = float(started_at) if started_at is not None else None
+    except (TypeError, ValueError):
+        started_at = None
+    try:
+        finished_at = float(finished_at) if finished_at is not None else None
+    except (TypeError, ValueError):
+        finished_at = None
+    try:
+        duration_s = float(duration_s) if duration_s is not None else None
+    except (TypeError, ValueError):
+        duration_s = None
+    if duration_s is None and started_at is not None and finished_at is not None:
+        duration_s = round(max(0.0, finished_at - started_at), 3)
+    return {
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_s": duration_s,
+    }
+
+
 def delete_snapshot(task_id: str) -> bool:
     """删除某次评测的快照文件。返回是否删除成功（文件存在且已删除）。"""
     path = _find_task_path(task_id)
@@ -163,6 +192,7 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "done": len([r for r in (data.get("results") or []) if "error" not in r]),
             "created_at": created_at,
             "updated_at": data.get("updated_at") or data.get("created_at"),
+            **_stored_timing(data),
             "error": error,
             "preview": _preview(data),
         })
@@ -229,6 +259,7 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             ]),
             "created_at": created_at,
             "updated_at": data.get("updated_at") or created_at,
+            **_stored_timing(data),
             "error": error,
             "preview": _preview(data),
         })
@@ -280,6 +311,7 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         "summary": data.get("summary") or {},
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
+        **_stored_timing(data),
         # 总进度作为历史详情的显式契约，供新标签页直接恢复。
         "done_total": done_total,
         "total": len(items),
@@ -970,6 +1002,9 @@ def _run_info(snapshot: dict) -> dict:
         "done": len([r for r in (snapshot.get("results") or []) if "error" not in r]),
         "created_at": _format_ts(created),
         "updated_at": _format_ts(updated),
+        "started_at": _format_ts(snapshot.get("started_at")),
+        "finished_at": _format_ts(snapshot.get("finished_at")),
+        "duration_s": _stored_timing(snapshot)["duration_s"],
         "options": snapshot.get("options") or {},
         "error": snapshot.get("error") or "",
     }
@@ -999,6 +1034,9 @@ def _operation_run_summary(snapshot: dict) -> dict:
         "status": snapshot.get("status"),
         "created_at": _format_ts(snapshot.get("created_at")),
         "updated_at": _format_ts(snapshot.get("updated_at")),
+        "started_at": _format_ts(snapshot.get("started_at")),
+        "finished_at": _format_ts(snapshot.get("finished_at")),
+        "duration_s": _stored_timing(snapshot)["duration_s"],
         "judges": judges,
         "model": options.get("model") or "",
         "concurrency": options.get("concurrency", ""),

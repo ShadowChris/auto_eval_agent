@@ -40,7 +40,7 @@
     <p class="hint">批跑由服务端持续执行，刷新页面后可从这里加载实时进度；服务进程重启或手动中断时会保留已完成的题目。</p>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
-        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th class="history-progress-cell">进度</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
+        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th class="history-progress-cell">进度</th><th class="history-duration-cell">耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
           <tr v-for="h in pagedHistoryItems" :key="h.task_id">
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
@@ -48,6 +48,7 @@
             <td>{{ modeLabel(h.mode) }}</td>
             <td><span class="history-status" :class="'history-status-'+h.status">{{ historyStatusLabel(h.status) }}</span></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
+            <td class="history-duration-cell">{{ formatHistoryDuration(h) }}</td>
             <td>{{ h.preview }}</td>
             <td style="white-space:nowrap">
               <button

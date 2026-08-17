@@ -110,6 +110,7 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
 
 
 async def run_eval(task: Task, cfg: AppConfig) -> None:
+    task.mark_started()
     await task.publish("start", {"total": len(task.items), "mode": task.mode})
     task.status = "running"
     _persist_task(task, force=True)
@@ -117,13 +118,25 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
         await _run(task, cfg)
         task.summary = _summarize(task, cfg)
         task.status = "done"
+        task.mark_finished()
         _persist_task(task, force=True)
-        await task.publish("done", {"summary": task.summary, "total": len(task.items)})
+        await task.publish(
+            "done",
+            {
+                "summary": task.summary,
+                "total": len(task.items),
+                "duration_s": task.duration_s,
+            },
+        )
     except Exception as e:
         task.status = "error"
         task.error = f"{type(e).__name__}: {e}"
+        task.mark_finished()
         _persist_task(task, force=True)
-        await task.publish("error", {"message": task.error})
+        await task.publish(
+            "error",
+            {"message": task.error, "duration_s": task.duration_s},
+        )
 
 
 async def _run(task: Task, cfg: AppConfig) -> None:
