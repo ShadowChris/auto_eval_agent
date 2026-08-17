@@ -100,6 +100,12 @@ def _status_code(exc: BaseException) -> int | None:
     )
 
 
+def _failure_progress_message(module: str, exc: BaseException, message: str) -> str:
+    status_code = _status_code(exc)
+    suffix = f"（HTTP {status_code}）" if status_code is not None else ""
+    return f"{module}：{message}{suffix}"
+
+
 def is_retriable_llm_error(exc: BaseException) -> bool:
     """只重试瞬时错误，避免对鉴权和参数错误反复请求。"""
     if isinstance(exc, ProviderStreamError):
@@ -463,7 +469,9 @@ async def stream_chat_completion(
                     level=logging.ERROR,
                     details=details,
                     progress=100,
-                    progress_message=f"{module}：模型调用失败",
+                    progress_message=_failure_progress_message(
+                        module, exc, "模型调用失败"
+                    ),
                     progress_status="error",
                 )
                 raise
@@ -480,7 +488,9 @@ async def stream_chat_completion(
                 level=logging.WARNING,
                 details=details,
                 progress=40,
-                progress_message=f"{module}：调用失败，准备第{attempt + 2}次重试",
+                progress_message=_failure_progress_message(
+                    module, exc, f"调用失败，准备第{attempt + 2}次重试"
+                ),
             )
             await asyncio.sleep(wait)
 

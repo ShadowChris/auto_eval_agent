@@ -284,6 +284,13 @@
                       <time>{{ formatProgressEventTime(event.updated_at) }}</time>
                       <span class="progress-log-meta">{{ progressEventMeta(event) }}</span>
                       <span class="progress-log-message">{{ progressEventMessage(event) }}</span>
+                      <div v-if="progressEventDetailSummary(event)" class="progress-log-error-summary">
+                        {{ progressEventDetailSummary(event) }}
+                      </div>
+                      <details v-if="hasProgressEventDetails(event)" class="progress-event-details">
+                        <summary>查看原始错误详情</summary>
+                        <pre>{{ progressEventDetailText(event) }}</pre>
+                      </details>
                     </div>
                   </div>
                 </details>
@@ -298,6 +305,13 @@
                   <time>{{ formatProgressEventTime(event.updated_at) }}</time>
                   <span class="progress-log-meta">{{ progressEventMeta(event) }}</span>
                   <span class="progress-log-message">{{ progressEventMessage(event) }}</span>
+                  <div v-if="progressEventDetailSummary(event)" class="progress-log-error-summary">
+                    {{ progressEventDetailSummary(event) }}
+                  </div>
+                  <details v-if="hasProgressEventDetails(event)" class="progress-event-details">
+                    <summary>查看原始错误详情</summary>
+                    <pre>{{ progressEventDetailText(event) }}</pre>
+                  </details>
                 </div>
               </div>
               <div v-else class="progress-message" :title="row.message">{{ row.message }}</div>

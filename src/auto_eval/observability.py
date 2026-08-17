@@ -45,6 +45,18 @@ _logger: logging.Logger | None = None
 _listener: QueueListener | None = None
 _setup_lock = threading.Lock()
 _auto_id_counter = itertools.count(1)
+_PROGRESS_DETAIL_MAX_CHARS = 16_000
+_SENSITIVE_DETAIL_KEYS = {
+    "api-key",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "set-cookie",
+    "access_token",
+    "refresh_token",
+}
 
 
 def _running_under_pytest() -> bool:
@@ -276,9 +288,54 @@ def log_event(
                 }
             if progress_fields:
                 progress_payload.update(progress_fields)
+            # 文件日志保留完整调用栈；Web 逐题日志只投影便于排障的结构化详情，
+            # 避免暴露鉴权信息或让单条异常无限撑大任务快照。
+            if payload and (level >= logging.WARNING or progress_status == "error"):
+                progress_payload["details"] = _progress_safe_details(payload)
             ctx.progress_callback(progress_payload)
         except Exception:
             pass
+
+
+def _progress_safe_value(value: Any, *, key: str = "", depth: int = 0) -> Any:
+    if key.strip().lower() in _SENSITIVE_DETAIL_KEYS:
+        return "[已隐藏]"
+    if depth >= 6:
+        return str(value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {
+            str(child_key): _progress_safe_value(
+                child_value,
+                key=str(child_key),
+                depth=depth + 1,
+            )
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _progress_safe_value(child, depth=depth + 1)
+            for child in list(value)[:100]
+        ]
+    return str(value)
+
+
+def _progress_safe_details(details: dict[str, Any]) -> dict[str, Any]:
+    safe = {
+        str(key): _progress_safe_value(value, key=str(key))
+        for key, value in details.items()
+        if key != "调用栈"
+    }
+    encoded = json.dumps(safe, ensure_ascii=False, default=str)
+    if len(encoded) <= _PROGRESS_DETAIL_MAX_CHARS:
+        return safe
+    return {
+        "错误详情": encoded[:_PROGRESS_DETAIL_MAX_CHARS] + "…",
+        "详情已截断": True,
+    }
 
 
 def error_details(exc: BaseException, *, include_traceback: bool = True) -> dict[str, Any]:
@@ -297,7 +354,12 @@ def error_details(exc: BaseException, *, include_traceback: bool = True) -> dict
         "服务商请求ID": provider_request_id,
     }
     body = getattr(exc, "body", None)
-    if body:
+    if body is None and response is not None:
+        try:
+            body = response.text
+        except Exception:
+            body = None
+    if body is not None and body != "":
         details["响应"] = body
     if include_traceback:
         text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()

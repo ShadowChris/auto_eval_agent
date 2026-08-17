@@ -103,6 +103,21 @@ button.btn-warning:hover:not(:disabled) { background: #fffbeb; }
 .progress-log-message { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .progress-log-line.log-warning .progress-log-message { color: #b45309; }
 .progress-log-line.log-error .progress-log-message { color: #b91c1c; font-weight: 600; }
+.progress-log-error-summary {
+  grid-column: 3; color: #b91c1c; font-weight: 600; overflow-wrap: anywhere;
+}
+.progress-event-details {
+  grid-column: 3; min-width: 0; color: #475569;
+}
+.progress-event-details summary {
+  width: max-content; color: #2563eb; cursor: pointer; user-select: none;
+}
+.progress-event-details pre {
+  max-height: 220px; margin: 4px 0 2px; padding: 7px 8px; overflow: auto;
+  border: 1px solid #fecaca; border-radius: 5px; background: #fff7f7;
+  color: #7f1d1d; font: 11px/16px Consolas, "Microsoft YaHei", monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 .progress-message {
   margin-top: 4px; color: #374151; font-size: 12px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

@@ -499,6 +499,38 @@ createApp({
       return message.trim();
     }
 
+    function hasProgressEventDetails(event) {
+      return event?.details && typeof event.details === "object"
+        && Object.keys(event.details).length > 0;
+    }
+
+    function progressEventDetailSummary(event) {
+      if (!hasProgressEventDetails(event)) return "";
+      const details = event.details;
+      const parts = [];
+      if (details["HTTP状态"] != null) parts.push(`HTTP ${details["HTTP状态"]}`);
+      if (details["错误类型"]) parts.push(String(details["错误类型"]));
+      if (details["服务商请求ID"]) parts.push(`请求ID ${details["服务商请求ID"]}`);
+      return parts.join(" · ");
+    }
+
+    function progressEventDetailText(event) {
+      if (!hasProgressEventDetails(event)) return "";
+      return Object.entries(event.details).map(([key, value]) => {
+        let formatted;
+        if (typeof value === "string") {
+          formatted = value;
+        } else {
+          try {
+            formatted = JSON.stringify(value, null, 2);
+          } catch (_) {
+            formatted = String(value);
+          }
+        }
+        return `${key}: ${formatted}`;
+      }).join("\n");
+    }
+
     function escapeRegExp(value) {
       return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
@@ -1765,7 +1797,9 @@ createApp({
       changePreviewPage, changeProgressPage, changeOpPage, changeHistoryPage,
       changeResultPageSize, changeHistoryPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
-      progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
+      progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage,
+      hasProgressEventDetails, progressEventDetailSummary, progressEventDetailText,
+      scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,
       knowledgePublished, knowledgeDraft, knowledgeCategoryKey, knowledgeHasDraft, knowledgeBusy,

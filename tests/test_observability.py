@@ -2,6 +2,8 @@ import asyncio
 import logging
 from datetime import datetime
 
+import httpx
+
 from auto_eval.observability import (
     bind_chain_context,
     current_context,
@@ -71,6 +73,54 @@ def test_progress_event_accepts_runtime_fields():
 
     assert events[0]["started_at"] == 1_788_517_600_000
     assert events[0]["message"] == "开始评测"
+
+
+def test_error_progress_contains_safe_http_response_details():
+    events = []
+    response = httpx.Response(
+        429,
+        text='{"error":{"message":"rate limited"}}',
+        headers={"x-request-id": "provider-request-1"},
+        request=httpx.Request("POST", "https://example.invalid/v1/chat/completions"),
+    )
+
+    class ProviderError(RuntimeError):
+        status_code = 429
+        body = {"error": {"message": "rate limited"}}
+        request_id = "provider-request-1"
+
+        def __init__(self):
+            super().__init__("Error code: 429")
+            self.response = response
+
+    from auto_eval.observability import error_details
+
+    exc = ProviderError()
+    with bind_chain_context(
+        request_id="2607051200_error_q0",
+        item_id="q0",
+        item_index=0,
+        progress_callback=events.append,
+    ):
+        log_event(
+            "模型裁判",
+            "流式调用最终失败",
+            level=logging.ERROR,
+            details={
+                **error_details(exc),
+                "authorization": "Bearer secret",
+            },
+            progress=100,
+            progress_message="模型裁判：模型调用失败（HTTP 429）",
+            progress_status="error",
+        )
+
+    details = events[0]["details"]
+    assert details["HTTP状态"] == 429
+    assert details["服务商请求ID"] == "provider-request-1"
+    assert details["响应"] == {"error": {"message": "rate limited"}}
+    assert details["authorization"] == "[已隐藏]"
+    assert "调用栈" not in details
 
 
 async def test_parallel_judge_contexts_do_not_mix():
