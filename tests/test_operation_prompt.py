@@ -6,9 +6,11 @@ from pydantic import ValidationError
 from auto_eval.config import load_config
 from auto_eval.expert_knowledge import render_expert_knowledge
 from auto_eval.judges.operation_fields import (
+    format_operation_route_rationale,
     hoist_misnested_operation_fields,
     map_legacy_operation_result,
     normalize_operation_fields,
+    normalize_operation_routes,
 )
 from auto_eval.judges.prompts import ARBITRATOR_SYSTEM, OPERATION_SYSTEM, OPERATION_USER
 from auto_eval.judges.rubric_judge import _flatten_rubric
@@ -54,6 +56,12 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
         "no_support",
         "others",
     ]
+    assert list(operation.operation_policy.route_policy.routes) == [
+        "fast_system",
+        "skill",
+        "jarvis",
+        "other",
+    ]
     assert operation.operation_policy.issue_types[
         "录屏Query无法与输入Query一致核验"
     ].allowed_correctness == ["others"]
@@ -62,6 +70,239 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     )
     assert "1. 操作完成度（权重 0.7，1–5 分）" in prompt
     assert "2. 步骤正确性（权重 0.3，1–5 分）" in prompt
+
+
+def test_operation_prompt_keeps_route_detection_independent() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "【执行链路识别（独立观察字段）】" in prompt
+    assert "fast_system（快系统）" in prompt
+    assert "skill（skill）" in prompt
+    assert "jarvis（贾维斯）" in prompt
+    assert "other（其他）" in prompt
+    assert "链路识别不得参与 correctness 判断" in prompt
+    assert "普通文字如果只是快系统、skill 或贾维斯的最终回复" in prompt
+    assert '"execution_routes"' in prompt
+    assert '"route_evidence"' in prompt
+    assert '"route_rationale"' in prompt
+    assert '"route_status"' in prompt
+
+
+def test_normalize_operation_routes_accepts_human_labels_and_keeps_order() -> None:
+    routes, evidence, status = normalize_operation_routes(
+        ["快系统", "skill", "贾维斯", "QA", "skill"],
+        [
+            {
+                "route": "快系统",
+                "evidence_frames": [2, "3", 2, 0],
+                "evidence": "直接弹出设置卡",
+                "confidence": 1.2,
+            },
+            {
+                "route": "QA",
+                "evidence_frames": [8],
+                "evidence": "参考 79 篇资料",
+                "confidence": 0.9,
+            },
+        ],
+        "detected",
+    )
+
+    assert routes == ["fast_system", "skill", "jarvis", "other"]
+    assert [item.route for item in evidence] == ["fast_system", "other"]
+    assert evidence[0].evidence_frames == [2, 3]
+    assert evidence[0].confidence == 1.0
+    assert status == "detected"
+
+
+def test_normalize_operation_routes_does_not_map_missing_evidence_to_other() -> None:
+    routes, evidence, status = normalize_operation_routes([], [], "detected")
+
+    assert routes == []
+    assert evidence == []
+    assert status == "insufficient_evidence"
+
+
+def test_normalize_operation_routes_resolves_contradictory_status_from_evidence() -> None:
+    routes, evidence, status = normalize_operation_routes(
+        ["skill"],
+        [
+            {
+                "route": "skill",
+                "evidence_frames": [3],
+                "evidence": "出现调用桌面与个性化的步骤提示",
+                "confidence": 0.7,
+            }
+        ],
+        "insufficient_evidence",
+    )
+
+    assert routes == ["skill"]
+    assert evidence
+    assert status == "detected"
+
+
+def test_normalize_operation_routes_rejects_generic_tool_return_as_skill() -> None:
+    routes, evidence, status = normalize_operation_routes(
+        ["skill"],
+        [
+            {
+                "route": "skill",
+                "evidence_frames": [3, 4],
+                "evidence": "出现‘相关工具已返回结果’的普通气泡文字",
+                "confidence": 0.8,
+            }
+        ],
+        "detected",
+    )
+
+    assert routes == ["other"]
+    assert [item.route for item in evidence] == ["other"]
+    assert status == "detected"
+
+
+def test_normalize_operation_routes_keeps_skill_with_real_step_info() -> None:
+    routes, evidence, _ = normalize_operation_routes(
+        ["skill"],
+        [
+            {
+                "route": "skill",
+                "evidence_frames": [3, 4],
+                "evidence": "出现执行 CheckClickVibration 的步骤信息，随后显示相关工具已返回结果",
+                "confidence": 0.9,
+            }
+        ],
+        "detected",
+    )
+
+    assert routes == ["skill"]
+    assert [item.route for item in evidence] == ["skill"]
+
+
+def test_normalize_operation_routes_folds_jarvis_embedded_step_text() -> None:
+    routes, evidence, _ = normalize_operation_routes(
+        ["skill", "jarvis"],
+        [
+            {
+                "route": "skill",
+                "evidence_frames": [5],
+                "evidence": "显示任务执行中及应用操作步骤信息",
+                "confidence": 0.9,
+            },
+            {
+                "route": "jarvis",
+                "evidence_frames": [6, 7],
+                "evidence": "显示正在操作设置操控任务卡",
+                "confidence": 0.9,
+            },
+        ],
+        "detected",
+    )
+
+    assert routes == ["jarvis"]
+    assert [item.route for item in evidence] == ["jarvis"]
+
+
+def test_normalize_operation_routes_keeps_independent_skill_before_jarvis() -> None:
+    routes, evidence, _ = normalize_operation_routes(
+        ["skill", "jarvis"],
+        [
+            {
+                "route": "skill",
+                "evidence_frames": [3, 4],
+                "evidence": "显示调用 mobile-data-usage-6、调用流量管理",
+                "confidence": 0.9,
+            },
+            {
+                "route": "jarvis",
+                "evidence_frames": [7, 8],
+                "evidence": "显示正在操作畅连操控任务卡",
+                "confidence": 0.9,
+            },
+        ],
+        "detected",
+    )
+
+    assert routes == ["skill", "jarvis"]
+    assert [item.route for item in evidence] == ["skill", "jarvis"]
+
+
+def test_normalize_operation_routes_drops_plain_text_other_after_operation() -> None:
+    routes, evidence, _ = normalize_operation_routes(
+        ["skill", "jarvis", "other"],
+        [
+            {
+                "route": "skill",
+                "evidence_frames": [3],
+                "evidence": "显示调用 phone-settings 步骤信息",
+                "confidence": 0.9,
+            },
+            {
+                "route": "jarvis",
+                "evidence_frames": [4, 5],
+                "evidence": "显示正在操作设置任务卡",
+                "confidence": 0.9,
+            },
+            {
+                "route": "other",
+                "evidence_frames": [8],
+                "evidence": "Agent 以普通文字回复交付最终结果",
+                "confidence": 0.8,
+            },
+        ],
+        "detected",
+    )
+
+    assert routes == ["skill", "jarvis"]
+    assert [item.route for item in evidence] == ["skill", "jarvis"]
+
+
+def test_normalize_operation_routes_keeps_independent_qa_after_operation() -> None:
+    routes, evidence, _ = normalize_operation_routes(
+        ["jarvis", "other"],
+        [
+            {
+                "route": "jarvis",
+                "evidence_frames": [3, 4],
+                "evidence": "显示正在操作设置任务卡",
+                "confidence": 0.9,
+            },
+            {
+                "route": "other",
+                "evidence_frames": [8, 9],
+                "evidence": "随后出现生成回复和参考 12 篇资料的独立 QA 流程",
+                "confidence": 0.9,
+            },
+        ],
+        "detected",
+    )
+
+    assert routes == ["jarvis", "other"]
+    assert [item.route for item in evidence] == ["jarvis", "other"]
+
+
+def test_normalize_operation_routes_keeps_plain_text_as_only_other_route() -> None:
+    routes, evidence, _ = normalize_operation_routes(
+        ["other"],
+        [
+            {
+                "route": "other",
+                "evidence_frames": [3],
+                "evidence": "整段只有普通文字回复",
+                "confidence": 0.7,
+            }
+        ],
+        "detected",
+    )
+
+    assert routes == ["other"]
+    assert [item.route for item in evidence] == ["other"]
+
+
+def test_format_operation_route_rationale_matches_normalized_routes() -> None:
+    assert format_operation_route_rationale(
+        ["skill", "jarvis"], "原始输出为 skill；贾维斯；其他"
+    ) == "按首次出现顺序识别为：skill；贾维斯"
 
 
 def test_operation_prompt_uses_new_whole_query_decision_policy() -> None:

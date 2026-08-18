@@ -26,6 +26,8 @@ def test_operation_results_show_issue_types_and_low_level_fields() -> None:
 
     assert '{ key: "issue_types", label: "问题类型" }' in app_js
     assert '{ key: "is_low_level", label: "是否低级" }' in app_js
+    assert '{ key: "execution_routes", label: "执行链路" }' in app_js
+    assert 'join("；")' in app_js
     assert 'if (c.key === "is_low_level") return v === "yes" ? "是" : "否";' in app_js
     assert 'ok: "✓ 完成"' in app_js
     assert 'no_support: "⊘ 客观条件不支持"' in app_js

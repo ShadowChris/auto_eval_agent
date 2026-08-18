@@ -352,6 +352,10 @@ _JSONL_INTERNAL_RESULT_FIELDS = {
 
 _JSONL_EVALUATION_DEFAULTS: tuple[tuple[str, Any], ...] = (
     ("task_type", None),
+    ("execution_routes", []),
+    ("route_evidence", []),
+    ("route_rationale", ""),
+    ("route_status", None),
     ("correctness", None),
     ("issue_types", []),
     ("is_low_level", None),
@@ -702,6 +706,11 @@ _OPERATION_EXPORT_COLUMNS = (
     "context",
     "answer",
     "task_type",
+    "execution_routes",
+    "链路类型",
+    "route_status",
+    "route_evidence",
+    "route_rationale",
     "correctness",
     "issue_types",
     "is_low_level",
@@ -716,6 +725,24 @@ _OPERATION_EXPORT_COLUMNS = (
     "error",
     "video_prepare_warnings",
 )
+
+_OPERATION_ROUTE_DISPLAY = {
+    "fast_system": "快系统",
+    "skill": "技能",
+    "jarvis": "贾维斯",
+    "other": "其他",
+}
+
+
+def _format_operation_routes_zh(value: Any) -> str:
+    """将任务类执行链路转换为适合人工查看的中文文本。"""
+    if isinstance(value, str):
+        routes = [part.strip() for part in re.split(r"[；;,]", value) if part.strip()]
+    elif isinstance(value, (list, tuple)):
+        routes = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        routes = []
+    return "；".join(_OPERATION_ROUTE_DISPLAY.get(route, route) for route in routes)
 
 
 def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]:
@@ -750,6 +777,13 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
             "context": result.get("context") or item.get("context") or "",
             "answer": result.get("answer") or item.get("answer") or "",
             "task_type": result.get("task_type", ""),
+            "execution_routes": result.get("execution_routes", ""),
+            "链路类型": _format_operation_routes_zh(
+                result.get("execution_routes", "")
+            ),
+            "route_status": result.get("route_status", ""),
+            "route_evidence": result.get("route_evidence", ""),
+            "route_rationale": result.get("route_rationale", ""),
             "correctness": result.get("correctness", ""),
             "issue_types": result.get("issue_types", ""),
             "is_low_level": result.get("is_low_level", ""),
@@ -764,9 +798,13 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
             "error": result.get("error", ""),
             "video_prepare_warnings": result.get("video_prepare_warnings", ""),
         }
-        for key in ("issue_types", "video_prepare_warnings"):
+        for key in ("execution_routes", "issue_types", "video_prepare_warnings"):
             if isinstance(values[key], list):
                 values[key] = "；".join(str(value) for value in values[key])
+        if isinstance(values["route_evidence"], (list, dict)):
+            values["route_evidence"] = json.dumps(
+                values["route_evidence"], ensure_ascii=False
+            )
         export.append({key: values[key] for key in _OPERATION_EXPORT_COLUMNS})
     return export
 
@@ -1093,6 +1131,14 @@ def _result_rows(results: list[dict], dim_names: list[str] | None = None) -> lis
         row = dict(r)
         if isinstance(row.get("issue_types"), list):
             row["issue_types"] = "；".join(str(value) for value in row["issue_types"])
+        if isinstance(row.get("execution_routes"), list):
+            row["execution_routes"] = "；".join(
+                str(value) for value in row["execution_routes"]
+            )
+        if isinstance(row.get("route_evidence"), (list, dict)):
+            row["route_evidence"] = json.dumps(
+                row["route_evidence"], ensure_ascii=False
+            )
         rubric = row.pop("rubric", {}) or {}
         reasons = row.pop("rubric_reasons", {}) or {}
         na_dims = set(r.get("na_dimensions") or [])

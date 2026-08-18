@@ -628,6 +628,7 @@ createApp({
           { key: "item_id", label: "题号" },
           { key: "query", label: "操作意图" },
           ...contextCols,
+          { key: "execution_routes", label: "执行链路" },
           { key: "correctness", label: "完成判定" },
           { key: "issue_types", label: "问题类型" },
           { key: "is_low_level", label: "是否低级" },
@@ -722,6 +723,7 @@ createApp({
         || [
           "correctness", "winner", "total", "used_search", "truncated", "arbitrated",
           "agree", "latency_s", "bidirectional_consistent", "is_low_level",
+          "execution_routes",
           "card_presence", "card_count", "superlink_presence",
           "superlink_count", "answer_coverage", "needs_review", "problem_solved",
         ].includes(c.key);
@@ -772,7 +774,7 @@ createApp({
         if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.answer_text || ""} ${(r.issue_types || []).join(" ")} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.answer_text || ""} ${(r.execution_routes || []).join(" ")} ${r.route_rationale || ""} ${(r.issue_types || []).join(" ")} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -1370,6 +1372,7 @@ createApp({
       if (c.rubricDim && r.rubric_reasons && r.rubric_reasons[c.rubricDim]) {
         return r.rubric_reasons[c.rubricDim];
       }
+      if (c.key === "execution_routes") return r.route_rationale || "";
       return "";
     }
     function cell(r, c) {
@@ -1394,6 +1397,13 @@ createApp({
         if (mode.value === "operation")
           return ({ ok: "✓ 完成", nok: "✗ 未完成或执行错误", no_support: "⊘ 客观条件不支持", others: "? 其他" }[v] || v) || "";
         return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
+      }
+      if (c.key === "execution_routes") {
+        const names = { fast_system: "快系统", skill: "skill", jarvis: "贾维斯", other: "其他" };
+        if (Array.isArray(v) && v.length) return v.map((route) => names[route] || route).join("；");
+        if (r.route_status === "uncertain") return "不确定";
+        if (r.route_status === "insufficient_evidence") return "无法判断";
+        return "";
       }
       if (["issue_types", "card_types", "card_contents", "superlink_texts"].includes(c.key)) {
         return Array.isArray(v) ? v.join("；") : (v || "");

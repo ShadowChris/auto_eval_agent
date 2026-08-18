@@ -1,6 +1,11 @@
 from auto_eval.config import EnsembleConfig, RubricDim
 from auto_eval.judges import aggregate_operation_scores, aggregate_pairs, aggregate_scores
-from auto_eval.schema import OperationSingleScore, SinglePair, SingleScore
+from auto_eval.schema import (
+    OperationRouteEvidence,
+    OperationSingleScore,
+    SinglePair,
+    SingleScore,
+)
 
 
 def test_aggregate_scores_majority_and_agreement():
@@ -147,6 +152,72 @@ def test_aggregate_operation_query_alignment_issue_clears_scores():
     assert verdict.rubric_reasons == {}
     assert verdict.na_dimensions == ["操作完成度", "步骤正确性"]
     assert verdict.total is None
+
+
+def test_aggregate_operation_routes_are_ordered_and_independent_from_correctness():
+    dims = [RubricDim(name="操作完成度", description="d", scale=5)]
+    scores = [
+        OperationSingleScore(
+            item_id="i",
+            model="m",
+            judge="j1",
+            rubric={"操作完成度": 1},
+            total=1,
+            task_type="simple",
+            correctness="nok",
+            issue_types=["执行中断"],
+            execution_routes=["fast_system", "skill"],
+            route_evidence=[
+                OperationRouteEvidence(
+                    route="fast_system",
+                    evidence_frames=[2],
+                    evidence="直接弹出系统卡",
+                    confidence=0.9,
+                ),
+                OperationRouteEvidence(
+                    route="skill",
+                    evidence_frames=[5],
+                    evidence="出现步骤栏",
+                    confidence=0.8,
+                ),
+            ],
+            route_rationale="先快系统，后 skill。",
+            route_status="detected",
+        ),
+        OperationSingleScore(
+            item_id="i",
+            model="m",
+            judge="j2",
+            rubric={"操作完成度": 5},
+            total=5,
+            task_type="simple",
+            correctness="ok",
+            execution_routes=["fast_system", "skill"],
+            route_evidence=[
+                OperationRouteEvidence(
+                    route="fast_system",
+                    evidence_frames=[2, 3],
+                    evidence="设置结果卡",
+                    confidence=1.0,
+                ),
+                OperationRouteEvidence(
+                    route="skill",
+                    evidence_frames=[6],
+                    evidence="已完成步骤栏",
+                    confidence=0.9,
+                ),
+            ],
+            route_rationale="快系统后切换 skill。",
+            route_status="detected",
+        ),
+    ]
+
+    verdict = aggregate_operation_scores(scores, dims, EnsembleConfig(), 0.6)
+
+    assert verdict.correctness == "others"
+    assert verdict.execution_routes == ["fast_system", "skill"]
+    assert [item.evidence_frames for item in verdict.route_evidence] == [[2, 3], [5, 6]]
+    assert verdict.route_status == "detected"
 
 
 def test_aggregate_pairs_winrate():

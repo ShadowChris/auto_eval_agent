@@ -8,6 +8,7 @@ import numpy as np
 
 from ..config import EnsembleConfig, RubricDim
 from ..schema import (
+    OperationRouteEvidence,
     OperationSingleScore,
     OperationVerdict,
     PairResult,
@@ -246,6 +247,70 @@ def aggregate_operation_scores(
         na_consensus = [dim.name for dim in dims]
         total = None
 
+    # 执行链路是独立视觉观察：跨所有裁判聚合，不跟随最终 correctness 筛选。
+    route_counts: collections.Counter[str] = collections.Counter()
+    route_positions: dict[str, list[int]] = collections.defaultdict(list)
+    for score in scores:
+        for position, route in enumerate(score.execution_routes):
+            route_counts[route] += 1
+            route_positions[route].append(position)
+    minimum_route_support = max(1, (len(scores) + 1) // 2)
+    route_priority = {"fast_system": 0, "skill": 1, "jarvis": 2, "other": 3}
+    execution_routes = sorted(
+        [route for route, count in route_counts.items() if count >= minimum_route_support],
+        key=lambda route: (
+            float(np.mean(route_positions[route])),
+            route_priority.get(route, 99),
+        ),
+    )
+    route_evidence: list[OperationRouteEvidence] = []
+    for route in execution_routes:
+        candidates = [
+            item
+            for score in scores
+            for item in score.route_evidence
+            if item.route == route
+        ]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda item: item.confidence)
+        frames = sorted(
+            {frame for item in candidates for frame in item.evidence_frames}
+        )
+        route_evidence.append(
+            OperationRouteEvidence(
+                route=route,
+                evidence_frames=frames,
+                evidence=best.evidence,
+                confidence=float(np.mean([item.confidence for item in candidates])),
+            )
+        )
+    if execution_routes:
+        route_status = (
+            "detected"
+            if any(score.route_status == "detected" for score in scores)
+            else "uncertain"
+        )
+    elif any(score.route_status == "uncertain" for score in scores):
+        route_status = "uncertain"
+    else:
+        route_status = "insufficient_evidence"
+    route_rationale = " | ".join(
+        f"[{score.judge}] {score.route_rationale}"
+        for score in scores
+        if score.route_rationale
+    )[:2000]
+    if execution_routes and not route_rationale:
+        route_names = {
+            "fast_system": "快系统",
+            "skill": "skill",
+            "jarvis": "贾维斯",
+            "other": "其他",
+        }
+        route_rationale = "按首次出现顺序识别为：" + "；".join(
+            route_names.get(route, route) for route in execution_routes
+        )
+
     return OperationVerdict(
         item_id=scores[0].item_id,
         model=scores[0].model,
@@ -258,6 +323,10 @@ def aggregate_operation_scores(
         issue_types=issue_types,
         is_low_level=is_low_level,
         rationale=" | ".join(f"[{score.judge}] {score.rationale}" for score in scores[:3]),
+        execution_routes=execution_routes,
+        route_evidence=route_evidence,
+        route_rationale=route_rationale,
+        route_status=route_status,
         n_judges=len({score.judge for score in scores}),
         judges_agreement=agreement,
         repeat_std=repeat_std,

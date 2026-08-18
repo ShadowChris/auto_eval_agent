@@ -4,9 +4,57 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..schema import OperationCorrectness
+from ..schema import OperationCorrectness, OperationRouteEvidence
 
 _VALID_CORRECTNESS = {"ok", "nok", "no_support", "others"}
+_VALID_ROUTE_STATUS = {"detected", "uncertain", "insufficient_evidence"}
+_ROUTE_ALIASES = {
+    "fast_system": "fast_system",
+    "fast system": "fast_system",
+    "快系统": "fast_system",
+    "任务快系统": "fast_system",
+    "skill": "skill",
+    "技能": "skill",
+    "技能链路": "skill",
+    "jarvis": "jarvis",
+    "贾维斯": "jarvis",
+    "other": "other",
+    "others": "other",
+    "其他": "other",
+    "qa": "other",
+    "问答": "other",
+}
+_ROUTE_DISPLAY = {
+    "fast_system": "快系统",
+    "skill": "skill",
+    "jarvis": "贾维斯",
+    "other": "其他",
+}
+_GENERIC_TOOL_RETURN_CUES = ("相关工具已返回结果", "工具已返回结果")
+_STRONG_SKILL_EVIDENCE_CUES = (
+    "step info",
+    "步骤信息",
+    "步骤提示",
+    "步骤数量",
+    "齿轮",
+    "可展开",
+    "已完成栏",
+    "完成面板",
+)
+_JARVIS_EMBEDDED_STEP_CUES = ("任务执行中", "应用操作")
+_INDEPENDENT_SKILL_CUES = ("调用", "已完成栏", "完成面板", "齿轮", "可展开")
+_OPERATION_ROUTES = {"fast_system", "skill", "jarvis"}
+_INDEPENDENT_OTHER_CUES = (
+    "生成回复",
+    "参考",
+    "篇资料",
+    "引用来源",
+    "联网检索",
+    "检索生成",
+    "问答卡片",
+    "独立qa",
+    "独立 qa",
+)
 QUERY_ALIGNMENT_ISSUE = "录屏Query无法与输入Query一致核验"
 _LEGACY_CORRECTNESS = {
     "right": "ok",
@@ -87,6 +135,10 @@ _MISNESTED_TOP_LEVEL_FIELDS = (
     "is_low_level",
     "rationale",
     "confidence",
+    "execution_routes",
+    "route_evidence",
+    "route_rationale",
+    "route_status",
 )
 
 
@@ -124,6 +176,133 @@ def _as_issue_list(value: Any) -> list[str]:
             if normalized not in result:
                 result.append(normalized)
     return result
+
+
+def _normalize_route(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return _ROUTE_ALIASES.get(text.lower()) or _ROUTE_ALIASES.get(text)
+
+
+def _route_from_evidence(route: str, evidence: str) -> str:
+    """对已明确约定的弱视觉特征做确定性门控，避免 Prompt 漂移。"""
+    lowered = evidence.lower()
+    if (
+        route == "skill"
+        and any(cue in evidence for cue in _GENERIC_TOOL_RETURN_CUES)
+        and not any(cue in lowered for cue in _STRONG_SKILL_EVIDENCE_CUES)
+    ):
+        return "other"
+    return route
+
+
+def normalize_operation_routes(
+    routes_value: Any,
+    evidence_value: Any,
+    status_value: Any,
+) -> tuple[list[str], list[OperationRouteEvidence], str]:
+    """归一化任务类多标签链路，保序去重并容忍中英文标签。"""
+    raw_routes = routes_value if isinstance(routes_value, list) else []
+    if isinstance(routes_value, str):
+        raw_routes = re.split(r"[,，;；、|/]+", routes_value)
+
+    routes: list[str] = []
+    for raw in raw_routes:
+        route = _normalize_route(raw)
+        if route and route not in routes:
+            routes.append(route)
+
+    evidence_items = evidence_value if isinstance(evidence_value, list) else []
+    evidence: list[OperationRouteEvidence] = []
+    evidence_by_route: set[str] = set()
+    remapped_routes: dict[str, str] = {}
+    for raw in evidence_items:
+        if not isinstance(raw, dict):
+            continue
+        source_route = _normalize_route(raw.get("route"))
+        if not source_route:
+            continue
+        evidence_text = str(raw.get("evidence") or "").strip()
+        route = _route_from_evidence(source_route, evidence_text)
+        if route != source_route:
+            remapped_routes[source_route] = route
+        if route in evidence_by_route:
+            continue
+        frames: list[int] = []
+        raw_frames = raw.get("evidence_frames")
+        if isinstance(raw_frames, list):
+            for frame in raw_frames:
+                try:
+                    number = int(frame)
+                except (TypeError, ValueError):
+                    continue
+                if number > 0 and number not in frames:
+                    frames.append(number)
+        try:
+            confidence = max(0.0, min(1.0, float(raw.get("confidence", 0.0))))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        evidence.append(
+            OperationRouteEvidence(
+                route=route,
+                evidence_frames=frames,
+                evidence=evidence_text,
+                confidence=confidence,
+            )
+        )
+        evidence_by_route.add(route)
+        if route not in routes:
+            routes.append(route)
+
+    for source_route, target_route in remapped_routes.items():
+        if source_route not in evidence_by_route and source_route in routes:
+            position = routes.index(source_route)
+            routes.pop(position)
+            if target_route not in routes:
+                routes.insert(position, target_route)
+
+    if "skill" in routes and "jarvis" in routes:
+        skill_item = next((item for item in evidence if item.route == "skill"), None)
+        if (
+            skill_item
+            and any(cue in skill_item.evidence for cue in _JARVIS_EMBEDDED_STEP_CUES)
+            and not any(cue in skill_item.evidence for cue in _INDEPENDENT_SKILL_CUES)
+        ):
+            routes.remove("skill")
+            evidence = [item for item in evidence if item.route != "skill"]
+
+    if "other" in routes and any(route in _OPERATION_ROUTES for route in routes):
+        other_item = next((item for item in evidence if item.route == "other"), None)
+        other_evidence = other_item.evidence.lower() if other_item else ""
+        if not any(cue in other_evidence for cue in _INDEPENDENT_OTHER_CUES):
+            routes.remove("other")
+            evidence = [item for item in evidence if item.route != "other"]
+
+    evidence.sort(key=lambda item: routes.index(item.route))
+    status = str(status_value or "").strip().lower()
+    if status not in _VALID_ROUTE_STATUS:
+        status = "detected" if routes else "insufficient_evidence"
+    if routes and status == "insufficient_evidence":
+        status = (
+            "detected"
+            if evidence and max(item.confidence for item in evidence) >= 0.6
+            else "uncertain"
+        )
+    if not routes and status == "detected":
+        status = "insufficient_evidence"
+    return routes, evidence, status
+
+
+def format_operation_route_rationale(
+    routes: list[str], rationale_value: Any = None
+) -> str:
+    """输出与归一化链路一致的简短摘要，避免保留已被门控删除的标签。"""
+    if routes:
+        return "按首次出现顺序识别为：" + "；".join(
+            _ROUTE_DISPLAY.get(route, route) for route in routes
+        )
+    return str(rationale_value or "").strip()
 
 
 def normalize_operation_correctness(

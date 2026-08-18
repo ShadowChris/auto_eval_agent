@@ -807,6 +807,10 @@ def _fill_operation_verdict(out: dict, v) -> None:
     out["rubric_reasons"] = v.rubric_reasons or {}
     out["issue_types"] = v.issue_types
     out["is_low_level"] = v.is_low_level
+    out["execution_routes"] = v.execution_routes
+    out["route_evidence"] = [item.model_dump(mode="json") for item in v.route_evidence]
+    out["route_rationale"] = v.route_rationale
+    out["route_status"] = v.route_status
     rationale = v.rationale or ""
     reasons = v.rubric_reasons or {}
     if reasons:

@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, model_validator
 Correctness = Literal["right", "wrong", "partial", "unclear"]
 OperationCorrectness = Literal["ok", "nok", "no_support", "others"]
 OperationTaskType = Literal["simple", "complex"]
+OperationRoute = Literal["fast_system", "skill", "jarvis", "other"]
+OperationRouteStatus = Literal["detected", "uncertain", "insufficient_evidence"]
 LowLevel = Literal["yes", "no"]
 Winner = Literal["a", "b", "tie"]
 Difficulty = Literal["easy", "medium", "hard"]
@@ -102,6 +104,15 @@ class SingleScore(BaseModel):
     latency_ms: int = 0
 
 
+class OperationRouteEvidence(BaseModel):
+    """一条执行链路及其可追溯的视觉证据。"""
+
+    route: OperationRoute
+    evidence_frames: list[int] = Field(default_factory=list)
+    evidence: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
 class OperationSingleScore(BaseModel):
     """任务类（录屏）单裁判评分，与问答类判定和错因字段解耦。"""
 
@@ -119,6 +130,10 @@ class OperationSingleScore(BaseModel):
     issue_types: list[str] = Field(default_factory=list)
     is_low_level: LowLevel = "no"
     rationale: str = ""
+    execution_routes: list[OperationRoute] = Field(default_factory=list)
+    route_evidence: list[OperationRouteEvidence] = Field(default_factory=list)
+    route_rationale: str = ""
+    route_status: OperationRouteStatus = "insufficient_evidence"
     analysis: str = ""
     used_search: bool = False
     search_queries: list[str] = Field(default_factory=list)
@@ -240,6 +255,10 @@ class OperationVerdict(BaseModel):
     issue_types: list[str] = Field(default_factory=list)
     is_low_level: LowLevel = "no"
     rationale: str = ""
+    execution_routes: list[OperationRoute] = Field(default_factory=list)
+    route_evidence: list[OperationRouteEvidence] = Field(default_factory=list)
+    route_rationale: str = ""
+    route_status: OperationRouteStatus = "insufficient_evidence"
     n_judges: int = 0
     judges_agreement: float | None = None
     repeat_std: float | None = None

@@ -97,6 +97,17 @@ def _snapshot(project: Path) -> dict:
                 "item_id": "op_1",
                 "query": "打开设置",
                 "correctness": "ok",
+                "execution_routes": ["fast_system", "skill"],
+                "route_status": "detected",
+                "route_evidence": [
+                    {
+                        "route": "fast_system",
+                        "evidence_frames": [2],
+                        "evidence": "直接弹出设置卡",
+                        "confidence": 0.9,
+                    }
+                ],
+                "route_rationale": "先快系统后 skill。",
                 "issue_types": [],
                 "total": 5,
                 "rubric": {"操作完成度": 5, "步骤正确性": 4},
@@ -152,6 +163,11 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     assert results[1]["video_path"] == "data/videos/two.mp4"
     assert results[1]["分享链接"] == ""
     assert results[0]["correctness"] == "ok"
+    assert results[0]["execution_routes"] == "fast_system；skill"
+    assert results[0]["链路类型"] == "快系统；技能"
+    assert results[0]["route_status"] == "detected"
+    assert '"route": "fast_system"' in results[0]["route_evidence"]
+    assert results[0]["route_rationale"] == "先快系统后 skill。"
     assert results[0]["理由_操作完成度"] == "已打开设置"
     assert results[0]["理由_步骤正确性"] == "路径正确"
     assert "index" not in results[0]

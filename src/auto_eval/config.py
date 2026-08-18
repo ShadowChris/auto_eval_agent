@@ -146,6 +146,44 @@ class OperationIssueType(BaseModel):
         return self
 
 
+class OperationRouteType(BaseModel):
+    """一种可从任务类录屏中观察到的执行链路。"""
+
+    name: str
+    description: str
+    positive_cues: list[str] = Field(default_factory=list)
+    exclusions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_route_type(self):
+        self.name = self.name.strip()
+        self.description = self.description.strip()
+        if not self.name or not self.description:
+            raise ValueError("operation_policy.route_policy.routes 的 name/description 不能为空")
+        if not self.positive_cues:
+            raise ValueError("operation_policy.route_policy.routes.positive_cues 不能为空")
+        return self
+
+
+class OperationRoutePolicy(BaseModel):
+    """任务类执行链路的视觉识别政策，与 correctness 独立。"""
+
+    routes: dict[str, OperationRouteType] = Field(default_factory=dict)
+    rules: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_routes(self):
+        expected = {"fast_system", "skill", "jarvis", "other"}
+        if set(self.routes) != expected:
+            raise ValueError(
+                "operation_policy.route_policy.routes 必须完整定义 "
+                "fast_system/skill/jarvis/other"
+            )
+        if not self.rules:
+            raise ValueError("operation_policy.route_policy.rules 不能为空")
+        return self
+
+
 class OperationPolicy(BaseModel):
     """任务类专属判定政策；仅由 operation skill 渲染进视觉裁判 Prompt。"""
 
@@ -157,6 +195,7 @@ class OperationPolicy(BaseModel):
     decision_order: list[str] = Field(default_factory=list)
     conditional_rules: list[str] = Field(default_factory=list)
     low_level_rules: list[str] = Field(default_factory=list)
+    route_policy: OperationRoutePolicy | None = None
 
     @model_validator(mode="after")
     def validate_status_keys(self):
