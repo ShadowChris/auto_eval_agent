@@ -6,7 +6,7 @@
 
 示例：
 
-    python data/excel_eval_failed_subset.py \
+    python scripts/excel_eval_failed_subset.py \
       evaluation.xlsx \
       dataset.jsonl
 """

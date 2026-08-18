@@ -42,6 +42,8 @@ def _snapshot(project: Path) -> dict:
                 "source_line": 3,
                 "source_data": {
                     "id": "op_1",
+                    "序号": "simple_001",
+                    "session_id": "session-001",
                     "query": "打开设置",
                     "分享链接": "https://example.test/1",
                     "video_path": "data/videos/one.mp4",
@@ -58,6 +60,8 @@ def _snapshot(project: Path) -> dict:
                 "source_line": 4,
                 "source_data": {
                     "id": "op_2",
+                    "序号": "simple_002",
+                    "session_id": "session-002",
                     "query": "关闭设置",
                     "分享链接": "",
                     "video_path": "data/videos/two.mp4",
@@ -72,6 +76,8 @@ def _snapshot(project: Path) -> dict:
                 "source_line": 5,
                 "source_data": {
                     "id": "op_3",
+                    "序号": "simple_003",
+                    "session_id": "session-003",
                     "query": "打开蓝牙",
                     "video_path": "data/videos/missing.mp4",
                 },
@@ -129,6 +135,22 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     results = sheets["逐题结果"]
     assert [row["item_id"] for row in results] == ["op_1", "op_2", "op_3"]
     assert list(results[0]) == list(history._OPERATION_EXPORT_COLUMNS)
+    assert list(results[0])[:7] == [
+        "数据集序号",
+        "item_id",
+        "序号",
+        "sessionid",
+        "query",
+        "video_path",
+        "分享链接",
+    ]
+    assert results[0]["序号"] == "simple_001"
+    assert results[0]["sessionid"] == "session-001"
+    assert results[0]["video_path"] == "data/videos/one.mp4"
+    assert results[0]["分享链接"] == "https://example.test/1"
+    assert results[1]["序号"] == "simple_002"
+    assert results[1]["video_path"] == "data/videos/two.mp4"
+    assert results[1]["分享链接"] == ""
     assert results[0]["correctness"] == "ok"
     assert results[0]["理由_操作完成度"] == "已打开设置"
     assert results[0]["理由_步骤正确性"] == "路径正确"

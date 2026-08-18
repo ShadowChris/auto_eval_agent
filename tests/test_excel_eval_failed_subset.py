@@ -7,7 +7,7 @@ import pytest
 pd = pytest.importorskip("pandas")
 pytest.importorskip("openpyxl")
 
-from data.excel_eval_failed_subset import extract_failed_subset
+from scripts.excel_eval_failed_subset import extract_failed_subset
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:

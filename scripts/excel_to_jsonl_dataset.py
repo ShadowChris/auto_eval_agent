@@ -13,7 +13,7 @@
 
 示例：
 
-    python data/excel_to_jsonl_dataset.py \
+    python scripts/excel_to_jsonl_dataset.py \
       "data/0805/V1/V1_录屏0805_复杂任务.csv" \
       --input-prefix "V1_录屏0805" \
       --video-prefix "data/0805/V1"

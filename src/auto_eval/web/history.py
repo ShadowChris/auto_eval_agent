@@ -694,7 +694,11 @@ _RUNTIME_ITEM_FIELDS = {
 _OPERATION_EXPORT_COLUMNS = (
     "数据集序号",
     "item_id",
+    "序号",
+    "sessionid",
     "query",
+    "video_path",
+    "分享链接",
     "context",
     "answer",
     "task_type",
@@ -723,12 +727,26 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
     export: list[dict] = []
     for position, result in enumerate(results):
         item = items[position] if position < len(items) else {}
+        source = _source_data_for_item(item)
+        item_id = result.get("item_id") or item.get("id") or f"q{position}"
+        source_video_path = source.get("video_path")
+        if source_video_path is None:
+            source_video_path = _project_relative_path(item.get("video_path"))
+        session_id = ""
+        for session_key in ("sessionid", "session_id", "sessionId"):
+            if session_key in source:
+                session_id = source.get(session_key)
+                break
         rubric = result.get("rubric") or {}
         reasons = result.get("rubric_reasons") or {}
         values = {
             "数据集序号": result.get("数据集序号", position + 1),
-            "item_id": result.get("item_id") or item.get("id") or f"q{position}",
+            "item_id": item_id,
+            "序号": _jsonl_sequence(source, item, str(item_id)),
+            "sessionid": session_id,
             "query": result.get("query") or item.get("query") or item.get("question") or "",
+            "video_path": source_video_path,
+            "分享链接": source.get("分享链接", ""),
             "context": result.get("context") or item.get("context") or "",
             "answer": result.get("answer") or item.get("answer") or "",
             "task_type": result.get("task_type", ""),

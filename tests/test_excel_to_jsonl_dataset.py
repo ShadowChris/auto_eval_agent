@@ -6,7 +6,7 @@ import pytest
 
 pd = pytest.importorskip("pandas")
 
-from data.excel_to_jsonl_dataset import convert_table
+from scripts.excel_to_jsonl_dataset import convert_table
 
 
 def test_convert_csv_to_ordered_operation_jsonl(tmp_path: Path):
