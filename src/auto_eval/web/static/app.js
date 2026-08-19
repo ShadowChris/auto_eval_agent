@@ -48,6 +48,10 @@ createApp({
     const summary = ref(null);
     const taskId = ref("");
     const runError = ref("");
+    const runKind = ref("initial");
+    const rerunProgress = ref(0);
+    const rerunTotal = ref(0);
+    const selectedRerunIndices = ref(new Set());
     const itemProgress = ref({});
     const progressEvents = ref({});
     const pieChart = ref(null);
@@ -752,7 +756,7 @@ createApp({
     }
 
     const resultTableWidth = computed(
-      () => 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0)
+      () => 42 + 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0) + 72
     );
 
     function isFrozenResultColumn(column) {
@@ -761,7 +765,7 @@ createApp({
 
     function frozenResultColumnStyle(column, columnIndex) {
       if (!isFrozenResultColumn(column)) return {};
-      const left = 48 + resultCols.value
+      const left = 42 + 48 + resultCols.value
         .slice(0, columnIndex)
         .reduce((sum, previous) => sum + columnWidth(previous), 0);
       return { left: `${left}px` };
@@ -784,6 +788,15 @@ createApp({
       const safePage = Math.min(resultPage.value, pageCount.value);
       const start = (safePage - 1) * resultPageSize.value;
       return filteredResults.value.slice(start, start + resultPageSize.value);
+    });
+    const selectedRerunCount = computed(() => selectedRerunIndices.value.size);
+    const allPagedResultsSelected = computed(() => {
+      const indexes = pagedResults.value
+        .map((result) => Number(result.index))
+        .filter((index) => Number.isInteger(index) && index >= 0);
+      return indexes.length > 0 && indexes.every(
+        (index) => selectedRerunIndices.value.has(index),
+      );
     });
 
     const fallbackStat = computed(() => {
@@ -943,6 +956,10 @@ createApp({
       progressPage.value = 1;
       runError.value = "";
       eventCursor.value = 0;
+      runKind.value = "initial";
+      rerunProgress.value = 0;
+      rerunTotal.value = 0;
+      selectedRerunIndices.value = new Set();
     }
 
     function switchMode(k) {
@@ -1172,6 +1189,7 @@ createApp({
         ])
       );
       running.value = true;
+      runKind.value = "initial";
       const body = {
         mode: mode.value,
         items: items.value,
@@ -1279,6 +1297,20 @@ createApp({
         total.value = Number.isFinite(Number(d.total)) ? Number(d.total) : total.value;
         progress.value = Number.isFinite(Number(d.progress)) ? Number(d.progress) : progress.value;
         running.value = isActiveHistoryStatus(d.status);
+        runKind.value = d.run_kind === "rerun" || d.status === "rerunning" ? "rerun" : "initial";
+        if (runKind.value === "rerun") {
+          rerunProgress.value = Number(d.rerun_progress || d.active_rerun?.done || 0);
+          rerunTotal.value = Number(d.rerun_total || d.active_rerun?.total || 0);
+        }
+      });
+      es.addEventListener("rerun_start", (e) => {
+        if (taskId.value !== connectedTaskId) return;
+        rememberCursor(e);
+        const d = JSON.parse(e.data);
+        runKind.value = "rerun";
+        rerunProgress.value = Number(d.done || 0);
+        rerunTotal.value = Number(d.total || 0);
+        running.value = true;
       });
       es.addEventListener("item_progress", (e) => {
         if (taskId.value !== connectedTaskId) return;
@@ -1302,6 +1334,11 @@ createApp({
           results.value = [...results.value, d.result];
         }
         progress.value = d.progress;
+        if (d.rerun) {
+          runKind.value = "rerun";
+          rerunProgress.value = Number(d.rerun_progress || 0);
+          rerunTotal.value = Number(d.rerun_total || rerunTotal.value || 0);
+        }
         const index = d.result.index;
         if (index != null) {
           const previous = itemProgress.value[index] || {};
@@ -1358,6 +1395,18 @@ createApp({
         runError.value = message;
         await loadHistory();
       });
+      const finishRerun = async (event, cancelled = false) => {
+        if (taskId.value !== connectedTaskId) return;
+        rememberCursor(event);
+        running.value = false;
+        es.close();
+        if (activeEventSource === es) activeEventSource = null;
+        await loadHistoryTask(connectedTaskId, false);
+        if (cancelled) runError.value = "用户手动中断重跑；已完成的重跑结果已保留";
+        await loadHistory();
+      };
+      es.addEventListener("rerun_done", (event) => finishRerun(event, false));
+      es.addEventListener("rerun_cancelled", (event) => finishRerun(event, true));
     }
 
     function isNA(r, dim) {
@@ -1642,13 +1691,14 @@ createApp({
     }
 
     function isActiveHistoryStatus(status) {
-      return status === "pending" || status === "running";
+      return status === "pending" || status === "running" || status === "rerunning";
     }
 
     function historyStatusLabel(status) {
       return ({
         pending: "等待中",
         running: "评估中",
+        rerunning: "重跑中",
         done: "已完成",
         error: "失败",
         cancelled: "已中断",
@@ -1700,6 +1750,10 @@ createApp({
           ? Number(d.done_total)
           : results.value.length;
         running.value = isActiveHistoryStatus(d.status);
+        runKind.value = d.status === "rerunning" ? "rerun" : "initial";
+        rerunProgress.value = Number(d.active_rerun?.done || 0);
+        rerunTotal.value = Number(d.active_rerun?.total || 0);
+        selectedRerunIndices.value = new Set();
         runError.value = d.status === "cancelled"
           ? (d.error || "任务已中断")
           : d.status === "error"
@@ -1766,6 +1820,100 @@ createApp({
       return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
     }
 
+    function isRerunSelected(result) {
+      return selectedRerunIndices.value.has(Number(result?.index));
+    }
+
+    function setRerunSelected(result, checked) {
+      const index = Number(result?.index);
+      if (!Number.isInteger(index) || index < 0) return;
+      const next = new Set(selectedRerunIndices.value);
+      if (checked) next.add(index);
+      else next.delete(index);
+      selectedRerunIndices.value = next;
+    }
+
+    function togglePagedRerunSelection(checked) {
+      const next = new Set(selectedRerunIndices.value);
+      pagedResults.value.forEach((result) => {
+        const index = Number(result?.index);
+        if (!Number.isInteger(index) || index < 0) return;
+        if (checked) next.add(index);
+        else next.delete(index);
+      });
+      selectedRerunIndices.value = next;
+    }
+
+    function selectFailedResults() {
+      selectedRerunIndices.value = new Set(
+        results.value
+          .filter((result) => Boolean(result?.error))
+          .map((result) => Number(result.index))
+          .filter((index) => Number.isInteger(index) && index >= 0),
+      );
+    }
+
+    function clearRerunSelection() {
+      selectedRerunIndices.value = new Set();
+    }
+
+    async function startRerun(rawIndices) {
+      if (!taskId.value || running.value) return;
+      const indices = [...new Set(rawIndices)]
+        .map(Number)
+        .filter((index) => Number.isInteger(index) && index >= 0)
+        .sort((a, b) => a - b);
+      if (!indices.length) {
+        alert("请先选择需要重跑的条目");
+        return;
+      }
+      if (!confirm(`确认重跑选中的 ${indices.length} 条数据？新结果会自动合并到当前历史任务。`)) return;
+      runError.value = "";
+      let response;
+      try {
+        response = await fetch(`/api/eval/${taskId.value}/rerun`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ item_indices: indices }),
+        });
+      } catch (error) {
+        alert("重跑启动失败：" + (error?.message || "网络错误"));
+        return;
+      }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert("重跑启动失败：" + (data.detail || "未知错误"));
+        return;
+      }
+      const nextProgress = { ...itemProgress.value };
+      indices.forEach((index) => {
+        nextProgress[index] = {
+          ...(nextProgress[index] || {}),
+          item_index: index,
+          item_id: items.value[index]?.id || `q${index}`,
+          status: "pending",
+          percent: 0,
+          message: "等待重跑",
+          stage_rank: 0,
+          started_at: null,
+          finished_at: null,
+        };
+      });
+      itemProgress.value = nextProgress;
+      runKind.value = "rerun";
+      rerunProgress.value = 0;
+      rerunTotal.value = indices.length;
+      running.value = true;
+      clearRerunSelection();
+      connectSSE();
+      await loadHistory();
+    }
+
+    function rerunOne(result) {
+      const index = Number(result?.index);
+      if (Number.isInteger(index) && index >= 0) startRerun([index]);
+    }
+
     onMounted(async () => {
       progressClockTimer = window.setInterval(() => {
         clockNow.value = Date.now();
@@ -1788,6 +1936,7 @@ createApp({
       workspacePage,
       modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
+      runKind, rerunProgress, rerunTotal, selectedRerunIndices, selectedRerunCount, allPagedResultsSelected,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, loadingHistoryTaskId, historyTotal, pageSize,
       historyPage, historyPageSize, historyPageCount, historyJumpPage,
@@ -1803,6 +1952,8 @@ createApp({
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,
+      isRerunSelected, setRerunSelected, togglePagedRerunSelection,
+      selectFailedResults, clearRerunSelection, startRerun, rerunOne,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
       changePreviewPage, changeProgressPage, changeOpPage, changeHistoryPage,
       changeResultPageSize, changeHistoryPageSize, paginationPages, setTablePage, jumpTablePage,

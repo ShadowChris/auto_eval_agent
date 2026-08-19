@@ -239,7 +239,10 @@
 
   <section>
     <button class="primary" @click="submit" :disabled="running || !canSubmit">▶ 开始评估</button>
-    <span v-if="running" class="running">评估中… {{ progress }}/{{ total }}</span>
+    <span v-if="running" class="running">
+      <template v-if="runKind==='rerun'">重跑中… {{ rerunProgress }}/{{ rerunTotal }}</template>
+      <template v-else>评估中… {{ progress }}/{{ total }}</template>
+    </span>
     <p v-if="runError" class="run-error">{{ runError }}</p>
   </section>
 
@@ -414,6 +417,14 @@
           {{ s.label }} {{ s.count }}
         </button>
       </div>
+      <div v-if="taskId && results.length" class="rerun-toolbar">
+        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败项</button>
+        <button type="button" class="primary" @click="startRerun([...selectedRerunIndices])" :disabled="running || !selectedRerunCount">
+          重跑选中项（{{ selectedRerunCount }}）
+        </button>
+        <button type="button" @click="clearRerunSelection" :disabled="running || !selectedRerunCount">清空选择</button>
+        <span class="hint">失败项指模型调用、超时、抽帧等技术失败；判定为 NOK 不会自动选中。</span>
+      </div>
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="correctnessFilter" @change="resetResultPage">
@@ -444,15 +455,20 @@
       <div class="result-table-wrap">
         <table class="grid results compact-results" :style="{ width: resultTableWidth + 'px' }">
           <colgroup>
+            <col style="width:42px">
             <col style="width:48px">
             <col v-for="c in resultCols" :key="'col-'+c.key" :style="{ width: columnWidth(c) + 'px' }">
             <col v-if="isVideoMode" style="width:100px">
             <col v-if="isVideoMode" style="width:100px">
             <col v-if="isVideoMode" style="width:100px">
+            <col style="width:72px">
           </colgroup>
           <thead>
             <tr>
-              <th :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}">#</th>
+              <th class="result-select-column" :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}">
+                <input type="checkbox" :checked="allPagedResultsSelected" :disabled="running || !pagedResults.length" @change="togglePagedRerunSelection($event.target.checked)" title="选择/取消当前页">
+              </th>
+              <th :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'42px'} : {}">#</th>
               <th
                 v-for="(c,columnIndex) in resultCols"
                 :key="c.key"
@@ -462,12 +478,16 @@
               <th v-if="isVideoMode">原视频（MP4）</th>
               <th v-if="isVideoMode">抽帧结果（ZIP）</th>
               <th v-if="isVideoMode">轨迹数据（JSON）</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
             <template v-for="(r,i) in pagedResults" :key="r.index ?? i">
               <tr :class="{'result-error':r.error}">
-                <td :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}"><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
+                <td class="result-select-column" :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}">
+                  <input type="checkbox" :checked="isRerunSelected(r)" :disabled="running" @change="setRerunSelected(r, $event.target.checked)">
+                </td>
+                <td :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'42px'} : {}"><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
                 <td
                   v-for="(c,columnIndex) in resultCols"
                   :key="c.key"
@@ -491,6 +511,10 @@
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
                   <a v-if="itemArtifactUrl(r, 'judge_calls')" :href="itemArtifactUrl(r, 'judge_calls')" class="row-export-link">下载</a>
+                  <span v-else>—</span>
+                </td>
+                <td class="row-export-cell">
+                  <a v-if="!running" href="#" class="row-export-link" @click.prevent="rerunOne(r)">重跑</a>
                   <span v-else>—</span>
                 </td>
               </tr>

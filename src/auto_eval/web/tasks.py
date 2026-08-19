@@ -22,7 +22,7 @@ class Task:
     session_name: str = ""
     dataset_name: str = ""
     note: str = ""
-    status: str = "pending"  # pending | running | done | error | cancelled
+    status: str = "pending"  # pending | running | rerunning | done | error | cancelled
     results: list[dict] = field(default_factory=list)
     item_progress: dict[str, dict] = field(default_factory=dict)
     progress_events: dict[str, list[dict]] = field(default_factory=dict)
@@ -35,6 +35,8 @@ class Task:
     duration_s: float | None = None
     done_total: int = 0
     error: str | None = None
+    active_rerun: dict[str, Any] | None = None
+    rerun_history: list[dict[str, Any]] = field(default_factory=list)
     event_cursor: int = 0
     event_log: list[dict] = field(default_factory=list, repr=False)
     last_persist_at: float = field(default=0.0, repr=False)
@@ -122,7 +124,28 @@ def get_task(task_id: str) -> Task | None:
         return None
     status = snapshot.get("status") or "done"
     error = snapshot.get("error")
-    if status in {"pending", "running"}:
+    active_rerun = snapshot.get("active_rerun")
+    rerun_history = list(snapshot.get("rerun_history") or [])
+    recovered_rerun = False
+    if status == "rerunning":
+        recovered_rerun = True
+        attempt = dict(active_rerun or {})
+        attempt.update({
+            "status": "interrupted",
+            "finished_at": time.time(),
+            "error": attempt.get("error") or "服务中断，重跑已停止；已合并的结果予以保留",
+        })
+        started_at = attempt.get("started_at")
+        if started_at is not None:
+            attempt["duration_s"] = round(
+                max(0.0, attempt["finished_at"] - float(started_at)), 3,
+            )
+        rerun_history.append(attempt)
+        status = str(attempt.get("base_status") or "done")
+        if status not in {"done", "error", "cancelled"}:
+            status = "done"
+        active_rerun = None
+    elif status in {"pending", "running"}:
         status = "error"
         error = error or "服务中断，已保留中断前完成的评估结果"
     task = Task(
@@ -156,9 +179,13 @@ def get_task(task_id: str) -> Task | None:
         ),
         done_total=int(snapshot.get("done_total") or len(snapshot.get("results") or [])),
         error=error,
+        active_rerun=active_rerun,
+        rerun_history=rerun_history,
         event_cursor=int(snapshot.get("event_cursor") or 0),
     )
     TASKS[task.id] = task
+    if recovered_rerun:
+        save_task(task)
     return task
 
 

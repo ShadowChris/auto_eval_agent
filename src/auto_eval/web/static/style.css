@@ -266,7 +266,12 @@ pre { background: #fef2f2; padding: 10px; border-radius: 6px; font-size: 12px; w
 .result-table-wrap th { position: sticky; top: 0; z-index: 1; white-space: nowrap; }
 .result-table-wrap td { min-width: 0; height: 54px; overflow: hidden; }
 .result-table-wrap th:nth-child(1), .result-table-wrap td:nth-child(1) { position: sticky; left: 0; z-index: 2; background: #fff; }
-.result-table-wrap th:nth-child(2), .result-table-wrap td:nth-child(2) { position: sticky; left: 48px; z-index: 2; background: #fff; }
+.result-table-wrap th:nth-child(2), .result-table-wrap td:nth-child(2) { position: sticky; left: 42px; z-index: 2; background: #fff; }
+.result-select-column { text-align: center; padding-left: 6px !important; padding-right: 6px !important; }
+.result-select-column input { width: 15px; height: 15px; cursor: pointer; }
+.result-select-column input:disabled { cursor: not-allowed; }
+.rerun-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.rerun-toolbar .hint { margin-left: 4px; }
 .progress-table-wrap .progress-table th,
 .progress-table-wrap .progress-table td {
   position: static;

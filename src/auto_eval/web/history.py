@@ -75,6 +75,8 @@ def task_to_snapshot(task) -> dict:
         "done_total": task.done_total,
         "event_cursor": getattr(task, "event_cursor", 0),
         "error": task.error,
+        "active_rerun": getattr(task, "active_rerun", None),
+        "rerun_history": getattr(task, "rerun_history", []),
     }
 
 
@@ -171,7 +173,9 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             continue
         status = data.get("status")
         error = data.get("error")
-        if status in {"pending", "running"}:
+        if status == "rerunning":
+            status = str((data.get("active_rerun") or {}).get("base_status") or "done")
+        elif status in {"pending", "running"}:
             status = "error"
             error = error or "服务中断，已保留中断前完成的评估结果"
         task_id = data.get("task_id") or path.stem
@@ -194,6 +198,8 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "updated_at": data.get("updated_at") or data.get("created_at"),
             **_stored_timing(data),
             "error": error,
+            "active_rerun": data.get("active_rerun"),
+            "rerun_count": len(data.get("rerun_history") or []),
             "preview": _preview(data),
         })
     rows.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
@@ -231,7 +237,9 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             continue
         status = data.get("status")
         error = data.get("error")
-        if status in {"pending", "running"}:
+        if status == "rerunning":
+            status = str((data.get("active_rerun") or {}).get("base_status") or "done")
+        elif status in {"pending", "running"}:
             status = "error"
             error = error or "服务中断，已保留中断前完成的评估结果"
         task_id = data.get("task_id") or path.stem
@@ -261,6 +269,8 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             "updated_at": data.get("updated_at") or created_at,
             **_stored_timing(data),
             "error": error,
+            "active_rerun": data.get("active_rerun"),
+            "rerun_count": len(data.get("rerun_history") or []),
             "preview": _preview(data),
         })
     return rows, total
@@ -317,6 +327,8 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         "total": len(items),
         "event_cursor": int(data.get("event_cursor") or 0),
         "error": data.get("error"),
+        "active_rerun": data.get("active_rerun"),
+        "rerun_history": data.get("rerun_history") or [],
     }
 
 
@@ -366,6 +378,9 @@ _JSONL_EVALUATION_DEFAULTS: tuple[tuple[str, Any], ...] = (
     ("rationale", ""),
     ("latency_s", None),
     ("video_prepare_warnings", []),
+    ("rerun_count", 0),
+    ("last_rerun_at", None),
+    ("last_rerun_attempt_id", None),
 )
 
 _LEGACY_SEQUENCE_RE = re.compile(
@@ -389,6 +404,7 @@ def _jsonl_eval_run(snapshot: dict) -> dict:
         "model": options.get("model") or "",
         "concurrency": options.get("concurrency"),
         "eval_timeout_s": options.get("eval_timeout_s"),
+        "rerun_count": len(snapshot.get("rerun_history") or []),
     }
 
 
@@ -590,6 +606,9 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     )
     if frame_rows:
         rows["抽帧清单"] = frame_rows
+    rerun_rows = _rerun_record_rows(snapshot)
+    if rerun_rows:
+        rows["重跑记录"] = rerun_rows
     if mode == "operation":
         # 任务类只有一个固定垂域，不再生成重复的按垂域拆分表、
         # 失败表和通用垂域统计表。失败与告警仍在“逐题结果”原行展示。
@@ -721,6 +740,8 @@ _OPERATION_EXPORT_COLUMNS = (
     "理由_步骤正确性",
     "rationale",
     "latency_s",
+    "重跑次数",
+    "最后重跑时间",
     "评估状态",
     "error",
     "video_prepare_warnings",
@@ -794,6 +815,8 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
             "理由_步骤正确性": reasons.get("步骤正确性", ""),
             "rationale": result.get("rationale", ""),
             "latency_s": result.get("latency_s", ""),
+            "重跑次数": result.get("rerun_count", 0),
+            "最后重跑时间": _format_ts(result.get("last_rerun_at")),
             "评估状态": result.get("评估状态", ""),
             "error": result.get("error", ""),
             "video_prepare_warnings": result.get("video_prepare_warnings", ""),
@@ -834,6 +857,8 @@ _RICH_CONTENT_EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("answer_issues", "回答的内容有什么问题"),
     ("rationale", "识别结论"),
     ("latency_s", "耗时"),
+    ("rerun_count", "重跑次数"),
+    ("last_rerun_at", "最后重跑时间"),
 ]
 
 # 列表类字段取值后需要拼接为字符串
@@ -877,6 +902,8 @@ def _rich_content_export_rows(results: list[dict]) -> list[dict]:
                 value = "；".join(str(v) for v in value)
             if key in _RICH_CONTENT_DISPLAY_MAP and value:
                 value = _RICH_CONTENT_DISPLAY_MAP[key].get(str(value), value)
+            if key == "last_rerun_at" and value:
+                value = _format_ts(value)
             export_row[label] = value
         export.append(export_row)
     return export
@@ -1063,7 +1090,47 @@ def _run_info(snapshot: dict) -> dict:
         "duration_s": _stored_timing(snapshot)["duration_s"],
         "options": snapshot.get("options") or {},
         "error": snapshot.get("error") or "",
+        "rerun_count": len(snapshot.get("rerun_history") or []),
     }
+
+
+def _rerun_record_rows(snapshot: dict) -> list[dict]:
+    """把批次级重跑审计展开为一题一行，便于 Excel 追溯和筛选。"""
+    items = snapshot.get("items") or []
+    rows: list[dict] = []
+    for attempt in snapshot.get("rerun_history") or []:
+        detail_by_index = {
+            int(detail["index"]): detail
+            for detail in (attempt.get("items") or [])
+            if isinstance(detail, dict) and str(detail.get("index", "")).isdigit()
+        }
+        for raw_index in attempt.get("item_indices") or []:
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            item = items[index] if 0 <= index < len(items) else {}
+            detail = detail_by_index.get(index, {})
+            rows.append({
+                "重跑批次": attempt.get("attempt_no", ""),
+                "attempt_id": attempt.get("attempt_id", ""),
+                "数据集序号": index + 1,
+                "item_id": detail.get("item_id") or item.get("id") or f"q{index}",
+                "query": item.get("query") or item.get("question") or "",
+                "批次状态": attempt.get("status", ""),
+                "单题状态": detail.get("status") or (
+                    "未执行" if attempt.get("status") in {"cancelled", "interrupted"} else ""
+                ),
+                "重跑前状态": detail.get("previous_status", ""),
+                "correctness": detail.get("correctness", ""),
+                "total": detail.get("total", ""),
+                "latency_s": detail.get("latency_s", ""),
+                "开始时间": _format_ts(attempt.get("started_at")),
+                "完成时间": _format_ts(detail.get("finished_at") or attempt.get("finished_at")),
+                "批次耗时（秒）": attempt.get("duration_s", ""),
+                "error": detail.get("error") or attempt.get("error") or "",
+            })
+    return rows
 
 
 def _operation_run_summary(snapshot: dict) -> dict:
@@ -1093,6 +1160,7 @@ def _operation_run_summary(snapshot: dict) -> dict:
         "started_at": _format_ts(snapshot.get("started_at")),
         "finished_at": _format_ts(snapshot.get("finished_at")),
         "duration_s": _stored_timing(snapshot)["duration_s"],
+        "rerun_count": len(snapshot.get("rerun_history") or []),
         "judges": judges,
         "model": options.get("model") or "",
         "concurrency": options.get("concurrency", ""),

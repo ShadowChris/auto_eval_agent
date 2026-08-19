@@ -11,6 +11,7 @@ import logging
 import os
 import time
 import traceback
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -139,7 +140,152 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
         )
 
 
-async def _run(task: Task, cfg: AppConfig) -> None:
+def _result_index(result: dict) -> int | None:
+    try:
+        return int(result.get("index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _upsert_result(task: Task, result: dict) -> dict | None:
+    """按原始数据集索引替换最新结果，保持输入顺序且不产生重复行。"""
+    index = _result_index(result)
+    previous = None
+    if index is not None:
+        for position, existing in enumerate(task.results):
+            if _result_index(existing) == index:
+                previous = existing
+                task.results[position] = result
+                break
+        else:
+            task.results.append(result)
+    else:
+        task.results.append(result)
+    task.results.sort(
+        key=lambda row: (
+            _result_index(row) is None,
+            _result_index(row) if _result_index(row) is not None else len(task.items),
+        ),
+    )
+    task.done_total = len({
+        value for row in task.results
+        if (value := _result_index(row)) is not None
+    })
+    return previous
+
+
+def _valid_cached_frames(item: dict) -> bool:
+    frames = item.get("frames") or []
+    return bool(frames) and all(Path(str(frame)).is_file() for frame in frames)
+
+
+def _prepare_rerun_items(task: Task, item_indices: list[int]) -> None:
+    """复用有效抽帧；缓存缺失时回退到原视频重新抽取。"""
+    if task.mode not in {"operation", "rich_content", "rich_content_quality"}:
+        return
+    for index in item_indices:
+        item = task.items[index]
+        if item.get("frames") and not _valid_cached_frames(item):
+            item.pop("frames", None)
+            item.pop("frame_count", None)
+
+
+async def run_rerun(
+    task: Task,
+    cfg: AppConfig,
+    item_indices: list[int],
+    *,
+    base_status: str | None = None,
+) -> None:
+    """在原历史任务内重跑指定原始索引，并把最新结果原位合并。"""
+    pending_attempt = (
+        dict(task.active_rerun)
+        if task.active_rerun and task.active_rerun.get("status") == "starting"
+        else {}
+    )
+    attempt_no = int(pending_attempt.get("attempt_no") or len(task.rerun_history) + 1)
+    started_at = float(pending_attempt.get("started_at") or time.time())
+    base_status = base_status or (
+        task.status if task.status in {"done", "error", "cancelled"} else "done"
+    )
+    base_error = task.error
+    attempt = {
+        "attempt_id": pending_attempt.get("attempt_id") or f"rerun-{attempt_no}-{uuid.uuid4().hex[:8]}",
+        "attempt_no": attempt_no,
+        "item_indices": list(item_indices),
+        "total": len(item_indices),
+        "done": 0,
+        "status": "running",
+        "base_status": base_status,
+        "started_at": started_at,
+        "items": [],
+    }
+    task.active_rerun = attempt
+    task.status = "rerunning"
+    task.error = None
+    _prepare_rerun_items(task, item_indices)
+    for index in item_indices:
+        item = task.items[index]
+        _record_progress(task, index, {
+            "item_index": index,
+            "item_id": item.get("id") or f"q{index}",
+            "status": "pending",
+            "percent": 0,
+            "message": "等待重跑",
+            "stage_rank": 0,
+            "started_at": None,
+            "finished_at": None,
+            "attempt_id": attempt["attempt_id"],
+            "attempt_no": attempt_no,
+        })
+    _persist_task(task, force=True)
+    await task.publish("rerun_start", {**attempt, "items": []})
+    cancelled = False
+    try:
+        await _run(task, cfg, item_indices=item_indices, rerun=attempt)
+        attempt["status"] = "done"
+    except asyncio.CancelledError:
+        cancelled = True
+        attempt["status"] = "cancelled"
+        attempt["error"] = "用户手动中断重跑"
+    except Exception as exc:
+        attempt["status"] = "error"
+        attempt["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        finished_at = time.time()
+        attempt["finished_at"] = finished_at
+        attempt["duration_s"] = round(max(0.0, finished_at - started_at), 3)
+        task.rerun_history.append(dict(attempt))
+        task.active_rerun = None
+        task.summary = _summarize(task, cfg)
+        unique_count = len({
+            value for row in task.results
+            if (value := _result_index(row)) is not None
+        })
+        task.status = "done" if unique_count >= len(task.items) else base_status
+        if task.status not in {"done", "error", "cancelled"}:
+            task.status = "done"
+        task.error = None if task.status == "done" else base_error
+        _persist_task(task, force=True)
+        await task.publish(
+            "rerun_cancelled" if cancelled else "rerun_done",
+            {
+                "attempt": attempt,
+                "summary": task.summary,
+                "status": task.status,
+                "progress": task.done_total,
+                "total": len(task.items),
+            },
+        )
+
+
+async def _run(
+    task: Task,
+    cfg: AppConfig,
+    *,
+    item_indices: list[int] | None = None,
+    rerun: dict | None = None,
+) -> None:
     selected = task.options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
     evaluation_time = datetime.fromtimestamp(task.created_at).astimezone()
@@ -202,7 +348,14 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     loop = asyncio.get_running_loop()
 
     async def one(idx: int, item_dict: dict):
-        request_id = make_request_id(task.created_at, task.id, idx)
+        attempt_no = int((rerun or {}).get("attempt_no") or 0)
+        attempt_id = str((rerun or {}).get("attempt_id") or "")
+        request_id = make_request_id(
+            task.created_at,
+            task.id,
+            idx,
+            attempt_no=attempt_no,
+        )
         pending_judge_traces: list[tuple[str, dict]] = []
 
         def publish_progress(payload: dict) -> None:
@@ -227,6 +380,8 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             request_id=request_id,
             item_id=item_id,
             item_index=idx,
+            attempt_id=attempt_id,
+            attempt_no=attempt_no,
             progress_callback=publish_progress,
             judge_trace_callback=collect_judge_trace,
         ):
@@ -382,6 +537,14 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                         request_id=request_id,
                     )
             res["index"] = idx
+            if rerun is not None:
+                prior = next(
+                    (row for row in task.results if _result_index(row) == idx),
+                    None,
+                )
+                res["rerun_count"] = int((prior or {}).get("rerun_count") or 0) + 1
+                res["last_rerun_at"] = time.time()
+                res["last_rerun_attempt_id"] = attempt_id
             video_prepare_warnings = item_dict.get("video_prepare_warnings") or []
             if video_prepare_warnings:
                 res["video_prepare_warnings"] = list(video_prepare_warnings)
@@ -391,8 +554,23 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                     pending_judge_traces,
                     res,
                 )
-            task.results.append(res)
-            task.done_total += 1
+            previous = _upsert_result(task, res)
+            if rerun is not None:
+                rerun["done"] = int(rerun.get("done") or 0) + 1
+                rerun.setdefault("items", []).append({
+                    "index": idx,
+                    "item_id": item_id,
+                    "status": "error" if res.get("error") else "done",
+                    "error": res.get("error"),
+                    "correctness": res.get("correctness"),
+                    "total": res.get("total"),
+                    "latency_s": res.get("latency_s"),
+                    "previous_status": (
+                        "error" if previous and previous.get("error") else
+                        "done" if previous else "missing"
+                    ),
+                    "finished_at": time.time(),
+                })
             failed = bool(res.get("error"))
             log_event(
                 "任务",
@@ -411,11 +589,20 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             )
             await task.publish(
                 "result",
-                {"progress": task.done_total, "total": len(task.items), "result": res},
+                {
+                    "progress": task.done_total,
+                    "total": len(task.items),
+                    "result": res,
+                    "rerun": rerun is not None,
+                    "rerun_progress": (rerun or {}).get("done"),
+                    "rerun_total": (rerun or {}).get("total"),
+                    "attempt_id": attempt_id or None,
+                },
             )
             _persist_task(task)
 
-    await asyncio.gather(*[one(i, it) for i, it in enumerate(task.items)])
+    indices = list(range(len(task.items))) if item_indices is None else list(item_indices)
+    await asyncio.gather(*[one(index, task.items[index]) for index in indices])
 
 
 def _write_eval_error(

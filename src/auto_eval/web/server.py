@@ -54,7 +54,7 @@ from .operation_media import (
     prepare_cached_operation_item,
     resolve_operation_video_path,
 )
-from .runner import run_eval
+from .runner import run_eval, run_rerun
 from .tasks import get_live_task, get_task, new_task
 
 # auto_eval_agent/ 目录（src/auto_eval/web/server.py 往上 4 层）
@@ -127,6 +127,10 @@ class OperationPrepareReq(BaseModel):
 
 class HistoryNoteReq(BaseModel):
     note: str = ""
+
+
+class RerunReq(BaseModel):
+    item_indices: list[int]
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
@@ -388,6 +392,10 @@ async def api_stream(
                     "finished_at": task.finished_at,
                     "duration_s": task.elapsed_s(),
                     "error": task.error,
+                    "active_rerun": task.active_rerun,
+                    "run_kind": "rerun" if task.status == "rerunning" else "initial",
+                    "rerun_progress": (task.active_rerun or {}).get("done"),
+                    "rerun_total": (task.active_rerun or {}).get("total"),
                 },
             )
             delivered_cursor = max(0, replay_after or 0)
@@ -422,7 +430,7 @@ async def api_stream(
                     )
                     delivered_cursor = cursor
                     terminal_replayed = message["event"] in {
-                        "done", "error", "cancelled",
+                        "done", "error", "cancelled", "rerun_done", "rerun_cancelled",
                     }
 
             if task.status in {"done", "error", "cancelled"}:
@@ -470,7 +478,9 @@ async def api_stream(
                     event_id=cursor or None,
                 )
                 delivered_cursor = max(delivered_cursor, cursor)
-                if msg["event"] in ("done", "error", "cancelled"):
+                if msg["event"] in (
+                    "done", "error", "cancelled", "rerun_done", "rerun_cancelled",
+                ):
                     break
         finally:
             task.unsubscribe(event_queue)
@@ -513,6 +523,8 @@ def api_history(
             "finished_at": live.finished_at,
             "duration_s": live.elapsed_s(),
             "error": live.error,
+            "active_rerun": live.active_rerun,
+            "rerun_count": len(live.rerun_history),
         })
     return {
         "items": rows,
@@ -541,7 +553,7 @@ def api_history_detail(task_id: str, compact: bool = False):
 @app.delete("/api/history/{task_id}")
 def api_history_delete(task_id: str):
     live = get_live_task(task_id)
-    if live is not None and live.status in {"pending", "running"}:
+    if live is not None and live.status in {"pending", "running", "rerunning"}:
         raise HTTPException(409, "运行中的任务请先中断，再删除历史记录")
     if not delete_snapshot(task_id):
         raise HTTPException(404, "task not found")
@@ -553,6 +565,38 @@ async def api_eval_cancel(task_id: str):
     task = get_live_task(task_id)
     if task is None:
         raise HTTPException(404, "当前服务中没有这个运行任务")
+    if task.status == "rerunning":
+        execution = task.execution
+        if execution is not None and not execution.done():
+            execution.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(execution), timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        # create_task 若在首次调度前即被取消，run_rerun 的 finally 不会执行；
+        # 这里兜底恢复父任务，避免历史永久卡在“重跑中”。
+        if task.status == "rerunning":
+            attempt = dict(task.active_rerun or {})
+            attempt["status"] = "cancelled"
+            attempt["error"] = "用户手动中断重跑"
+            attempt["finished_at"] = datetime.now().timestamp()
+            if attempt.get("started_at") is not None:
+                attempt["duration_s"] = round(max(
+                    0.0,
+                    attempt["finished_at"] - float(attempt["started_at"]),
+                ), 3)
+            task.rerun_history.append(attempt)
+            task.active_rerun = None
+            task.status = str(attempt.get("base_status") or "done")
+            await task.publish("rerun_cancelled", {
+                "attempt": attempt,
+                "summary": task.summary,
+                "status": task.status,
+                "progress": task.done_total,
+                "total": len(task.items),
+            })
+            save_task(task)
+        return {"ok": True, "task_id": task.id, "status": task.status}
     if task.status not in {"pending", "running"}:
         return {"ok": True, "task_id": task.id, "status": task.status}
 
@@ -592,6 +636,56 @@ async def api_eval_cancel(task_id: str):
     if not save_task(task):
         raise HTTPException(500, "任务已中断，但历史状态保存失败")
     return {"ok": True, "task_id": task.id, "status": task.status}
+
+
+@app.post("/api/eval/{task_id}/rerun")
+async def api_eval_rerun(task_id: str, req: RerunReq):
+    task = get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "task not found")
+    if task.status in {"pending", "running", "rerunning"}:
+        raise HTTPException(409, "当前任务仍在运行，请等待完成或先中断")
+    if task.execution is not None and not task.execution.done():
+        raise HTTPException(409, "当前任务已有执行中的操作")
+
+    indices = list(dict.fromkeys(req.item_indices))
+    if not indices:
+        raise HTTPException(400, "item_indices 为空")
+    invalid = [index for index in indices if index < 0 or index >= len(task.items)]
+    if invalid:
+        raise HTTPException(422, f"无效的数据集索引：{invalid[:10]}")
+
+    base_status = task.status
+    task.status = "rerunning"
+    attempt_no = len(task.rerun_history) + 1
+    task.active_rerun = {
+        "attempt_id": f"rerun-{attempt_no}-{uuid.uuid4().hex[:8]}",
+        "attempt_no": attempt_no,
+        "item_indices": indices,
+        "total": len(indices),
+        "done": 0,
+        "status": "starting",
+        "base_status": base_status,
+        "started_at": datetime.now().timestamp(),
+        "items": [],
+    }
+    save_task(task)
+    execution = asyncio.create_task(
+        run_rerun(task, cfg(), indices, base_status=base_status),
+    )
+    task.execution = execution
+
+    def clear_execution(finished: asyncio.Task) -> None:
+        if task.execution is finished:
+            task.execution = None
+
+    execution.add_done_callback(clear_execution)
+    return {
+        "ok": True,
+        "task_id": task.id,
+        "status": task.status,
+        "item_indices": indices,
+    }
 
 
 @app.patch("/api/history/{task_id}/note")

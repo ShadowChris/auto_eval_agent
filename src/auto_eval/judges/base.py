@@ -36,6 +36,8 @@ _TRACE_FIELDS = {
     "request_id",
     "item_index",
     "item_sequence",
+    "attempt_id",
+    "attempt_no",
     "ts",
     "status",
     "judge",
@@ -473,6 +475,8 @@ class JudgeClient:
                 "item_id": ctx.item_id,
                 "item_index": ctx.item_index,
                 "item_sequence": ctx.item_index + 1 if ctx.item_index >= 0 else None,
+                "attempt_id": ctx.attempt_id or None,
+                "attempt_no": ctx.attempt_no or 0,
                 **detail,
             }
             if ctx.judge_trace_callback:

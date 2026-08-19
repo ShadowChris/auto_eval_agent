@@ -31,6 +31,8 @@ class ChainContext:
     request_id: str = "-"
     item_id: str = "-"
     item_index: int = -1
+    attempt_id: str = ""
+    attempt_no: int = 0
     module: str = ""
     judge: str = ""
     round: int = 0
@@ -89,9 +91,16 @@ def bind_chain_context(**changes) -> Iterator[ChainContext]:
         _context.reset(token)
 
 
-def make_request_id(created_at: float, task_id: str, item_index: int) -> str:
+def make_request_id(
+    created_at: float,
+    task_id: str,
+    item_index: int,
+    *,
+    attempt_no: int = 0,
+) -> str:
     dt = datetime.fromtimestamp(created_at).astimezone()
-    return f"{dt:%y%m%d%H%M}_{task_id[:6]}_q{item_index}"
+    suffix = f"_r{attempt_no}" if attempt_no > 0 else ""
+    return f"{dt:%y%m%d%H%M}_{task_id[:6]}_q{item_index}{suffix}"
 
 
 class _DailySizeHandler(logging.Handler):
@@ -285,7 +294,10 @@ def log_event(
                     "judge": ctx.judge or None,
                     "round": ctx.round,
                     "updated_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
-                }
+            }
+            if ctx.attempt_id:
+                progress_payload["attempt_id"] = ctx.attempt_id
+                progress_payload["attempt_no"] = ctx.attempt_no
             if progress_fields:
                 progress_payload.update(progress_fields)
             # 文件日志保留完整调用栈；Web 逐题日志只投影便于排障的结构化详情，
