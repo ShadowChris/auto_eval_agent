@@ -728,7 +728,7 @@ _OPERATION_EXPORT_COLUMNS = (
 
 _OPERATION_ROUTE_DISPLAY = {
     "fast_system": "快系统",
-    "skill": "技能",
+    "skill": "skill",
     "jarvis": "贾维斯",
     "other": "其他",
 }

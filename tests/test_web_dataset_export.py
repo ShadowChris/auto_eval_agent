@@ -164,7 +164,7 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     assert results[1]["分享链接"] == ""
     assert results[0]["correctness"] == "ok"
     assert results[0]["execution_routes"] == "fast_system；skill"
-    assert results[0]["链路类型"] == "快系统；技能"
+    assert results[0]["链路类型"] == "快系统；skill"
     assert results[0]["route_status"] == "detected"
     assert '"route": "fast_system"' in results[0]["route_evidence"]
     assert results[0]["route_rationale"] == "先快系统后 skill。"
