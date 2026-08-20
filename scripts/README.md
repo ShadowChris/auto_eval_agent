@@ -1,5 +1,35 @@
 # 数据处理与项目辅助脚本
 
+## OpenAI 兼容接口连通性测试
+
+`scripts/api_test.py` 发起一个最小的 Chat Completions 流式请求，并实时打印
+模型输出、首个文本分片耗时和总耗时。可以直接填写脚本顶部的 `BASE_URL`、
+`MODEL`、`API_KEY`，更推荐在项目根目录 `.env` 中配置：
+
+```dotenv
+API_TEST_BASE_URL=https://example.com/v1
+API_TEST_MODEL=your-model
+API_TEST_API_KEY=your-api-key
+```
+
+运行：
+
+```bash
+python scripts/api_test.py
+```
+
+也可以用命令行临时覆盖配置：
+
+```bash
+python scripts/api_test.py \
+  --base-url "https://example.com/v1" \
+  --model "your-model" \
+  --api-key "your-api-key"
+```
+
+配置优先级为：命令行参数、脚本顶部常量、`.env`；环境变量同时兼容
+`OPENAI_BASE_URL`、`OPENAI_MODEL`、`OPENAI_API_KEY`。
+
 ## Excel/CSV 转任务类 JSONL
 
 `scripts/excel_to_jsonl_dataset.py` 用于将 `.xlsx`、`.xls`、`.xlsm` 或 `.csv`
@@ -34,7 +64,7 @@ JSONL 路径。有警告的数据仍会保序输出，便于后续在评测结�
 - `--input-prefix`：生成题号的前缀，题号格式为 `<input-prefix>_<序号>`。
 - `--video-prefix`：拼接录屏路径的项目相对前缀。
 - `--output`：显式指定输出 JSONL 路径。
-- `--current-location`：源表没有位置时写入 `context` 的默认当前位置。
+- `--current-location`：源表没有位置时写入 `context` 的默认交互发生位置。
 - `--sheet`：Excel 工作表名称或从 `0` 开始的序号。
 - `--encoding`：CSV 编码，默认为 `utf-8-sig`。
 
@@ -50,6 +80,13 @@ JSONL 路径。有警告的数据仍会保序输出，便于后续在评测结�
 
 只有列名精确为 `文件路径` 时才会参与拼接；备注列（例如 `文件路径1`）
 不会被当作录屏路径。
+
+脚本生成的背景信息统一使用“交互发生时间”和“交互发生位置”，用于标识
+该条 query 与回答发生时的时空背景，例如：
+
+```text
+交互发生时间：2026-08-05 10:00:00；交互发生位置：浙江省杭州市滨江区
+```
 
 查看完整参数：
 

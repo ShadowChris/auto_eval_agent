@@ -47,11 +47,12 @@ ANSWER_COLUMNS = ("agent_statement", "回复内容", "answer")
 START_TIME_COLUMNS = ("task_start_time", "开始时间")
 END_TIME_COLUMNS = ("task_end_time", "结束时间")
 CONTEXT_SOURCE_COLUMNS = (
-    ("开始时间节点", "当前时间"),
-    ("位置信息", "当前位置"),
-    ("定位信息", "当前位置"),
-    ("当前位置", "当前位置"),
+    ("开始时间节点", "交互发生时间"),
+    ("位置信息", "交互发生位置"),
+    ("定位信息", "交互发生位置"),
+    ("当前位置", "交互发生位置"),
 )
+INTERACTION_LOCATION_LABEL = "交互发生位置"
 VIDEO_PATH_COLUMN = "video_path"
 VIDEO_DIRECTORY_COLUMN = "文件路径"
 VIDEO_FILENAME_COLUMN = "原文件名"
@@ -167,12 +168,16 @@ def _normalize_context_value(value: Any) -> str:
 
 def _normalize_location(value: Any) -> str:
     location = _normalize_context_value(value)
-    return re.sub(r"^当前位置\s*[:：]\s*", "", location).strip()
+    return re.sub(
+        rf"^(?:当前位置|{INTERACTION_LOCATION_LABEL})\s*[:：]\s*",
+        "",
+        location,
+    ).strip()
 
 
 def _row_location(row: pd.Series) -> str:
     for column, label in CONTEXT_SOURCE_COLUMNS:
-        if label != "当前位置" or column not in row.index:
+        if label != INTERACTION_LOCATION_LABEL or column not in row.index:
             continue
         location = _normalize_location(row.get(column))
         if location:
@@ -184,10 +189,13 @@ def _build_context(row: pd.Series, *, current_location: str) -> str:
     explicit_context = row.get(CONTEXT_COLUMN)
     if not _is_empty(explicit_context):
         context = str(explicit_context).strip()
-        if re.search(r"当前位置\s*[:：]", context):
+        if re.search(r"(?:当前位置|交互发生位置)\s*[:：]", context):
             return context
         location = _row_location(row) or _normalize_location(current_location)
-        return f"{context}；当前位置：{location}" if location else context
+        return (
+            f"{context}；{INTERACTION_LOCATION_LABEL}：{location}"
+            if location else context
+        )
 
     parts: list[str] = []
     labels_seen: set[str] = set()
@@ -195,15 +203,15 @@ def _build_context(row: pd.Series, *, current_location: str) -> str:
         if column not in row.index or label in labels_seen:
             continue
         value = _normalize_context_value(row.get(column))
-        if label == "当前位置":
+        if label == INTERACTION_LOCATION_LABEL:
             value = _normalize_location(value)
         if value:
             parts.append(f"{label}：{value}")
             labels_seen.add(label)
-    if "当前位置" not in labels_seen:
+    if INTERACTION_LOCATION_LABEL not in labels_seen:
         location = _normalize_location(current_location)
         if location:
-            parts.append(f"当前位置：{location}")
+            parts.append(f"{INTERACTION_LOCATION_LABEL}：{location}")
     return "；".join(parts)
 
 
@@ -564,7 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--current-location",
         default=DEFAULT_CURRENT_LOCATION,
-        help=f"context 默认当前位置，默认 {DEFAULT_CURRENT_LOCATION}",
+        help=f"context 默认交互发生位置，默认 {DEFAULT_CURRENT_LOCATION}",
     )
     parser.add_argument(
         "--output",

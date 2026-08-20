@@ -55,7 +55,8 @@ def test_convert_csv_to_ordered_operation_jsonl(tmp_path: Path):
     assert exported[0]["query"] == "打开设置"
     assert exported[0]["answer"] == "已打开设置"
     assert exported[0]["context"] == (
-        "当前时间：2026-08-05 10:00:00；当前位置：浙江省杭州市滨江区"
+        "交互发生时间：2026-08-05 10:00:00；"
+        "交互发生位置：浙江省杭州市滨江区"
     )
     assert exported[0]["video_path"].endswith("videos/simple_001/record.mp4")
     assert exported[0]["分享链接"] == "https://example.test/1"
