@@ -161,6 +161,15 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
   white-space: nowrap;
   text-align: center;
 }
+.history-dataset-cell { min-width: 180px !important; }
+.history-task-id {
+  margin-top: 3px;
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
 .preview-table td { white-space: normal; overflow-wrap: anywhere; }
 table.results td { max-width: 320px; word-break: break-all; }
 tr.trace td { background: #eff6ff !important; color: #1e40af; font-size: 12px; }
@@ -341,6 +350,14 @@ tr.result-warning-detail td {
   max-height: 40px;
   word-break: break-word;
   white-space: pre-wrap;
+}
+.cell-clamp.cell-full {
+  display: block;
+  overflow: visible;
+  max-height: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .cell-center { text-align: center; -webkit-line-clamp: 1; line-clamp: 1; max-height: 20px; white-space: nowrap; }
 .cell-na { color: #9ca3af; font-style: italic; }

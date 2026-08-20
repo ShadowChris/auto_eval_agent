@@ -44,7 +44,10 @@
         <tbody>
           <tr v-for="h in pagedHistoryItems" :key="h.task_id">
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
-            <td>{{ h.dataset_name || '未记录' }}</td>
+            <td class="history-dataset-cell">
+              <div>{{ h.dataset_name || '未记录' }}</div>
+              <div class="history-task-id" :title="h.task_id">task_id: {{ h.task_id }}</div>
+            </td>
             <td>{{ modeLabel(h.mode) }}</td>
             <td><span class="history-status" :class="'history-status-'+h.status">{{ historyStatusLabel(h.status) }}</span></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
@@ -498,7 +501,7 @@
                 >
                   <div
                     class="cell-clamp"
-                    :class="{'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
+                    :class="{'cell-full': c.key==='item_id', 'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
                   >{{ cell(r, c) }}</div>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">

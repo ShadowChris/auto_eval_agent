@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +43,7 @@ from .history import (
     list_snapshots_page,
     load_item_judge_calls,
     load_snapshot,
+    operation_item_result_row,
     rows_to_csv,
     rows_to_jsonl,
     save_task,
@@ -54,7 +57,7 @@ from .operation_media import (
     prepare_cached_operation_item,
     resolve_operation_video_path,
 )
-from .runner import run_eval, run_rerun
+from .runner import run_eval, run_rerun, run_single_api_item
 from .tasks import get_live_task, get_task, new_task
 
 # auto_eval_agent/ 目录（src/auto_eval/web/server.py 往上 4 层）
@@ -120,6 +123,12 @@ class EvalReq(BaseModel):
     dataset_name: str = ""
 
 
+class SingleEvalReq(BaseModel):
+    task_id: str
+    dataset_name: str = ""
+    item: dict
+
+
 class OperationPrepareReq(BaseModel):
     items: list[dict]
     concurrency: int = 2
@@ -180,6 +189,99 @@ def _validate_eval_request(req: EvalReq, app_cfg) -> None:
             f"第 {preview}{suffix} 条缺少 competitor。"
             "请补充竞品答案，或同时选择研发人员/终端用户。",
         )
+
+
+def _terminal_user_judge_name(app_cfg) -> str:
+    """返回终端用户裁判的稳定配置名，不依赖裁判排列顺序。"""
+    judge = next(
+        (candidate for candidate in app_cfg.judges if candidate.persona == "end_user"),
+        None,
+    )
+    if judge is None:
+        judge = next(
+            (
+                candidate
+                for candidate in app_cfg.judges
+                if str(candidate.display or "").strip() == "终端用户"
+            ),
+            None,
+        )
+    if judge is None:
+        raise HTTPException(500, "当前配置缺少终端用户裁判")
+    return judge.name
+
+
+def _normalize_single_operation_item(raw_item: dict) -> dict:
+    """复用任务类 JSONL 解析规则，校验单题并保留所有原始字段。"""
+    item_id = raw_item.get("id")
+    if not isinstance(item_id, str) or not item_id.strip():
+        raise HTTPException(422, "item.id 必须是非空字符串")
+    if len(item_id.strip()) > 256:
+        raise HTTPException(422, "item.id 不能超过 256 个字符")
+    items, errors = parse_jsonl(
+        json.dumps(raw_item, ensure_ascii=False),
+        "operation",
+    )
+    if errors:
+        raise HTTPException(422, errors[0].replace("第 1 行 ", "item."))
+    if len(items) != 1:
+        raise HTTPException(422, "item 不是有效的任务类录屏数据")
+    return items[0]
+
+
+def _validate_external_task_id(task_id: str) -> str:
+    normalized = task_id.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", normalized):
+        raise HTTPException(
+            422,
+            "task_id 仅支持 1-128 位字母、数字、下划线和连字符，且首位必须是字母或数字",
+        )
+    return normalized
+
+
+def _web_result_index(result: dict) -> int | None:
+    try:
+        return int(result.get("index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _single_item_evaluation_status(task, item_index: int) -> str:
+    result = next(
+        (
+            row
+            for row in task.results
+            if _web_result_index(row) == item_index
+        ),
+        None,
+    )
+    if result is not None:
+        return "failed" if result.get("error") else "succeeded"
+
+    progress = (
+        task.item_progress.get(str(item_index))
+        or task.item_progress.get(item_index)
+        or {}
+    )
+    progress_status = str(progress.get("status") or "")
+    if progress_status == "error":
+        return "failed"
+    if progress_status == "cancelled" or task.status == "cancelled":
+        return "cancelled"
+    if progress_status == "running":
+        return "running"
+    if task.status == "error":
+        return "failed"
+    return "pending"
+
+
+def _single_eval_concurrency() -> int:
+    """读取单题接口的数据集并发上限，非法值回退为 15。"""
+    try:
+        value = int(os.getenv("AUTO_EVAL_SINGLE_CONCURRENCY", "15"))
+    except (TypeError, ValueError):
+        value = 15
+    return max(1, min(value, 100))
 
 
 def _sse(event: str, data, *, event_id: int | None = None) -> str:
@@ -290,6 +392,184 @@ async def api_eval(req: EvalReq):
 
     execution.add_done_callback(clear_execution)
     return {"task_id": task.id}
+
+
+@app.post("/api/eval/single", status_code=202)
+async def api_eval_single(req: SingleEvalReq):
+    """向任务类数据集新增或覆盖一题，并且只评估这一个题目。"""
+    task_id = _validate_external_task_id(req.task_id)
+    item = _normalize_single_operation_item(req.item)
+    app_cfg = cfg()
+    judge_name = _terminal_user_judge_name(app_cfg)
+    single_concurrency = _single_eval_concurrency()
+    dataset_name = req.dataset_name.strip()
+    task = get_task(task_id)
+    rerun_attempt = None
+    if task is None:
+        task = new_task(
+            "operation",
+            [item],
+            {
+                "judges": [judge_name],
+                "concurrency": single_concurrency,
+                "submission_source": "single_api",
+            },
+            dataset_name=dataset_name or task_id,
+            task_id=task_id,
+        )
+        item_index = 0
+        action = "created"
+    else:
+        if task.mode != "operation":
+            raise HTTPException(409, "task_id 已属于其他评测模式，不能作为任务类数据集写入")
+        if task.execution is not None and not task.execution.done():
+            raise HTTPException(409, "当前数据集正在执行 Web 批跑或重跑，暂不能接口写入")
+        if (
+            task.status in {"pending", "running", "rerunning"}
+            and not task.item_executions
+        ):
+            raise HTTPException(409, "当前数据集存在非接口评估任务，暂不能接口写入")
+
+        item_id = item["id"]
+        active = task.item_executions.get(item_id)
+        if active is not None and not active.done():
+            raise HTTPException(409, f"当前数据集的 {item_id} 仍在评估中，请完成后再提交")
+
+        item_index = next(
+            (
+                index
+                for index, existing in enumerate(task.items)
+                if str(existing.get("id") or "") == item_id
+            ),
+            None,
+        )
+        if item_index is None:
+            task.items.append(item)
+            item_index = len(task.items) - 1
+            action = "appended"
+        else:
+            previous_result = next(
+                (
+                    result
+                    for result in task.results
+                    if _web_result_index(result) == item_index
+                ),
+                None,
+            )
+            task.results = [
+                result
+                for result in task.results
+                if _web_result_index(result) != item_index
+            ]
+            task.done_total = len({
+                index
+                for result in task.results
+                if (index := _web_result_index(result)) is not None
+            })
+            task.items[item_index] = item
+            action = "overwritten"
+            attempt_numbers = [
+                int(attempt.get("attempt_no") or 0)
+                for attempt in [
+                    *task.rerun_history,
+                    *task.single_api_attempts.values(),
+                ]
+            ]
+            attempt_no = max(attempt_numbers, default=0) + 1
+            rerun_attempt = {
+                "attempt_id": f"rerun-{attempt_no}-{uuid.uuid4().hex[:8]}",
+                "attempt_no": attempt_no,
+                "item_indices": [item_index],
+                "total": 1,
+                "done": 0,
+                "status": "running",
+                "base_status": (
+                    task.status
+                    if task.status in {"done", "error", "cancelled"}
+                    else "done"
+                ),
+                "started_at": datetime.now().timestamp(),
+                "items": [],
+                "_previous_result": previous_result,
+            }
+            task.single_api_attempts[item_id] = rerun_attempt
+
+    # 接口和 Web 任务类统一使用终端用户裁判；其余已有运行参数保持不变。
+    task.options = {
+        **task.options,
+        "judges": [judge_name],
+        "concurrency": single_concurrency,
+        "submission_source": "single_api",
+    }
+    if dataset_name:
+        task.dataset_name = dataset_name
+    task.status = "running"
+    task.error = None
+    if not save_task(task):
+        raise HTTPException(500, "单题已写入内存，但历史快照保存失败")
+
+    item_id = item["id"]
+    execution = asyncio.create_task(
+        run_single_api_item(
+            task,
+            app_cfg,
+            item_index,
+            item_id,
+            rerun=rerun_attempt,
+        ),
+    )
+    task.item_executions[item_id] = execution
+    return {
+        "task_id": task.id,
+        "id": item_id,
+        "status": "success",
+        "evaluation_status": task.status,
+        "action": action,
+        "dataset_size": len(task.items),
+    }
+
+
+@app.get("/api/eval/single")
+def api_eval_single_result(task_id: str, id: str, event: int = 0):
+    """查询一题的最新任务类结果，并按需返回 Web 日志进度。"""
+    if event < -1:
+        raise HTTPException(422, "event 必须为 -1、0 或正整数")
+
+    task = get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "task or item not found")
+    if task.mode != "operation":
+        raise HTTPException(409, "task_id 不属于任务类（录屏）数据集")
+
+    item_index = next(
+        (
+            index
+            for index, item in enumerate(task.items)
+            if str(item.get("id") or "") == id
+        ),
+        None,
+    )
+    if item_index is None:
+        raise HTTPException(404, "task or item not found")
+
+    response = {
+        "task_id": task.id,
+        "dataset_name": task.dataset_name,
+        "id": id,
+        "evaluation_status": _single_item_evaluation_status(task, item_index),
+        "result": operation_item_result_row(
+            task_to_snapshot(task),
+            item_index,
+        ),
+    }
+    if event != 0:
+        events = list(
+            task.progress_events.get(str(item_index))
+            or task.progress_events.get(item_index)
+            or []
+        )
+        response["progress_events"] = events if event == -1 else events[:event]
+    return response
 
 
 @app.post("/api/operation/prepare")
@@ -629,6 +909,9 @@ async def api_eval_cancel(task_id: str):
     execution = task.execution
     if execution is not None and not execution.done():
         execution.cancel()
+    for item_execution in list(task.item_executions.values()):
+        if not item_execution.done():
+            item_execution.cancel()
     await task.publish(
         "cancelled",
         {"message": reason, "duration_s": task.duration_s},

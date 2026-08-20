@@ -122,6 +122,12 @@ def test_history_note_ui_supports_multiline_editing_and_full_display():
     assert "function formatHistoryDuration(item)" in js
     assert 'if (rawSeconds == null) return "—";' in js
     assert ".history-table .history-duration-cell" in css
+    assert 'class="history-dataset-cell"' in html
+    assert 'class="history-task-id" :title="h.task_id">task_id: {{ h.task_id }}' in html
+    assert ".history-task-id {" in css
+    assert "'cell-full': c.key==='item_id'" in html
+    assert ".cell-clamp.cell-full {" in css
+    assert "max-height: none;" in css
     assert "function resetEvaluationView()" in js
     assert "resetEvaluationView();\n      mode.value = k;" in js
     assert "if (running.value) connectSSE();" in js

@@ -47,6 +47,7 @@ createApp({
     const results = ref([]);
     const summary = ref(null);
     const taskId = ref("");
+    const loadedTaskOptions = ref({});
     const runError = ref("");
     const runKind = ref("initial");
     const rerunProgress = ref(0);
@@ -148,11 +149,23 @@ createApp({
       }));
     });
 
+    function compareItemIds(left, right) {
+      return String(left || "").localeCompare(
+        String(right || ""),
+        "zh-CN",
+        { numeric: true, sensitivity: "base" },
+      );
+    }
+
+    const isSingleApiDataset = computed(
+      () => loadedTaskOptions.value?.submission_source === "single_api",
+    );
+
     const progressRows = computed(() => {
       const resultByIndex = new Map(
         results.value.map((entry) => [Number(entry.index), entry]),
       );
-      return items.value.map((item, index) => {
+      const rows = items.value.map((item, index) => {
         const current = itemProgress.value[index] || {};
         const result = resultByIndex.get(index);
         const events = progressEvents.value[index] || [];
@@ -181,6 +194,9 @@ createApp({
           latestEvents: events.slice(-2),
         };
       });
+      return isSingleApiDataset.value
+        ? rows.sort((left, right) => compareItemIds(left.itemId, right.itemId))
+        : rows;
     });
     const progressPageCount = computed(() => Math.max(1, Math.ceil(progressRows.value.length / pageSize)));
     const pagedProgressRows = computed(() => {
@@ -629,7 +645,7 @@ createApp({
         ];
       if (mode.value === "operation")
         return [
-          { key: "item_id", label: "题号" },
+          { key: "item_id", label: "题号（ID）" },
           { key: "query", label: "操作意图" },
           ...contextCols,
           { key: "execution_routes", label: "执行链路" },
@@ -644,7 +660,7 @@ createApp({
         ];
       if (mode.value === "rich_content")
         return [
-          { key: "item_id", label: "题号" },
+          { key: "item_id", label: "题号（ID）" },
           { key: "query", label: "Query" },
           ...contextCols,
           { key: "category_display", label: "垂域" },
@@ -671,7 +687,7 @@ createApp({
         ];
       if (mode.value === "rich_content_quality")
         return [
-          { key: "item_id", label: "题号" },
+          { key: "item_id", label: "题号（ID）" },
           { key: "query", label: "Query" },
           ...contextCols,
           { key: "category_display", label: "垂域" },
@@ -702,7 +718,7 @@ createApp({
         ];
       const dims = rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d }));
       return [
-        { key: "item_id", label: "题号" },
+        { key: "item_id", label: "题号（ID）" },
         { key: "query", label: "题目" },
         ...contextCols,
         { key: mode.value === "online" ? "generated_answer" : "answer", label: mode.value === "online" ? "生成回答" : "回答" },
@@ -774,13 +790,16 @@ createApp({
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
       const threshold = (summary.value && summary.value.by_skill && summary.value.by_skill.threshold) || 2;
-      return skillResults.value.filter((r) => {
+      const rows = skillResults.value.filter((r) => {
         if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
         if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.answer_text || ""} ${(r.execution_routes || []).join(" ")} ${r.route_rationale || ""} ${(r.issue_types || []).join(" ")} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
+      return isSingleApiDataset.value
+        ? rows.sort((left, right) => compareItemIds(left.item_id, right.item_id))
+        : rows;
     });
 
     const pageCount = computed(() => Math.max(1, Math.ceil(filteredResults.value.length / resultPageSize.value)));
@@ -940,6 +959,7 @@ createApp({
     function resetEvaluationView() {
       disconnectSSE();
       taskId.value = "";
+      loadedTaskOptions.value = {};
       running.value = false;
       progress.value = 0;
       total.value = 0;
@@ -1767,6 +1787,7 @@ createApp({
         progressPage.value = 1;
         barChartRefs.value = [];
         const options = d.options || {};
+        loadedTaskOptions.value = options;
         if (Array.isArray(options.judges) && options.judges.length) selectedJudges.value = options.judges;
         if (options.visual_judge) visualJudge.value = options.visual_judge;
         if (options.model) selectedModel.value = options.model;

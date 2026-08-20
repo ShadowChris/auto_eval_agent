@@ -29,6 +29,9 @@ class Task:
     summary: dict = field(default_factory=dict)
     subscribers: set[asyncio.Queue] = field(default_factory=set, repr=False)
     execution: asyncio.Task[Any] | None = field(default=None, repr=False)
+    item_executions: dict[str, asyncio.Task[Any]] = field(default_factory=dict, repr=False)
+    single_api_attempts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    single_api_semaphore: asyncio.Semaphore | None = field(default=None, repr=False)
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
@@ -98,8 +101,10 @@ def new_task(
     items: list[dict],
     options: dict,
     dataset_name: str = "",
+    *,
+    task_id: str | None = None,
 ) -> Task:
-    task_id = uuid.uuid4().hex[:12]
+    task_id = task_id or uuid.uuid4().hex[:12]
     created_at = time.time()
     t = Task(
         id=task_id,

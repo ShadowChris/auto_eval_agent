@@ -831,6 +831,41 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
         export.append({key: values[key] for key in _OPERATION_EXPORT_COLUMNS})
     return export
 
+
+def operation_item_result_row(snapshot: dict, item_index: int) -> dict:
+    """返回与任务类 Excel 逐题结果同字段的单题映射，证据保留 JSON 类型。"""
+    normalized = _with_operation_compat(snapshot)
+    items = normalized.get("items") or []
+    if item_index < 0 or item_index >= len(items):
+        raise IndexError("item_index 超出数据集范围")
+
+    results = _results_with_identity(normalized)
+    aligned = _aligned_results(normalized, results)
+    rows = _operation_export_rows(aligned, items)
+    row = dict(rows[item_index])
+
+    raw_evidence = aligned[item_index].get("route_evidence") or []
+    if isinstance(raw_evidence, str):
+        try:
+            raw_evidence = json.loads(raw_evidence)
+        except (json.JSONDecodeError, TypeError):
+            raw_evidence = []
+    if not isinstance(raw_evidence, list):
+        raw_evidence = []
+
+    evidence: list[dict] = []
+    for raw_item in raw_evidence:
+        if not isinstance(raw_item, dict):
+            continue
+        route = str(raw_item.get("route") or "")
+        evidence.append({
+            **raw_item,
+            "route": route,
+            "route_name": _OPERATION_ROUTE_DISPLAY.get(route, route),
+        })
+    row["route_evidence"] = evidence
+    return row
+
 # 垂域视觉评测（rich_content）Excel/CSV 导出列：与前端展示一致，按此顺序输出
 _RICH_CONTENT_EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("item_id", "题号"),

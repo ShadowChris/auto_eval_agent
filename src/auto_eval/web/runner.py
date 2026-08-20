@@ -279,6 +279,102 @@ async def run_rerun(
         )
 
 
+async def run_single_api_item(
+    task: Task,
+    cfg: AppConfig,
+    item_index: int,
+    item_id: str,
+    *,
+    rerun: dict | None = None,
+) -> None:
+    """执行接口提交的一题；不同 item_id 可并行，结果仍原位合并。"""
+    if task.single_api_semaphore is None:
+        concurrency = max(1, int(task.options.get("concurrency", 4)))
+        task.single_api_semaphore = asyncio.Semaphore(concurrency)
+    semaphore = task.single_api_semaphore
+    task.mark_started()
+    task.status = "running"
+    _prepare_rerun_items(task, [item_index])
+    _record_progress(task, item_index, {
+        "item_index": item_index,
+        "item_id": item_id,
+        "status": "pending",
+        "percent": 0,
+        "message": "等待评估",
+        "stage_rank": 0,
+        "started_at": None,
+        "finished_at": None,
+        "attempt_id": (rerun or {}).get("attempt_id"),
+        "attempt_no": int((rerun or {}).get("attempt_no") or 0),
+    })
+    _persist_task(task, force=True)
+    await task.publish("start", {"total": len(task.items), "mode": task.mode})
+
+    try:
+        async with semaphore:
+            await _run(
+                task,
+                cfg,
+                item_indices=[item_index],
+                rerun=rerun,
+            )
+        if rerun is not None:
+            rerun["status"] = "done"
+    except asyncio.CancelledError:
+        if rerun is not None:
+            rerun["status"] = "cancelled"
+            rerun["error"] = "用户手动中断重跑"
+        raise
+    except Exception as exc:
+        logger.exception(
+            "single API item evaluation failed: task_id=%s item_id=%s",
+            task.id,
+            item_id,
+        )
+        if rerun is not None:
+            rerun["status"] = "error"
+            rerun["error"] = f"{type(exc).__name__}: {exc}"
+        task.error = f"{type(exc).__name__}: {exc}"
+    finally:
+        finished_at = time.time()
+        if rerun is not None:
+            rerun["finished_at"] = finished_at
+            started_at = float(rerun.get("started_at") or finished_at)
+            rerun["duration_s"] = round(max(0.0, finished_at - started_at), 3)
+            audit_attempt = dict(rerun)
+            audit_attempt.pop("_previous_result", None)
+            task.rerun_history.append(audit_attempt)
+            task.rerun_history.sort(
+                key=lambda attempt: int(attempt.get("attempt_no") or 0),
+            )
+            task.single_api_attempts.pop(item_id, None)
+
+        task.item_executions.pop(item_id, None)
+        task.summary = _summarize(task, cfg)
+        if task.item_executions:
+            if task.status != "cancelled":
+                task.status = "running"
+        elif task.status != "cancelled":
+            task.status = "error" if task.error else "done"
+            task.mark_finished()
+        _persist_task(task, force=True)
+
+        if not task.item_executions and task.status == "done":
+            await task.publish(
+                "done",
+                {
+                    "summary": task.summary,
+                    "total": len(task.items),
+                    "duration_s": task.duration_s,
+                },
+            )
+        elif not task.item_executions and task.status == "error":
+            await task.publish(
+                "error",
+                {"message": task.error, "duration_s": task.duration_s},
+            )
+
+
 async def _run(
     task: Task,
     cfg: AppConfig,
@@ -542,6 +638,8 @@ async def _run(
                     (row for row in task.results if _result_index(row) == idx),
                     None,
                 )
+                if prior is None:
+                    prior = rerun.get("_previous_result")
                 res["rerun_count"] = int((prior or {}).get("rerun_count") or 0) + 1
                 res["last_rerun_at"] = time.time()
                 res["last_rerun_attempt_id"] = attempt_id
@@ -556,6 +654,7 @@ async def _run(
                 )
             previous = _upsert_result(task, res)
             if rerun is not None:
+                previous = previous or rerun.get("_previous_result")
                 rerun["done"] = int(rerun.get("done") or 0) + 1
                 rerun.setdefault("items", []).append({
                     "index": idx,
