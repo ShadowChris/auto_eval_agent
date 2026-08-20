@@ -90,3 +90,62 @@ def test_video_directory_is_optional_and_similarly_named_columns_are_ignored(
     assert exported["文件路径1"] == "这是备注，不参与路径拼接"
     assert result.missing_video_ids == []
     assert result.warnings == []
+
+
+def test_existing_video_path_column_takes_priority_over_filename_mapping(
+    tmp_path: Path,
+):
+    direct_video = tmp_path / "direct" / "actual.mp4"
+    direct_video.parent.mkdir(parents=True)
+    direct_video.write_bytes(b"video")
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([{
+        "序号": "simple_001",
+        "query": "打开设置",
+        "video_path": str(direct_video),
+        "文件路径": "wrong_directory",
+        "原文件名": "wrong_name.mp4",
+    }]).to_csv(source, index=False, encoding="utf-8-sig")
+
+    result = convert_table(
+        source,
+        input_prefix="V1",
+        video_prefix=str(tmp_path / "unused_prefix"),
+        project_root=tmp_path,
+    )
+
+    exported = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert exported["video_path"] == str(direct_video)
+    assert result.missing_video_ids == []
+    assert result.warnings == []
+
+
+def test_empty_value_in_existing_video_path_column_does_not_fall_back_to_filename(
+    tmp_path: Path,
+):
+    fallback_video = tmp_path / "videos" / "simple_001" / "record.mp4"
+    fallback_video.parent.mkdir(parents=True)
+    fallback_video.write_bytes(b"video")
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([{
+        "序号": "simple_001",
+        "query": "打开设置",
+        "video_path": "",
+        "文件路径": "simple_001",
+        "原文件名": "record.mp4",
+    }]).to_csv(source, index=False, encoding="utf-8-sig")
+
+    result = convert_table(
+        source,
+        input_prefix="V1",
+        video_prefix=str(tmp_path / "videos"),
+        project_root=tmp_path,
+    )
+
+    exported = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert exported["video_path"] == ""
+    assert result.missing_video_ids == ["V1_simple_001"]
+    assert result.warnings[0]["问题"] == [
+        "missing_video_mapping",
+        "video_file_missing_or_empty",
+    ]

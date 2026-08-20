@@ -5,7 +5,8 @@
 * id: ``<input_prefix>_<序号>``，例如 ``0730众测_simple_001``。
 * 序号: 保留源表序号，例如 ``simple_001``。
 * query/context/answer/task_start_time/task_end_time: 沿用原任务类转换规则。
-* video_path: ``<video_prefix>/[文件路径]/<原文件名>``，其中“文件路径”可选。
+* video_path: 输入表有 ``video_path`` 列时直接复用；否则按
+  ``<video_prefix>/[文件路径]/<原文件名>`` 构造，其中“文件路径”可选。
 * 未参与上述映射的输入列，按原列顺序平铺追加到每条 JSON 对象末尾。
 
 默认 context 地点为“浙江省杭州市滨江区滨康路101号”，可通过
@@ -271,17 +272,22 @@ def _build_video_path(
     *,
     video_prefix: str,
     item_id: str,
+    has_video_path_column: bool,
 ) -> tuple[str, str | None]:
+    # 表级优先级：只要源表定义了 video_path 列，所有行都以该列为准，
+    # 不再使用“文件路径 / 原文件名”拼接，避免已有路径被意外覆盖。
+    if has_video_path_column:
+        explicit_video_path = row.get(VIDEO_PATH_COLUMN)
+        if not _is_empty_path(explicit_video_path):
+            return str(explicit_video_path).replace("\\", "/").strip(), None
+        return "", "missing_video_mapping"
+
     directory = row.get(VIDEO_DIRECTORY_COLUMN)
     filename = row.get(VIDEO_FILENAME_COLUMN)
     # “文件路径”只是 video_prefix 与文件名之间的可选子目录；
     # 只要“原文件名”存在，即可构造确定的录屏路径。
     if not _is_empty_path(filename):
         return _join_video_path(video_prefix, directory, filename), None
-
-    explicit_video_path = row.get(VIDEO_PATH_COLUMN)
-    if not _is_empty_path(explicit_video_path):
-        return str(explicit_video_path).replace("\\", "/").strip(), None
 
     placeholder = _join_video_path(
         video_prefix,
@@ -405,6 +411,7 @@ def convert_table(
     warnings: list[dict[str, Any]] = []
     missing_video_ids: list[str] = []
     used_ids: dict[str, int] = {}
+    has_video_path_column = VIDEO_PATH_COLUMN in df.columns
 
     for zero_index, (source_index, row) in enumerate(df.iterrows()):
         source_row = (
@@ -470,6 +477,7 @@ def convert_table(
             row,
             video_prefix=video_prefix,
             item_id=item_id,
+            has_video_path_column=has_video_path_column,
         )
         item["video_path"] = video_path
         if video_mapping_warning:
@@ -480,7 +488,7 @@ def convert_table(
                 sequence=sequence,
                 video_prefix=video_prefix,
                 project_root=project_root,
-            )
+            ) if not has_video_path_column else None
             if recovered_video_path is not None:
                 item["video_path"] = recovered_video_path
                 row_warnings.append("video_path_recovered_by_sequence_and_filename")
