@@ -291,7 +291,7 @@ def _build_video_path(
         explicit_video_path = row.get(VIDEO_PATH_COLUMN)
         if not _is_empty_path(explicit_video_path):
             return str(explicit_video_path).replace("\\", "/").strip(), None
-        return "", "missing_video_mapping"
+        return "__missing_video__", "missing_video_mapping"
 
     directory = row.get(VIDEO_DIRECTORY_COLUMN)
     filename = row.get(VIDEO_FILENAME_COLUMN)

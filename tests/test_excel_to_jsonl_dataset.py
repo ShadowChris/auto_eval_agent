@@ -144,7 +144,7 @@ def test_empty_value_in_existing_video_path_column_does_not_fall_back_to_filenam
     )
 
     exported = json.loads(result.output_path.read_text(encoding="utf-8"))
-    assert exported["video_path"] == ""
+    assert exported["video_path"] == "__missing_video__"
     assert result.missing_video_ids == ["V1_simple_001"]
     assert result.warnings[0]["问题"] == [
         "missing_video_mapping",
