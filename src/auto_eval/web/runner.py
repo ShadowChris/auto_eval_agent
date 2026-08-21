@@ -218,6 +218,7 @@ async def run_rerun(
         "status": "running",
         "base_status": base_status,
         "started_at": started_at,
+        "judge_backend": dict(pending_attempt.get("judge_backend") or {}),
         "items": [],
     }
     task.active_rerun = attempt
@@ -384,6 +385,22 @@ async def _run(
 ) -> None:
     selected = task.options.get("judges") or [cfg.judges[0].name]
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
+    run_backend = dict(
+        ((rerun or {}).get("judge_backend") or {})
+        if rerun is not None
+        else (task.options.get("judge_backend") or {})
+    )
+    run_models = list(dict.fromkeys(
+        str(judge.model or judge.name) for judge in judges_cfg
+    ))
+    run_provider_name = str(
+        run_backend.get("provider_name") or "角色默认配置"
+    )
+    run_provider_id = str(run_backend.get("provider_id") or "")
+    run_model = str(run_backend.get("model") or "；".join(run_models))
+    run_provider_revision = str(
+        run_backend.get("provider_revision") or ""
+    )
     evaluation_time = datetime.fromtimestamp(task.created_at).astimezone()
     _providers = cfg.eval_options.effective_providers()
     clients = [
@@ -633,6 +650,10 @@ async def _run(
                         request_id=request_id,
                     )
             res["index"] = idx
+            res["judge_provider"] = run_provider_name
+            res["judge_provider_id"] = run_provider_id
+            res["judge_model"] = run_model
+            res["judge_provider_revision"] = run_provider_revision
             if rerun is not None:
                 prior = next(
                     (row for row in task.results if _result_index(row) == idx),
@@ -664,6 +685,10 @@ async def _run(
                     "correctness": res.get("correctness"),
                     "total": res.get("total"),
                     "latency_s": res.get("latency_s"),
+                    "judge_provider": run_provider_name,
+                    "judge_provider_id": run_provider_id,
+                    "judge_model": run_model,
+                    "judge_provider_revision": run_provider_revision,
                     "previous_status": (
                         "error" if previous and previous.get("error") else
                         "done" if previous else "missing"

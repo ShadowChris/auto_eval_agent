@@ -176,6 +176,34 @@ tr.trace td { background: #eff6ff !important; color: #1e40af; font-size: 12px; }
 .summary { display: flex; gap: 20px; flex-wrap: wrap; font-size: 14px; padding: 10px 0; color: #374151; }
 .summary span { background: #eef2ff; padding: 4px 12px; border-radius: 16px; }
 select, input[type=number] { padding: 6px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; }
+.provider-model-label { width: auto; min-width: auto; }
+.provider-model-select { min-width: 240px; max-width: 420px; }
+.provider-manager {
+  display: grid; grid-template-columns: minmax(260px, 0.8fr) minmax(340px, 1.2fr);
+  gap: 16px; margin-top: 12px; padding: 14px; border: 1px solid #dbe3ef;
+  border-radius: 9px; background: #f8fafc;
+}
+.provider-list-heading, .provider-list-item, .provider-form-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.provider-list-heading { margin-bottom: 8px; }
+.provider-list-item {
+  padding: 9px 0; border-top: 1px solid #e2e8f0; align-items: flex-start;
+}
+.provider-list-item small { display: block; margin-top: 3px; color: #64748b; }
+.provider-list-item button { padding: 4px 7px; font-size: 12px; }
+.provider-form { display: grid; gap: 8px; }
+.provider-form h3 { margin: 0 0 2px; font-size: 14px; color: #334155; }
+.provider-form label { display: grid; gap: 4px; color: #475569; font-size: 12px; font-weight: 650; }
+.provider-form input:not([type=checkbox]), .provider-form textarea {
+  width: 100%; padding: 7px 8px; border: 1px solid #d1d5db; border-radius: 6px;
+  background: #fff; font: 13px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+.provider-form textarea { resize: vertical; }
+.provider-form .provider-enabled { display: flex; align-items: center; gap: 6px; }
+.provider-form-actions { justify-content: flex-start; }
+.provider-message { grid-column: 1 / -1; margin: 0; font-size: 13px; }
+@media (max-width: 760px) { .provider-manager { grid-template-columns: 1fr; } }
 details { margin-top: 10px; }
 summary { cursor: pointer; color: #2563eb; font-size: 14px; }
 pre { background: #fef2f2; padding: 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; }

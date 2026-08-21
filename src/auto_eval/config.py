@@ -56,7 +56,11 @@ class JudgeConfig(BaseModel):
     runner: str = "openai_compat"
     base_url: str | None = None
     api_key_env: str | None = None
+    api_key_value: str | None = Field(default=None, exclude=True, repr=False)
     model: str | None = None
+    provider_id: str | None = None
+    provider_name: str | None = None
+    provider_revision: str | None = None
     persona: str | None = None  # strict_expert | end_user | safety_reviewer | ...
     enable_web_search: bool = False
     enable_fetch: bool = True  # 允许裁判抓取网页正文深入核实
@@ -73,6 +77,8 @@ class JudgeConfig(BaseModel):
     stream_include_usage: bool = True
 
     def api_key(self) -> str | None:
+        if self.api_key_value is not None:
+            return self.api_key_value
         return os.environ.get(self.api_key_env) if self.api_key_env else None
 
 

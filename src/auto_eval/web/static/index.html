@@ -40,7 +40,7 @@
     <p class="hint">批跑由服务端持续执行，刷新页面后可从这里加载实时进度；服务进程重启或手动中断时会保留已完成的题目。</p>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
-        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th class="history-progress-cell">进度</th><th class="history-duration-cell">耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
+        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>Provider / 模型</th><th>状态</th><th class="history-progress-cell">进度</th><th class="history-duration-cell">耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
           <tr v-for="h in pagedHistoryItems" :key="h.task_id">
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
@@ -49,6 +49,10 @@
               <div class="history-task-id" :title="h.task_id">task_id: {{ h.task_id }}</div>
             </td>
             <td>{{ modeLabel(h.mode) }}</td>
+            <td>
+              <div>{{ h.judge_provider || '角色默认配置' }}</div>
+              <div class="history-task-id" v-if="h.judge_model">{{ h.judge_model }}</div>
+            </td>
             <td><span class="history-status" :class="'history-status-'+h.status">{{ historyStatusLabel(h.status) }}</span></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
             <td class="history-duration-cell">{{ formatHistoryDuration(h) }}</td>
@@ -227,6 +231,57 @@
     <div class="row" v-if="mode==='online'">
       <span class="lbl">被测模型：</span>
       <select v-model="selectedModel"><option v-for="m in models">{{ m }}</option></select>
+    </div>
+    <div class="row">
+      <span class="lbl">Provider：</span>
+      <select v-model="selectedProviderId" @change="onProviderChange">
+        <option value="">跟随裁判角色默认配置</option>
+        <option v-for="provider in llmProviders" :key="provider.id" :value="provider.id" :disabled="!provider.enabled">
+          {{ provider.name }}{{ provider.has_api_key ? '' : '（缺少 Key）' }}
+        </option>
+      </select>
+      <span v-if="selectedProviderId" class="lbl provider-model-label">模型：</span>
+      <select v-if="selectedProviderId" v-model="selectedProviderModel" class="provider-model-select">
+        <option v-if="!providerModelOptions.length" value="" disabled>请先在 Provider 中配置模型</option>
+        <option v-for="model in providerModelOptions" :key="model" :value="model">{{ model }}</option>
+      </select>
+      <button type="button" @click="testProvider()" :disabled="providerBusy || !selectedProviderId">测试连接</button>
+      <button type="button" @click="providerManagerOpen=!providerManagerOpen">管理模型服务</button>
+      <span class="hint" style="margin:0">不选择时沿用当前裁判默认配置；选择后本批次使用对应 Provider 和模型。</span>
+    </div>
+    <div v-if="providerManagerOpen" class="provider-manager">
+      <div class="provider-list">
+        <div class="provider-list-heading">
+          <strong>已保存的模型服务</strong>
+          <button type="button" @click="newProvider">新增</button>
+        </div>
+        <div v-for="provider in llmProviders" :key="'manage-'+provider.id" class="provider-list-item">
+          <div>
+            <strong>{{ provider.name }}</strong>
+            <small>{{ provider.id }} · {{ provider.default_model || '未设置模型' }}</small>
+            <small>{{ provider.has_api_key ? 'Key 已配置' : 'Key 未配置' }}{{ provider.builtin ? ' · 内置只读' : '' }}</small>
+          </div>
+          <span v-if="!provider.builtin">
+            <button type="button" @click="editProvider(provider)">编辑</button>
+            <button type="button" class="btn-danger" @click="deleteProvider(provider)">删除</button>
+          </span>
+        </div>
+      </div>
+      <div class="provider-form">
+        <h3>{{ providerForm.editing ? '编辑模型服务' : '新增模型服务' }}</h3>
+        <label>Provider ID<input v-model.trim="providerForm.id" :disabled="providerForm.editing" placeholder="例如 kimi"></label>
+        <label>显示名称<input v-model.trim="providerForm.name" placeholder="例如 Kimi"></label>
+        <label>Base URL<input v-model.trim="providerForm.base_url" placeholder="https://api.example.com/v1"></label>
+        <label>模型列表<textarea v-model="providerForm.models_text" rows="3" placeholder="每行一个模型，也支持逗号分隔"></textarea></label>
+        <label>默认模型<input v-model.trim="providerForm.default_model" placeholder="model-name"></label>
+        <label>API Key<input v-model.trim="providerForm.api_key" type="password" autocomplete="new-password" :placeholder="providerForm.editing ? '留空表示保留原 Key' : 'sk-...' "></label>
+        <label class="provider-enabled"><input v-model="providerForm.enabled" type="checkbox"> 启用</label>
+        <div class="provider-form-actions">
+          <button type="button" class="primary" @click="saveProvider" :disabled="providerBusy">保存</button>
+          <button type="button" @click="providerForm={id:'',name:'',base_url:'',models_text:'',default_model:'',api_key:'',enabled:true,editing:false}">清空</button>
+        </div>
+      </div>
+      <p v-if="providerMessage" class="provider-message" :class="{err:providerError,ok:!providerError}">{{ providerMessage }}</p>
     </div>
     <div class="row">
       <span class="lbl">并发：</span>

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ from ..config import ExpertKnowledgeBase, load_config
 from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
 from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
+from ..llm_stream import build_openai_client, stream_chat_completion
 from .parse_input import Mode, parse_jsonl, parse_text
 from .history import (
     build_xlsx,
@@ -57,6 +59,7 @@ from .operation_media import (
     prepare_cached_operation_item,
     resolve_operation_video_path,
 )
+from .llm_providers import LLMProviderPayload, LLMProviderStore
 from .runner import run_eval, run_rerun, run_single_api_item
 from .tasks import get_live_task, get_task, new_task
 
@@ -140,6 +143,11 @@ class HistoryNoteReq(BaseModel):
 
 class RerunReq(BaseModel):
     item_indices: list[int]
+    judge_backend: dict | None = None
+
+
+class ProviderTestReq(BaseModel):
+    model: str = ""
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
@@ -147,6 +155,73 @@ _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
 
 def _operation_video_roots() -> list[Path]:
     return operation_video_roots(BASE_DIR)
+
+
+def _llm_provider_store() -> LLMProviderStore:
+    return LLMProviderStore(RUNS_DIR / "web_settings")
+
+
+def _runtime_config_for_options(app_cfg, options: dict):
+    """按任务快照构造隔离配置；绝不修改进程共享的 AppConfig。"""
+    backend = options.get("judge_backend") or {}
+    provider_id = str(backend.get("provider_id") or "").strip()
+    if not provider_id:
+        return app_cfg
+    resolution = _llm_provider_store().resolve(
+        provider_id,
+        str(backend.get("model") or ""),
+        app_cfg,
+        base_url_snapshot=str(backend.get("base_url_snapshot") or ""),
+    )
+    provider_name = str(backend.get("provider_name") or resolution.name)
+    provider_revision = str(
+        backend.get("provider_revision") or resolution.revision
+    )
+    judges = [
+        judge.model_copy(update={
+            "base_url": resolution.base_url,
+            "model": resolution.model,
+            "api_key_env": None,
+            "api_key_value": resolution.api_key,
+            "provider_id": resolution.id,
+            "provider_name": provider_name,
+            "provider_revision": provider_revision,
+        })
+        for judge in app_cfg.judges
+    ]
+    eval_options = app_cfg.eval_options.model_copy(update={
+        "classify_model": resolution.model,
+        "classify_base_url": resolution.base_url,
+        "classify_api_key_env": None,
+    })
+    return app_cfg.model_copy(update={
+        "judges": judges,
+        "eval_options": eval_options,
+    })
+
+
+def _normalize_eval_options(app_cfg, options: dict) -> tuple[dict, object]:
+    """校验前端绑定并保存无密钥的 Provider 快照。"""
+    normalized = dict(options or {})
+    backend = normalized.get("judge_backend") or {}
+    provider_id = str(backend.get("provider_id") or "").strip()
+    if not provider_id:
+        normalized.pop("judge_backend", None)
+        return normalized, app_cfg
+    resolution = _llm_provider_store().resolve(
+        provider_id,
+        str(backend.get("model") or ""),
+        app_cfg,
+    )
+    normalized["judge_backend"] = {
+        "provider_id": resolution.id,
+        "provider_name": resolution.name,
+        "model": resolution.model,
+        "base_url_snapshot": resolution.base_url,
+        "provider_revision": resolution.revision,
+        "builtin": resolution.builtin,
+    }
+    return normalized, _runtime_config_for_options(app_cfg, normalized)
 
 
 def _resolve_operation_video_path(raw_path: str) -> Path:
@@ -303,6 +378,90 @@ def api_config():
     }
 
 
+@app.get("/api/llm-providers")
+def api_llm_providers():
+    return {"items": _llm_provider_store().list_public(cfg())}
+
+
+@app.post("/api/llm-providers", status_code=201)
+def api_llm_provider_create(payload: LLMProviderPayload):
+    try:
+        provider = _llm_provider_store().create(payload)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"provider": provider}
+
+
+@app.put("/api/llm-providers/{provider_id}")
+def api_llm_provider_update(provider_id: str, payload: LLMProviderPayload):
+    try:
+        provider = _llm_provider_store().update(provider_id, payload)
+    except KeyError as exc:
+        raise HTTPException(404, "Provider not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"provider": provider}
+
+
+@app.delete("/api/llm-providers/{provider_id}")
+def api_llm_provider_delete(provider_id: str):
+    try:
+        deleted = _llm_provider_store().delete(provider_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not deleted:
+        raise HTTPException(404, "Provider not found")
+    return {"ok": True}
+
+
+@app.post("/api/llm-providers/{provider_id}/test")
+async def api_llm_provider_test(provider_id: str, req: ProviderTestReq):
+    try:
+        provider = _llm_provider_store().resolve(provider_id, req.model, cfg())
+    except KeyError as exc:
+        raise HTTPException(404, "Provider not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    started = time.perf_counter()
+    client = None
+    try:
+        client = build_openai_client(
+            base_url=provider.base_url,
+            api_key=provider.api_key,
+            connect_timeout_s=10,
+            read_timeout_s=30,
+        )
+        response = await stream_chat_completion(
+            client,
+            {
+                "model": provider.model,
+                "messages": [{"role": "user", "content": "请只回复 OK"}],
+                "temperature": 0,
+                "max_tokens": 16,
+            },
+            include_usage=False,
+            total_timeout_s=30,
+            max_attempts=1,
+        )
+        answer = str(response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        message = str(exc).replace(provider.api_key, "***")
+        raise HTTPException(
+            502,
+            f"{type(exc).__name__}: {message[:2000]}",
+        ) from exc
+    finally:
+        if client is not None:
+            await client.close()
+    return {
+        "ok": True,
+        "provider_id": provider.id,
+        "model": provider.model,
+        "latency_s": round(time.perf_counter() - started, 3),
+        "response": answer[:500],
+    }
+
+
 @app.get("/api/knowledge/operation")
 def api_operation_knowledge():
     store = _operation_knowledge_store()
@@ -371,17 +530,23 @@ async def api_eval(req: EvalReq):
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
     _validate_eval_request(req, app_cfg)
+    try:
+        task_options, runtime_cfg = _normalize_eval_options(app_cfg, req.options)
+    except KeyError as exc:
+        raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     task = new_task(
         req.mode,
         req.items,
-        req.options,
+        task_options,
         dataset_name=req.dataset_name.strip(),
     )
     async def _start_later():
         # 先把 task_id 响应给前端，再启动可能较重的评估任务；
         # 避免后台裁判/工具调用抢占事件循环，导致 /api/eval 本身迟迟不返回。
         await asyncio.sleep(0.05)
-        await run_eval(task, app_cfg)
+        await run_eval(task, runtime_cfg)
 
     execution = asyncio.create_task(_start_later())
     task.execution = execution
@@ -501,6 +666,12 @@ async def api_eval_single(req: SingleEvalReq):
         "concurrency": single_concurrency,
         "submission_source": "single_api",
     }
+    try:
+        runtime_cfg = _runtime_config_for_options(app_cfg, task.options)
+    except KeyError as exc:
+        raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     if dataset_name:
         task.dataset_name = dataset_name
     task.status = "running"
@@ -512,7 +683,7 @@ async def api_eval_single(req: SingleEvalReq):
     execution = asyncio.create_task(
         run_single_api_item(
             task,
-            app_cfg,
+            runtime_cfg,
             item_index,
             item_id,
             rerun=rerun_attempt,
@@ -938,9 +1109,27 @@ async def api_eval_rerun(task_id: str, req: RerunReq):
     if invalid:
         raise HTTPException(422, f"无效的数据集索引：{invalid[:10]}")
 
+    rerun_options = dict(task.options)
+    # 新前端会显式提交当前选择；旧客户端未提交时继续沿用原任务配置。
+    if "judge_backend" in req.model_fields_set:
+        if req.judge_backend:
+            rerun_options["judge_backend"] = req.judge_backend
+        else:
+            rerun_options.pop("judge_backend", None)
+    try:
+        normalized_rerun_options, runtime_cfg = _normalize_eval_options(
+            cfg(),
+            rerun_options,
+        )
+    except KeyError as exc:
+        raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
     base_status = task.status
     task.status = "rerunning"
     attempt_no = len(task.rerun_history) + 1
+    rerun_backend = normalized_rerun_options.get("judge_backend") or {}
     task.active_rerun = {
         "attempt_id": f"rerun-{attempt_no}-{uuid.uuid4().hex[:8]}",
         "attempt_no": attempt_no,
@@ -950,11 +1139,12 @@ async def api_eval_rerun(task_id: str, req: RerunReq):
         "status": "starting",
         "base_status": base_status,
         "started_at": datetime.now().timestamp(),
+        "judge_backend": rerun_backend,
         "items": [],
     }
     save_task(task)
     execution = asyncio.create_task(
-        run_rerun(task, cfg(), indices, base_status=base_status),
+        run_rerun(task, runtime_cfg, indices, base_status=base_status),
     )
     task.execution = execution
 
@@ -968,6 +1158,7 @@ async def api_eval_rerun(task_id: str, req: RerunReq):
         "task_id": task.id,
         "status": task.status,
         "item_indices": indices,
+        "judge_backend": rerun_backend,
     }
 
 

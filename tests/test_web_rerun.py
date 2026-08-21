@@ -145,6 +145,10 @@ def test_export_contains_latest_rerun_fields_and_audit_sheet(tmp_path):
         "correctness": "ok",
         "rerun_count": 1,
         "last_rerun_at": 300.0,
+        "judge_provider": "Provider Two",
+        "judge_provider_id": "p2",
+        "judge_model": "m2",
+        "judge_provider_revision": "rev-2",
     }
     task.rerun_history = [{
         "attempt_id": "rerun-1-abcd1234",
@@ -154,12 +158,22 @@ def test_export_contains_latest_rerun_fields_and_audit_sheet(tmp_path):
         "started_at": 290.0,
         "finished_at": 300.0,
         "duration_s": 10.0,
+        "judge_backend": {
+            "provider_id": "p2",
+            "provider_name": "Provider Two",
+            "model": "m2",
+            "provider_revision": "rev-2",
+        },
         "items": [{
             "index": 1,
             "item_id": "simple_002",
             "status": "done",
             "previous_status": "error",
             "correctness": "ok",
+            "judge_provider": "Provider Two",
+            "judge_provider_id": "p2",
+            "judge_model": "m2",
+            "judge_provider_revision": "rev-2",
         }],
     }]
 
@@ -167,8 +181,12 @@ def test_export_contains_latest_rerun_fields_and_audit_sheet(tmp_path):
 
     assert sheets["逐题结果"][1]["重跑次数"] == 1
     assert sheets["逐题结果"][1]["最后重跑时间"]
+    assert sheets["逐题结果"][1]["Provider"] == "Provider Two"
+    assert sheets["逐题结果"][1]["模型"] == "m2"
     assert sheets["重跑记录"][0]["数据集序号"] == 2
     assert sheets["重跑记录"][0]["重跑前状态"] == "error"
+    assert sheets["重跑记录"][0]["Provider"] == "Provider Two"
+    assert sheets["重跑记录"][0]["模型"] == "m2"
     assert sheets["运行汇总"][0]["rerun_count"] == 1
 
 
@@ -185,28 +203,62 @@ def test_frontend_exposes_manual_and_failed_item_rerun_actions():
     assert "rerunOne(r)" in html
     assert 'filter((result) => Boolean(result?.error))' in js
     assert 'fetch(`/api/eval/${taskId.value}/rerun`' in js
+    assert "judge_backend: rerunBackend" in js
+    assert "本次使用：${rerunBackendLabel}" in js
 
 
 @pytest.mark.asyncio
 async def test_rerun_api_validates_indices_and_starts_one_parent_execution(monkeypatch):
     task = _task()
+    task.options["judge_backend"] = {
+        "provider_id": "old-provider",
+        "model": "old-model",
+    }
     TASKS[task.id] = task
     started = asyncio.Event()
     release = asyncio.Event()
+    runtime_cfg = object()
+
+    def fake_normalize(app_cfg, options):
+        assert options["judge_backend"] == {
+            "provider_id": "new-provider",
+            "model": "new-model",
+        }
+        normalized = dict(options)
+        normalized["judge_backend"] = {
+            "provider_id": "new-provider",
+            "provider_name": "New Provider",
+            "model": "new-model",
+            "provider_revision": "rev-new",
+        }
+        return normalized, runtime_cfg
 
     async def fake_rerun(current, cfg, indices, *, base_status=None):
         assert indices == [1]
         assert base_status == "done"
+        assert cfg is runtime_cfg
+        assert current.active_rerun["judge_backend"]["provider_id"] == "new-provider"
         started.set()
         await release.wait()
         current.status = "done"
 
     monkeypatch.setattr(server, "run_rerun", fake_rerun)
     monkeypatch.setattr(server, "cfg", lambda: SimpleNamespace())
+    monkeypatch.setattr(server, "_normalize_eval_options", fake_normalize)
     monkeypatch.setattr(server, "save_task", lambda current: True)
     try:
-        response = await server.api_eval_rerun(task.id, RerunReq(item_indices=[1, 1]))
+        response = await server.api_eval_rerun(
+            task.id,
+            RerunReq(
+                item_indices=[1, 1],
+                judge_backend={
+                    "provider_id": "new-provider",
+                    "model": "new-model",
+                },
+            ),
+        )
         assert response["item_indices"] == [1]
+        assert response["judge_backend"]["provider_id"] == "new-provider"
         assert task.status == "rerunning"
         await started.wait()
 

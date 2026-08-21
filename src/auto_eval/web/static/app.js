@@ -39,6 +39,14 @@ createApp({
     });
     const visualJudge = ref("");  // rich_content_quality 模式：挂卡识别裁判
     const selectedModel = ref("");
+    const llmProviders = ref([]);
+    const selectedProviderId = ref("");
+    const selectedProviderModel = ref("");
+    const providerManagerOpen = ref(false);
+    const providerBusy = ref(false);
+    const providerMessage = ref("");
+    const providerError = ref(false);
+    const providerForm = ref(emptyProviderForm());
     const concurrency = ref(4);
     const evalTimeout = ref(300);
     const running = ref(false);
@@ -95,6 +103,58 @@ createApp({
     const pageSize = 10;
     const opPageSize = 10;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
+
+    function emptyProviderForm() {
+      return {
+        id: "",
+        name: "",
+        base_url: "",
+        models_text: "",
+        default_model: "",
+        api_key: "",
+        enabled: true,
+        editing: false,
+      };
+    }
+
+    const selectedProvider = computed(
+      () => llmProviders.value.find((item) => item.id === selectedProviderId.value) || null,
+    );
+
+    const selectedProviderModels = computed(() => selectedProvider.value?.models || []);
+
+    const providerModelOptions = computed(() => {
+      const models = [...selectedProviderModels.value];
+      const current = selectedProviderModel.value.trim();
+      if (current && !models.includes(current)) models.unshift(current);
+      return models;
+    });
+
+    function onProviderChange() {
+      const provider = selectedProvider.value;
+      selectedProviderModel.value = provider?.default_model || provider?.models?.[0] || "";
+    }
+
+    function providerApiErrorText(data, fallback = "未知错误") {
+      const detail = data?.detail;
+      if (typeof detail === "string") return detail;
+      if (Array.isArray(detail)) {
+        const messages = detail.map((item) => {
+          if (typeof item === "string") return item;
+          const field = Array.isArray(item?.loc)
+            ? item.loc.filter((part) => part !== "body").join(".")
+            : "";
+          const message = item?.msg || item?.message || JSON.stringify(item);
+          return field ? `${field}：${message}` : message;
+        }).filter(Boolean);
+        if (messages.length) return messages.join("；");
+      }
+      if (detail && typeof detail === "object") {
+        return detail.message || detail.msg || JSON.stringify(detail);
+      }
+      if (typeof data?.message === "string") return data.message;
+      return fallback;
+    }
 
     const formatHint = computed(
       () =>
@@ -1115,6 +1175,7 @@ createApp({
     }
 
     const canSubmit = computed(() => {
+      if (selectedProviderId.value && !selectedProviderModel.value.trim()) return false;
       if (isVideoMode.value)
         return !opPreparing.value && opItems.value.some(
           (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
@@ -1220,6 +1281,12 @@ createApp({
             : selectedJudges.value,
           visual_judge: visualJudge.value,
           model: selectedModel.value,
+          ...(selectedProviderId.value ? {
+            judge_backend: {
+              provider_id: selectedProviderId.value,
+              model: selectedProviderModel.value,
+            },
+          } : {}),
           concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
         },
@@ -1791,6 +1858,9 @@ createApp({
         if (Array.isArray(options.judges) && options.judges.length) selectedJudges.value = options.judges;
         if (options.visual_judge) visualJudge.value = options.visual_judge;
         if (options.model) selectedModel.value = options.model;
+        const judgeBackend = options.judge_backend || {};
+        selectedProviderId.value = judgeBackend.provider_id || "";
+        selectedProviderModel.value = judgeBackend.model || "";
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
         renderCharts();
         if (running.value) connectSSE();
@@ -1888,14 +1958,32 @@ createApp({
         alert("请先选择需要重跑的条目");
         return;
       }
-      if (!confirm(`确认重跑选中的 ${indices.length} 条数据？新结果会自动合并到当前历史任务。`)) return;
+      if (selectedProviderId.value && !selectedProviderModel.value.trim()) {
+        alert("请先选择本次重跑使用的模型");
+        return;
+      }
+      const rerunBackend = selectedProviderId.value ? {
+        provider_id: selectedProviderId.value,
+        model: selectedProviderModel.value.trim(),
+      } : null;
+      const rerunBackendLabel = selectedProvider.value
+        ? `${selectedProvider.value.name} / ${selectedProviderModel.value.trim()}`
+        : "角色默认配置";
+      if (!confirm(
+        `确认重跑选中的 ${indices.length} 条数据？\n`
+        + `本次使用：${rerunBackendLabel}\n`
+        + "新结果会自动合并到当前历史任务。",
+      )) return;
       runError.value = "";
       let response;
       try {
         response = await fetch(`/api/eval/${taskId.value}/rerun`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ item_indices: indices }),
+          body: JSON.stringify({
+            item_indices: indices,
+            judge_backend: rerunBackend,
+          }),
         });
       } catch (error) {
         alert("重跑启动失败：" + (error?.message || "网络错误"));
@@ -1903,7 +1991,7 @@ createApp({
       }
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        alert("重跑启动失败：" + (data.detail || "未知错误"));
+        alert("重跑启动失败：" + providerApiErrorText(data, `HTTP ${response.status}`));
         return;
       }
       const nextProgress = { ...itemProgress.value };
@@ -1935,6 +2023,168 @@ createApp({
       if (Number.isInteger(index) && index >= 0) startRerun([index]);
     }
 
+    async function loadProviders() {
+      try {
+        const response = await fetch("/api/llm-providers");
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(
+          providerApiErrorText(data, `HTTP ${response.status}`),
+        );
+        llmProviders.value = data.items || [];
+      } catch (error) {
+        providerError.value = true;
+        providerMessage.value = `模型服务加载失败：${error?.message || "未知错误"}`;
+      }
+    }
+
+    function newProvider() {
+      providerForm.value = emptyProviderForm();
+      providerManagerOpen.value = true;
+      providerMessage.value = "";
+    }
+
+    function editProvider(provider) {
+      if (!provider || provider.builtin) return;
+      providerForm.value = {
+        id: provider.id,
+        name: provider.name,
+        base_url: provider.base_url,
+        models_text: (provider.models || []).join("\n"),
+        default_model: provider.default_model || "",
+        api_key: "",
+        enabled: provider.enabled !== false,
+        editing: true,
+      };
+      providerManagerOpen.value = true;
+      providerMessage.value = "API Key 留空会保留当前密钥。";
+      providerError.value = false;
+    }
+
+    function providerPayload() {
+      const models = String(providerForm.value.models_text || "")
+        .split(/[\n,，]+/)
+        .map((item) => item.trim())
+        .filter((item, index, all) => item && all.indexOf(item) === index);
+      return {
+        id: String(providerForm.value.id || "").trim(),
+        name: String(providerForm.value.name || "").trim(),
+        base_url: String(providerForm.value.base_url || "").trim(),
+        models,
+        default_model: String(providerForm.value.default_model || "").trim(),
+        api_key: String(providerForm.value.api_key || "").trim() || null,
+        enabled: providerForm.value.enabled !== false,
+      };
+    }
+
+    async function saveProvider() {
+      if (providerBusy.value) return;
+      const payload = providerPayload();
+      if (!payload.id || !payload.name || !payload.base_url) {
+        providerError.value = true;
+        providerMessage.value = "请填写 Provider ID、名称和 Base URL。";
+        return;
+      }
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(payload.id)) {
+        providerError.value = true;
+        providerMessage.value = "Provider ID 仅支持 1–64 位字母、数字、下划线和连字符，不能包含中文、空格或点号。";
+        return;
+      }
+      if (!/^https?:\/\//i.test(payload.base_url)) {
+        providerError.value = true;
+        providerMessage.value = "Base URL 必须以 http:// 或 https:// 开头。";
+        return;
+      }
+      providerBusy.value = true;
+      providerMessage.value = "";
+      try {
+        const editing = providerForm.value.editing;
+        const url = editing
+          ? `/api/llm-providers/${encodeURIComponent(payload.id)}`
+          : "/api/llm-providers";
+        const response = await fetch(url, {
+          method: editing ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(
+          providerApiErrorText(data, `HTTP ${response.status}`),
+        );
+        await loadProviders();
+        selectedProviderId.value = data.provider.id;
+        selectedProviderModel.value = data.provider.default_model || data.provider.models?.[0] || "";
+        providerForm.value = emptyProviderForm();
+        providerError.value = false;
+        providerMessage.value = "模型服务已保存。";
+      } catch (error) {
+        providerError.value = true;
+        providerMessage.value = `保存失败：${error?.message || "未知错误"}`;
+      } finally {
+        providerBusy.value = false;
+      }
+    }
+
+    async function deleteProvider(provider) {
+      if (!provider || provider.builtin || providerBusy.value) return;
+      if (!confirm(`确认删除模型服务「${provider.name}」？历史任务将无法使用它重跑。`)) return;
+      providerBusy.value = true;
+      try {
+        const response = await fetch(`/api/llm-providers/${encodeURIComponent(provider.id)}`, {
+          method: "DELETE",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(
+          providerApiErrorText(data, `HTTP ${response.status}`),
+        );
+        if (selectedProviderId.value === provider.id) {
+          selectedProviderId.value = "";
+          selectedProviderModel.value = "";
+        }
+        await loadProviders();
+        providerError.value = false;
+        providerMessage.value = "模型服务已删除。";
+      } catch (error) {
+        providerError.value = true;
+        providerMessage.value = `删除失败：${error?.message || "未知错误"}`;
+      } finally {
+        providerBusy.value = false;
+      }
+    }
+
+    async function testProvider(provider = selectedProvider.value) {
+      if (!provider || providerBusy.value) {
+        providerError.value = true;
+        providerMessage.value = "请先选择一个模型服务。";
+        return;
+      }
+      const model = provider.id === selectedProviderId.value
+        ? selectedProviderModel.value
+        : provider.default_model;
+      providerBusy.value = true;
+      providerError.value = false;
+      providerMessage.value = "正在测试连接…";
+      try {
+        const response = await fetch(
+          `/api/llm-providers/${encodeURIComponent(provider.id)}/test`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model }),
+          },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(
+          providerApiErrorText(data, `HTTP ${response.status}`),
+        );
+        providerMessage.value = `连接成功：${data.model}，耗时 ${data.latency_s}s，响应 ${data.response || "(空)"}`;
+      } catch (error) {
+        providerError.value = true;
+        providerMessage.value = `连接失败：${error?.message || "未知错误"}`;
+      } finally {
+        providerBusy.value = false;
+      }
+    }
+
     onMounted(async () => {
       progressClockTimer = window.setInterval(() => {
         clockNow.value = Date.now();
@@ -1945,6 +2195,7 @@ createApp({
       models.value = d.models;
       selectedJudges.value = defaultJudgeSelection(mode.value);
       selectedModel.value = d.models[0] || "";
+      await loadProviders();
       loadHistory();
     });
 
@@ -1956,6 +2207,10 @@ createApp({
     return {
       workspacePage,
       modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
+      llmProviders, selectedProviderId, selectedProviderModel, selectedProvider,
+      selectedProviderModels, providerModelOptions, providerManagerOpen, providerForm, providerBusy,
+      providerMessage, providerError, onProviderChange, loadProviders, newProvider,
+      editProvider, saveProvider, deleteProvider, testProvider,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       runKind, rerunProgress, rerunTotal, selectedRerunIndices, selectedRerunCount, allPagedResultsSelected,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,

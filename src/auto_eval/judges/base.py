@@ -508,6 +508,9 @@ class JudgeClient:
                 "item_sequence": ctx.item_index + 1 if ctx.item_index >= 0 else None,
                 "attempt_id": ctx.attempt_id or None,
                 "attempt_no": ctx.attempt_no or 0,
+                "provider_id": getattr(self.cfg, "provider_id", None),
+                "provider_name": getattr(self.cfg, "provider_name", None),
+                "provider_revision": getattr(self.cfg, "provider_revision", None),
                 **detail,
             }
             if ctx.judge_trace_callback:

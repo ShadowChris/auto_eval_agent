@@ -61,6 +61,13 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502
 
 界面支持多种模式（Tab 切换），包括垂域问答类、两回答对比、接模型在线评估、过程盲评和任务类（录屏）等；粘贴（`|||` 分隔）或上传 jsonl 批量输入，SSE 实时出结果，可导出 CSV/JSON。
 
+评估配置中的“裁判模型服务”支持保存和切换 OpenAI 兼容 Provider、Base URL、
+模型列表及 API Key。选择“跟随裁判角色默认配置”时继续使用
+`config/judges.yaml`；选择某个 Provider 后，本批次所有裁判角色、分类和视觉
+判断统一使用对应模型。Provider 配置保存在忽略目录 `runs/web_settings/`，API Key
+加密存储且不会进入历史、导出或调用日志。服务器部署建议在 `.env` 固定设置
+`AUTO_EVAL_CREDENTIAL_KEY`，避免迁移时丢失自动生成的本机加密密钥。
+
 **终止**：在该终端按 `Ctrl+C`。
 
 > 端口被占（进程没清干净）时强制清理 8502：

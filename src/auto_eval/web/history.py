@@ -211,6 +211,7 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "error": error,
             "active_rerun": data.get("active_rerun"),
             "rerun_count": len(data.get("rerun_history") or []),
+            **_judge_backend_summary(data),
             "preview": _preview(data),
         })
     rows.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
@@ -282,6 +283,7 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             "error": error,
             "active_rerun": data.get("active_rerun"),
             "rerun_count": len(data.get("rerun_history") or []),
+            **_judge_backend_summary(data),
             "preview": _preview(data),
         })
     return rows, total
@@ -292,6 +294,16 @@ def _preview(data: dict) -> str:
         return ""
     q = str(items[0].get("query") or "")
     return q[:80] + ("…" if len(q) > 80 else "")
+
+
+def _judge_backend_summary(snapshot: dict) -> dict[str, str]:
+    backend = (snapshot.get("options") or {}).get("judge_backend") or {}
+    return {
+        "judge_provider": str(backend.get("provider_name") or "角色默认配置"),
+        "judge_provider_id": str(backend.get("provider_id") or ""),
+        "judge_model": str(backend.get("model") or ""),
+        "judge_provider_revision": str(backend.get("provider_revision") or ""),
+    }
 
 
 def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
@@ -413,6 +425,7 @@ def _jsonl_eval_run(snapshot: dict) -> dict:
         "judges": list(options.get("judges") or []),
         "visual_judge": options.get("visual_judge") or "",
         "model": options.get("model") or "",
+        **_judge_backend_summary(snapshot),
         "concurrency": options.get("concurrency"),
         "eval_timeout_s": options.get("eval_timeout_s"),
         "rerun_count": len(snapshot.get("rerun_history") or []),
@@ -735,6 +748,10 @@ _OPERATION_EXPORT_COLUMNS = (
     "分享链接",
     "context",
     "answer",
+    "Provider",
+    "Provider ID",
+    "模型",
+    "Provider版本",
     "task_type",
     "execution_routes",
     "链路类型",
@@ -808,6 +825,10 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
             "分享链接": source.get("分享链接", ""),
             "context": result.get("context") or item.get("context") or "",
             "answer": result.get("answer") or item.get("answer") or "",
+            "Provider": result.get("judge_provider", ""),
+            "Provider ID": result.get("judge_provider_id", ""),
+            "模型": result.get("judge_model", ""),
+            "Provider版本": result.get("judge_provider_revision", ""),
             "task_type": result.get("task_type", ""),
             "execution_routes": result.get("execution_routes", ""),
             "链路类型": _format_operation_routes_zh(
@@ -1135,6 +1156,7 @@ def _run_info(snapshot: dict) -> dict:
         "finished_at": _format_ts(snapshot.get("finished_at")),
         "duration_s": _stored_timing(snapshot)["duration_s"],
         "options": snapshot.get("options") or {},
+        **_judge_backend_summary(snapshot),
         "error": snapshot.get("error") or "",
         "rerun_count": len(snapshot.get("rerun_history") or []),
     }
@@ -1145,6 +1167,7 @@ def _rerun_record_rows(snapshot: dict) -> list[dict]:
     items = snapshot.get("items") or []
     rows: list[dict] = []
     for attempt in snapshot.get("rerun_history") or []:
+        attempt_backend = attempt.get("judge_backend") or {}
         detail_by_index = {
             int(detail["index"]): detail
             for detail in (attempt.get("items") or [])
@@ -1171,6 +1194,10 @@ def _rerun_record_rows(snapshot: dict) -> list[dict]:
                 "correctness": detail.get("correctness", ""),
                 "total": detail.get("total", ""),
                 "latency_s": detail.get("latency_s", ""),
+                "Provider": detail.get("judge_provider") or attempt_backend.get("provider_name") or "角色默认配置",
+                "Provider ID": detail.get("judge_provider_id") or attempt_backend.get("provider_id") or "",
+                "模型": detail.get("judge_model") or attempt_backend.get("model") or "",
+                "Provider版本": detail.get("judge_provider_revision") or attempt_backend.get("provider_revision") or "",
                 "开始时间": _format_ts(attempt.get("started_at")),
                 "完成时间": _format_ts(detail.get("finished_at") or attempt.get("finished_at")),
                 "批次耗时（秒）": attempt.get("duration_s", ""),
@@ -1209,6 +1236,7 @@ def _operation_run_summary(snapshot: dict) -> dict:
         "rerun_count": len(snapshot.get("rerun_history") or []),
         "judges": judges,
         "model": options.get("model") or "",
+        **_judge_backend_summary(snapshot),
         "concurrency": options.get("concurrency", ""),
         "eval_timeout_s": options.get("eval_timeout_s", ""),
         "total": summary.get("total", total),
