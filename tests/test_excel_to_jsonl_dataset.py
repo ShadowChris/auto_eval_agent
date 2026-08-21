@@ -150,3 +150,42 @@ def test_empty_value_in_existing_video_path_column_does_not_fall_back_to_filenam
         "missing_video_mapping",
         "video_file_missing_or_empty",
     ]
+
+
+def test_index_column_takes_priority_over_sequence_when_building_id(
+    tmp_path: Path,
+):
+    video = tmp_path / "direct.mp4"
+    video.write_bytes(b"video")
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([{
+        "index": 42,
+        "序号": "simple_001",
+        "query": "打开设置",
+        "video_path": str(video),
+    }]).to_csv(source, index=False, encoding="utf-8-sig")
+
+    result = convert_table(source, input_prefix="V1", project_root=tmp_path)
+
+    exported = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert exported["id"] == "V1_42"
+    assert exported["index"] == "42"
+    assert exported["序号"] == "simple_001"
+
+
+def test_index_can_build_id_without_sequence_column(tmp_path: Path):
+    video = tmp_path / "direct.mp4"
+    video.write_bytes(b"video")
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([{
+        "index": "case_007",
+        "query": "关闭设置",
+        "video_path": str(video),
+    }]).to_csv(source, index=False, encoding="utf-8-sig")
+
+    result = convert_table(source, input_prefix="V1", project_root=tmp_path)
+
+    exported = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert exported["id"] == "V1_case_007"
+    assert exported["index"] == "case_007"
+    assert "序号" not in exported

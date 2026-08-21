@@ -2,7 +2,8 @@
 
 核心字段映射：
 
-* id: ``<input_prefix>_<序号>``，例如 ``0730众测_simple_001``。
+* id: 优先使用 ``<input_prefix>_<index>``；输入表没有 ``index`` 列时使用
+  ``<input_prefix>_<序号>``，例如 ``0730众测_simple_001``。
 * 序号: 保留源表序号，例如 ``simple_001``。
 * query/context/answer/task_start_time/task_end_time: 沿用原任务类转换规则。
 * video_path: 输入表有 ``video_path`` 列时直接复用；否则按
@@ -41,6 +42,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
 SEQUENCE_COLUMN = "序号"
+INDEX_COLUMN = "index"
 QUERY_COLUMN = "query"
 CONTEXT_COLUMN = "context"
 ANSWER_COLUMNS = ("agent_statement", "回复内容", "answer")
@@ -73,6 +75,7 @@ VIDEO_SUFFIXES = {
 # 这些源列已经参与核心字段映射，不再重复追加到 JSON 对象末尾。
 MAPPED_SOURCE_COLUMNS = {
     "id",
+    INDEX_COLUMN,
     SEQUENCE_COLUMN,
     QUERY_COLUMN,
     CONTEXT_COLUMN,
@@ -410,10 +413,16 @@ def convert_table(
     df = df.loc[nonempty_mask]
     ignored_empty_rows = raw_row_count - len(df)
 
-    required = {SEQUENCE_COLUMN, QUERY_COLUMN}
+    required = {QUERY_COLUMN}
     missing_columns = sorted(required - set(df.columns))
     if missing_columns:
         raise ValueError(f"输入表格缺少必需列：{', '.join(missing_columns)}")
+    has_index_column = INDEX_COLUMN in df.columns
+    has_sequence_column = SEQUENCE_COLUMN in df.columns
+    if not has_index_column and not has_sequence_column:
+        raise ValueError(
+            f"输入表格必须至少包含 {INDEX_COLUMN} 或 {SEQUENCE_COLUMN} 列"
+        )
 
     rows: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -429,11 +438,16 @@ def convert_table(
         )
         row_warnings: list[str] = []
 
-        sequence = _normalize_identifier(row.get(SEQUENCE_COLUMN))
-        if not sequence:
-            sequence = f"excel_row_{source_row:04d}"
-            row_warnings.append("missing_sequence")
-        item_id = f"{prefix}_{sequence}"
+        sequence = (
+            _normalize_identifier(row.get(SEQUENCE_COLUMN))
+            if has_sequence_column else ""
+        )
+        id_source_column = INDEX_COLUMN if has_index_column else SEQUENCE_COLUMN
+        id_suffix = _normalize_identifier(row.get(id_source_column))
+        if not id_suffix:
+            id_suffix = f"excel_row_{source_row:04d}"
+            row_warnings.append(f"missing_{id_source_column}")
+        item_id = f"{prefix}_{id_suffix}"
         if item_id in used_ids:
             first_row = used_ids[item_id]
             raise ValueError(
@@ -449,15 +463,18 @@ def convert_table(
         else:
             query = str(raw_query).strip()
 
-        item: dict[str, Any] = {
-            "id": item_id,
-            SEQUENCE_COLUMN: sequence,
+        item: dict[str, Any] = {"id": item_id}
+        if has_index_column:
+            item[INDEX_COLUMN] = _json_value(row.get(INDEX_COLUMN))
+        if has_sequence_column:
+            item[SEQUENCE_COLUMN] = sequence
+        item.update({
             "query": query,
             "context": _build_context(
                 row,
                 current_location=current_location,
             ),
-        }
+        })
 
         answer = _first_nonempty(row, ANSWER_COLUMNS, answer=True)
         if answer is not None:
@@ -493,7 +510,7 @@ def convert_table(
         if not _video_exists(video_path, project_root=project_root):
             recovered_video_path = _recover_video_path(
                 row,
-                sequence=sequence,
+                sequence=sequence or id_suffix,
                 video_prefix=video_prefix,
                 project_root=project_root,
             ) if not has_video_path_column else None
