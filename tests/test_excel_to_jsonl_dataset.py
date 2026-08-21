@@ -6,7 +6,7 @@ import pytest
 
 pd = pytest.importorskip("pandas")
 
-from scripts.excel_to_jsonl_dataset import convert_table
+from scripts.excel_to_jsonl_dataset import convert_table, main
 
 
 def test_convert_csv_to_ordered_operation_jsonl(tmp_path: Path):
@@ -60,7 +60,25 @@ def test_convert_csv_to_ordered_operation_jsonl(tmp_path: Path):
     )
     assert exported[0]["video_path"].endswith("videos/simple_001/record.mp4")
     assert exported[0]["分享链接"] == "https://example.test/1"
+    assert exported[0]["开始时间节点"] == "2026-08-05 10:00:00"
+    assert exported[0]["回复内容"] == "已打开设置"
+    assert exported[0]["文件路径"] == "simple_001"
+    assert exported[0]["原文件名"] == "record.mp4"
+    assert list(exported[0]) == [
+        "id",
+        "序号",
+        "query",
+        "context",
+        "answer",
+        "video_path",
+        "开始时间节点",
+        "文件路径",
+        "原文件名",
+        "回复内容",
+        "分享链接",
+    ]
     assert "answer" not in exported[1]
+    assert exported[1]["回复内容"] == ""
     assert result.missing_video_ids == ["V1_录屏0805_simple_002"]
 
 
@@ -119,6 +137,57 @@ def test_existing_video_path_column_takes_priority_over_filename_mapping(
     assert exported["video_path"] == str(direct_video)
     assert result.missing_video_ids == []
     assert result.warnings == []
+
+
+def test_explicit_standard_columns_take_priority_and_cli_prints_warning(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    video = tmp_path / "direct.mp4"
+    video.write_bytes(b"video")
+    source = tmp_path / "cases.csv"
+    output = tmp_path / "cases.jsonl"
+    pd.DataFrame([{
+        "序号": "simple_001",
+        "query": "打开设置",
+        "context": "原表上下文",
+        "answer": "原表回答",
+        "回复内容": "不应覆盖原表回答",
+        "task_start_time": 1,
+        "开始时间": 9,
+        "task_end_time": 2,
+        "结束时间": 10,
+        "video_path": str(video),
+        "文件路径": "wrong_directory",
+        "原文件名": "wrong_name.mp4",
+    }]).to_csv(source, index=False, encoding="utf-8-sig")
+
+    exit_code = main([
+        str(source),
+        "--input-prefix",
+        "V1",
+        "--output",
+        str(output),
+    ])
+
+    exported = json.loads(output.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert exported["context"] == "原表上下文"
+    assert exported["answer"] == "原表回答"
+    assert exported["task_start_time"] == 1.0
+    assert exported["task_end_time"] == 2.0
+    assert exported["video_path"] == str(video)
+    assert exported["回复内容"] == "不应覆盖原表回答"
+    assert exported["开始时间"] == "9"
+    assert exported["结束时间"] == "10"
+    assert exported["文件路径"] == "wrong_directory"
+    assert exported["原文件名"] == "wrong_name.mp4"
+    stdout = capsys.readouterr().out
+    assert "警告：输入表包含可自动生成的同名标准字段" in stdout
+    assert (
+        "context、answer、task_start_time、task_end_time、video_path"
+        in stdout
+    )
 
 
 def test_empty_value_in_existing_video_path_column_does_not_fall_back_to_filename(

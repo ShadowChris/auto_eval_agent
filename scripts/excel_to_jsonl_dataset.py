@@ -8,7 +8,8 @@
 * query/context/answer/task_start_time/task_end_time: 沿用原任务类转换规则。
 * video_path: 输入表有 ``video_path`` 列时直接复用；否则按
   ``<video_prefix>/[文件路径]/<原文件名>`` 构造，其中“文件路径”可选。
-* 未参与上述映射的输入列，按原列顺序平铺追加到每条 JSON 对象末尾。
+* 原表列全部保留：标准关键字段位于前面，其余输入列按原列顺序平铺追加到
+  每条 JSON 对象末尾；与标准字段同名的列不重复输出。
 
 默认 context 地点为“浙江省杭州市滨江区滨康路101号”，可通过
 ``--current-location`` 修改。
@@ -72,22 +73,6 @@ VIDEO_SUFFIXES = {
     ".m4v",
 }
 
-# 这些源列已经参与核心字段映射，不再重复追加到 JSON 对象末尾。
-MAPPED_SOURCE_COLUMNS = {
-    "id",
-    INDEX_COLUMN,
-    SEQUENCE_COLUMN,
-    QUERY_COLUMN,
-    CONTEXT_COLUMN,
-    *ANSWER_COLUMNS,
-    *START_TIME_COLUMNS,
-    *END_TIME_COLUMNS,
-    *(column for column, _ in CONTEXT_SOURCE_COLUMNS),
-    VIDEO_PATH_COLUMN,
-    VIDEO_DIRECTORY_COLUMN,
-    VIDEO_FILENAME_COLUMN,
-}
-
 EMPTY_TEXT = {"", "nan", "none", "null"}
 EMPTY_ANSWER = EMPTY_TEXT | {"n/a", "error"}
 EMPTY_PATH = EMPTY_TEXT | {"n/a"}
@@ -100,6 +85,7 @@ class ConversionResult:
     warnings: list[dict[str, Any]]
     missing_video_ids: list[str]
     ignored_empty_rows: int
+    direct_standard_columns: tuple[str, ...]
 
 
 def _is_empty(value: Any, *, answer: bool = False) -> bool:
@@ -444,7 +430,22 @@ def convert_table(
     warnings: list[dict[str, Any]] = []
     missing_video_ids: list[str] = []
     used_ids: dict[str, int] = {}
+    has_context_column = CONTEXT_COLUMN in df.columns
+    has_answer_column = "answer" in df.columns
+    has_start_time_column = START_TIME_COLUMNS[0] in df.columns
+    has_end_time_column = END_TIME_COLUMNS[0] in df.columns
     has_video_path_column = VIDEO_PATH_COLUMN in df.columns
+    direct_standard_columns = tuple(
+        column
+        for column, present in (
+            (CONTEXT_COLUMN, has_context_column),
+            ("answer", has_answer_column),
+            (START_TIME_COLUMNS[0], has_start_time_column),
+            (END_TIME_COLUMNS[0], has_end_time_column),
+            (VIDEO_PATH_COLUMN, has_video_path_column),
+        )
+        if present
+    )
 
     for zero_index, (source_index, row) in enumerate(df.iterrows()):
         source_row = (
@@ -484,20 +485,30 @@ def convert_table(
             item[INDEX_COLUMN] = _json_value(row.get(INDEX_COLUMN))
         if has_sequence_column:
             item[SEQUENCE_COLUMN] = sequence
-        item.update({
-            "query": query,
-            "context": _build_context(
-                row,
-                current_location=current_location,
-            ),
-        })
+        context = (
+            _json_value(row.get(CONTEXT_COLUMN))
+            if has_context_column
+            else _build_context(row, current_location=current_location)
+        )
+        item.update({"query": query, "context": context})
 
-        answer = _first_nonempty(row, ANSWER_COLUMNS, answer=True)
-        if answer is not None:
-            item["answer"] = str(answer).strip()
+        if has_answer_column:
+            item["answer"] = _json_value(row.get("answer"))
+        else:
+            answer = _first_nonempty(row, ANSWER_COLUMNS[:-1], answer=True)
+            if answer is not None:
+                item["answer"] = str(answer).strip()
 
-        start_time, start_error = _read_time(row, START_TIME_COLUMNS)
-        end_time, end_error = _read_time(row, END_TIME_COLUMNS)
+        start_time, start_error = _read_time(
+            row,
+            START_TIME_COLUMNS[:1] if has_start_time_column
+            else START_TIME_COLUMNS[1:],
+        )
+        end_time, end_error = _read_time(
+            row,
+            END_TIME_COLUMNS[:1] if has_end_time_column
+            else END_TIME_COLUMNS[1:],
+        )
         if start_error:
             row_warnings.append(f"invalid_task_start_time:{start_error}")
         elif start_time is not None:
@@ -537,10 +548,11 @@ def convert_table(
                 row_warnings.append("video_file_missing_or_empty")
                 missing_video_ids.append(item_id)
 
-        # 其余未参与映射的字段保留原列顺序，并按原列名平铺在核心字段之后。
+        # 标准关键字段保持在前面；所有尚未出现的原表字段按原列顺序追加。
+        # 同名字段以标准化后的关键字段值为准，避免 JSON 中出现重复键。
         for column in df.columns:
             column_name = str(column)
-            if column_name in MAPPED_SOURCE_COLUMNS:
+            if column_name in item:
                 continue
             item[column_name] = _json_value(row.get(column))
 
@@ -568,6 +580,7 @@ def convert_table(
         warnings=warnings,
         missing_video_ids=missing_video_ids,
         ignored_empty_rows=ignored_empty_rows,
+        direct_standard_columns=direct_standard_columns,
     )
 
 
@@ -645,6 +658,12 @@ def main(argv: list[str] | None = None) -> int:
         encoding=args.encoding,
     )
 
+    if result.direct_standard_columns:
+        columns = "、".join(result.direct_standard_columns)
+        print(
+            "警告：输入表包含可自动生成的同名标准字段，"
+            f"将直接使用原列，不再执行对应的自动拼接或映射：{columns}"
+        )
     print("===== 转换完成 =====")
     print(f"输入行数：{len(result.rows)}")
     print(f"JSONL行数：{len(result.rows)}（严格保序，不丢行）")
