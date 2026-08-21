@@ -3,8 +3,10 @@
 模仿人类反复查证后再评判：裁判在 loop 中自主决定查什么、何时停止，
 可调用 web_search（搜索）/ fetch_page（抓网页）等工具，直到对事实确信后输出最终评判。
 
-可选明细日志：设环境变量 AUTO_EVAL_JUDGE_TRACE=<jsonl路径> 后，每次 complete 调用会
-把每轮 LLM 响应、每次工具的完整返回、最终对话历史追加到该文件（默认关，不产生开销）。
+模型调用明细默认记录到 runs/judge_calls，并按任务创建日期和 task_id 把完整调用
+追加到独立 jsonl。AUTO_EVAL_JUDGE_TRACE_ENABLED=false 可显式关闭。
+旧默认值 AUTO_EVAL_JUDGE_TRACE=runs/judge_calls.jsonl 会自动升级到任务级目录；
+其他自定义文件路径仍兼容精确写入。
 
 流式输出：complete() 支持 stream_callback，每收到 token 时回调，用于前端实时展示裁判
 思考过程。仅负责推送文本，不改变 agent loop 的控制流（tool_call 仍依赖完整响应）。
@@ -25,6 +27,12 @@ from ..llm_stream import build_openai_client, stream_chat_completion
 from ..observability import bind_chain_context, current_context, log_event
 from ..paths import resolve_project_path
 from .prompts import persona_text
+from .trace_storage import (
+    configured_legacy_trace_path,
+    configured_trace_dir,
+    judge_trace_enabled,
+    task_trace_path,
+)
 from .tools import build_tools
 
 logger = logging.getLogger("auto_eval.judge")
@@ -196,9 +204,21 @@ class JudgeClient:
         self.model = cfg.model or cfg.name
         self.persona = persona_text(cfg.persona)
         self.max_rounds = max_rounds
-        # 明细日志路径：优先构造参数，其次环境变量；都不给则不记录
-        _trace_path = trace_path or os.environ.get("AUTO_EVAL_JUDGE_TRACE")
-        self.trace_path = str(resolve_project_path(_trace_path)) if _trace_path else None
+        # 显式 trace_path 保持精确文件语义；目录配置按任务分文件。
+        # trace_storage 会把旧的默认全局文件配置自动升级为任务级目录。
+        if trace_path is not None:
+            self.trace_path = str(resolve_project_path(trace_path))
+            self.trace_dir = None
+        elif judge_trace_enabled():
+            trace_dir = configured_trace_dir()
+            legacy_path = configured_legacy_trace_path()
+            self.trace_dir = trace_dir
+            self.trace_path = (
+                str(legacy_path) if trace_dir is None and legacy_path is not None else None
+            )
+        else:
+            self.trace_path = None
+            self.trace_dir = None
         self.tool_defs, self.tool_map = build_tools(
             web_search_enabled=cfg.enable_web_search,
             search_providers=search_providers,
@@ -282,7 +302,9 @@ class JudgeClient:
         used_search = False
         last_content = ""
         rounds = 0
-        do_trace = bool(self.trace_path)
+        do_trace = bool(
+            getattr(self, "trace_path", None) or getattr(self, "trace_dir", None)
+        )
         llm_rounds: list[dict] = [] if do_trace else []  # 仅 do_trace 时填充
         tool_results: list[dict] = [] if do_trace else []
 
@@ -465,9 +487,18 @@ class JudgeClient:
         )
 
     def _write_trace(self, detail: dict[str, Any]) -> None:
-        assert self.trace_path
         try:
             ctx = current_context()
+            trace_path = getattr(self, "trace_path", None)
+            trace_dir = getattr(self, "trace_dir", None)
+            if trace_dir is not None:
+                trace_path = str(task_trace_path(
+                    trace_dir,
+                    task_id=ctx.task_id,
+                    session_name=ctx.session_name,
+                ))
+            if not trace_path:
+                return
             record = {
                 "task_id": ctx.task_id,
                 "session_name": ctx.session_name,
@@ -480,12 +511,15 @@ class JudgeClient:
                 **detail,
             }
             if ctx.judge_trace_callback:
-                ctx.judge_trace_callback(self.trace_path, record)
+                ctx.judge_trace_callback(trace_path, record)
             else:
-                _append_trace_record(self.trace_path, record)
+                _append_trace_record(trace_path, record)
         except Exception:
             # 日志失败不应影响评测主流程
-            logger.exception("写入裁判调用日志失败: path=%s", self.trace_path)
+            logger.exception(
+                "写入裁判调用日志失败: path=%s",
+                getattr(self, "trace_path", None) or getattr(self, "trace_dir", None),
+            )
 
     async def _llm_create(self, kwargs: dict, max_attempts: int | None = None,
                           stream_callback: Callable[[str], None] | None = None):
@@ -497,7 +531,7 @@ class JudgeClient:
                 max_attempts=max_attempts,
             )
         except Exception as exc:
-            if self.trace_path:
+            if getattr(self, "trace_path", None) or getattr(self, "trace_dir", None):
                 self._write_trace({
                     "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                     "status": "error",

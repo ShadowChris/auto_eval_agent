@@ -22,6 +22,7 @@ class Task:
     session_name: str = ""
     dataset_name: str = ""
     note: str = ""
+    judge_trace_path: str = ""
     status: str = "pending"  # pending | running | rerunning | done | error | cancelled
     results: list[dict] = field(default_factory=list)
     item_progress: dict[str, dict] = field(default_factory=dict)
@@ -161,6 +162,7 @@ def get_task(task_id: str) -> Task | None:
         dataset_name=snapshot.get("dataset_name") or "",
         note=snapshot.get("note") or "",
         session_name=snapshot.get("session_name") or "",
+        judge_trace_path=snapshot.get("judge_trace_path") or "",
         status=status,
         results=snapshot.get("results") or [],
         item_progress=snapshot.get("item_progress") or {},

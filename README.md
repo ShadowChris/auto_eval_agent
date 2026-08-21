@@ -83,7 +83,7 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502
 
 ### 裁判明细日志（可选）
 
-在 `.env` 设 `AUTO_EVAL_JUDGE_TRACE=auto_eval_agent/runs/judge_calls.jsonl`，每次裁判评判的完整明细（每轮 LLM 响应、工具完整返回、对话历史）会追加到该文件，便于调试/审计。**不设则不记录、零开销**。详见 [项目文档 §9 Q7](docs/项目文档.md)。
+裁判调用明细默认开启，写入 `runs/judge_calls/YYYY-MM-DD/{task_id}/judge_calls.jsonl`，保存每轮 LLM 响应、工具完整返回和对话历史。可在 `.env` 设 `AUTO_EVAL_JUDGE_TRACE_ENABLED=false` 关闭，或通过 `AUTO_EVAL_JUDGE_TRACE_DIR` 覆盖默认根目录。旧默认值 `AUTO_EVAL_JUDGE_TRACE=runs/judge_calls.jsonl` 会自动使用新结构，其他自定义文件路径仍兼容精确写入。详见 [项目文档 §9 Q7](docs/项目文档.md)。
 
 ---
 

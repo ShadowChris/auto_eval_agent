@@ -346,6 +346,40 @@ def test_load_item_judge_calls_matches_task_and_item_index(tmp_path: Path):
     )
 
 
+def test_load_item_judge_calls_uses_snapshot_task_trace_path(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("AUTO_EVAL_JUDGE_TRACE_DIR", raising=False)
+    monkeypatch.delenv("AUTO_EVAL_JUDGE_TRACE", raising=False)
+    snapshot = _snapshot(tmp_path)
+    snapshot.update({
+        "task_id": "task-structured",
+        "session_name": "20260821_103930_operation_task-structured",
+        "judge_trace_path": (
+            "runs/judge_calls/2026-08-21/task-structured/judge_calls.jsonl"
+        ),
+    })
+    trace = tmp_path / snapshot["judge_trace_path"]
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    trace.write_text(json.dumps({
+        "task_id": "task-structured",
+        "session_name": snapshot["session_name"],
+        "item_index": 0,
+        "item_id": "op_1",
+        "judge": "judge_1",
+        "model_raw_output": "structured raw",
+    }) + "\n", encoding="utf-8")
+
+    payload = history.load_item_judge_calls(
+        snapshot,
+        0,
+        runs_dir=tmp_path / "runs",
+        project_root=tmp_path,
+    )
+
+    assert payload["judge_call_count"] == 1
+    assert payload["judge_calls"][0]["model_raw_output"] == "structured raw"
+    assert payload["judge_calls"][0]["_trace_file"] == snapshot["judge_trace_path"]
+
+
 def test_item_judge_export_supports_chinese_download_filename(monkeypatch):
     snapshot = {
         "task_id": "task-1",

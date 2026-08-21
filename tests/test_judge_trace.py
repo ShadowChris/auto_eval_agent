@@ -7,7 +7,13 @@ from auto_eval.judges.base import (
     JudgeClient,
     flush_web_trace_records,
 )
+from auto_eval.judges.trace_storage import (
+    configured_trace_dir,
+    configured_write_trace_path,
+    judge_trace_enabled,
+)
 from auto_eval.observability import bind_chain_context
+from auto_eval.paths import RUNS_DIR
 
 
 def _trace_client(path):
@@ -38,6 +44,92 @@ def test_judge_trace_contains_web_session_and_item_metadata(tmp_path):
     assert record["item_id"] == "slow_query_001"
     assert record["item_index"] == 0
     assert record["item_sequence"] == 1
+
+
+def test_judge_trace_directory_is_partitioned_by_task_creation_date(tmp_path):
+    client = _trace_client(tmp_path / "unused.jsonl")
+    client.trace_path = None
+    client.trace_dir = tmp_path / "judge_calls"
+
+    with bind_chain_context(
+        task_id="operation_20260821_001",
+        session_name="20260821_103930_operation_operation_20260821_001",
+        request_id="request-1",
+        item_id="simple_001",
+        item_index=0,
+    ):
+        client._write_trace({"status": "success", "judge": "judge_1"})
+
+    path = (
+        tmp_path
+        / "judge_calls"
+        / "2026-08-21"
+        / "operation_20260821_001"
+        / "judge_calls.jsonl"
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["task_id"] == "operation_20260821_001"
+    assert record["item_id"] == "simple_001"
+
+
+def test_legacy_default_trace_file_enables_structured_directory(monkeypatch):
+    monkeypatch.delenv("AUTO_EVAL_JUDGE_TRACE_DIR", raising=False)
+    monkeypatch.setenv("AUTO_EVAL_JUDGE_TRACE", "runs/judge_calls.jsonl")
+
+    assert configured_trace_dir() == RUNS_DIR / "judge_calls"
+
+
+def test_judge_trace_is_enabled_with_default_directory(monkeypatch):
+    monkeypatch.delenv("AUTO_EVAL_JUDGE_TRACE_ENABLED", raising=False)
+    monkeypatch.delenv("AUTO_EVAL_JUDGE_TRACE_DIR", raising=False)
+    monkeypatch.delenv("AUTO_EVAL_JUDGE_TRACE", raising=False)
+
+    assert judge_trace_enabled() is True
+    assert configured_trace_dir() == RUNS_DIR / "judge_calls"
+    assert configured_write_trace_path(
+        "task-1",
+        "20260821_103930_operation_task-1",
+    ) == (
+        RUNS_DIR
+        / "judge_calls"
+        / "2026-08-21"
+        / "task-1"
+        / "judge_calls.jsonl"
+    )
+
+
+def test_judge_trace_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("AUTO_EVAL_JUDGE_TRACE_ENABLED", "false")
+    monkeypatch.setenv("AUTO_EVAL_JUDGE_TRACE_DIR", "runs/custom_judges")
+
+    assert judge_trace_enabled() is False
+    assert configured_trace_dir() is None
+    assert configured_write_trace_path("task-1", "") is None
+
+
+def test_custom_legacy_trace_file_has_priority_over_default_directory(
+    tmp_path,
+    monkeypatch,
+):
+    custom_path = tmp_path / "custom_calls.jsonl"
+    monkeypatch.delenv("AUTO_EVAL_JUDGE_TRACE_ENABLED", raising=False)
+    monkeypatch.delenv("AUTO_EVAL_JUDGE_TRACE_DIR", raising=False)
+    monkeypatch.setenv("AUTO_EVAL_JUDGE_TRACE", str(custom_path))
+
+    assert configured_trace_dir() is None
+    assert configured_write_trace_path("task-1", "") == custom_path
+
+
+def test_custom_trace_directory_has_priority_over_legacy_file(tmp_path, monkeypatch):
+    custom_dir = tmp_path / "structured_calls"
+    monkeypatch.setenv("AUTO_EVAL_JUDGE_TRACE_ENABLED", "true")
+    monkeypatch.setenv("AUTO_EVAL_JUDGE_TRACE_DIR", str(custom_dir))
+    monkeypatch.setenv("AUTO_EVAL_JUDGE_TRACE", str(tmp_path / "legacy.jsonl"))
+
+    assert configured_write_trace_path(
+        "task-1",
+        "20260821_103930_operation_task-1",
+    ) == custom_dir / "2026-08-21" / "task-1" / "judge_calls.jsonl"
 
 
 @pytest.mark.asyncio

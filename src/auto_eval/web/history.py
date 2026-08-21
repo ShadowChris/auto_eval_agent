@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from ..judges.operation_fields import map_legacy_operation_result
+from ..judges.trace_storage import (
+    configured_legacy_trace_path,
+    configured_task_trace_path,
+    configured_write_trace_path,
+    trace_path_reference,
+)
 from ..paths import PROJECT_ROOT, RUNS_DIR
 
 
@@ -54,6 +60,10 @@ def _task_path(task_id: str, session_name: str = "") -> Path:
 
 
 def task_to_snapshot(task) -> dict:
+    judge_trace_path = configured_write_trace_path(task.id, task.session_name)
+    judge_trace_reference = getattr(task, "judge_trace_path", "") or (
+        trace_path_reference(judge_trace_path) if judge_trace_path else ""
+    )
     return {
         "task_id": task.id,
         "session_name": task.session_name,
@@ -77,6 +87,7 @@ def task_to_snapshot(task) -> dict:
         "error": task.error,
         "active_rerun": getattr(task, "active_rerun", None),
         "rerun_history": getattr(task, "rerun_history", []),
+        "judge_trace_path": judge_trace_reference,
     }
 
 
@@ -1459,8 +1470,8 @@ def load_item_judge_calls(
     """查找单条 case 对应的全部 judge_calls，并组装为可下载 JSON。
 
     以 task_id + item_index 为主键，item_id 仅作兼容校验，避免 query 重复时
-    错配。候选日志包含当前环境配置的 trace 路径和 runs 下所有
-    ``judge_calls*.jsonl``，因此加载历史任务后仍可导出。
+    错配。新任务优先使用快照记录的任务级路径；旧任务继续兼容 runs 根目录
+    的全局 ``judge_calls*.jsonl``。
     """
     items = snapshot.get("items") or []
     if item_index < 0 or item_index >= len(items):
@@ -1474,13 +1485,26 @@ def load_item_judge_calls(
     if trace_paths is not None:
         candidates.extend(Path(path) for path in trace_paths)
     else:
-        configured = str(os.getenv("AUTO_EVAL_JUDGE_TRACE") or "").strip()
-        if configured:
-            configured_path = Path(configured).expanduser()
-            if not configured_path.is_absolute():
-                configured_path = project_root / configured_path
-            candidates.append(configured_path)
-        candidates.extend(sorted(runs_dir.rglob("judge_calls*.jsonl")))
+        stored_trace = str(snapshot.get("judge_trace_path") or "").strip()
+        if stored_trace:
+            stored_path = Path(stored_trace).expanduser()
+            if not stored_path.is_absolute():
+                stored_path = project_root / stored_path
+            candidates.append(stored_path)
+
+        configured_task_path = configured_task_trace_path(task_id, session_name)
+        if configured_task_path is not None:
+            candidates.append(configured_task_path)
+
+        legacy_path = configured_legacy_trace_path()
+        if legacy_path is not None:
+            candidates.append(legacy_path)
+
+        # 兼容旧版本在 runs 根目录生成的一个或多个全局日志文件。
+        candidates.extend(sorted(runs_dir.glob("judge_calls*.jsonl")))
+        # 没有任务级定位信息时才执行旧式递归兜底，避免正常导出扫描整棵 runs。
+        if not stored_trace and configured_task_path is None:
+            candidates.extend(sorted(runs_dir.rglob("judge_calls*.jsonl")))
 
     unique_candidates: list[Path] = []
     seen: set[Path] = set()
