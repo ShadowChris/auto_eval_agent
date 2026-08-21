@@ -67,7 +67,9 @@ JSONL 路径。有警告的数据仍会保序输出，便于后续在评测结�
 - `--output`：显式指定输出 JSONL 路径。
 - `--current-location`：源表没有位置时写入 `context` 的默认交互发生位置。
 - `--sheet`：Excel 工作表名称或从 `0` 开始的序号。
-- `--encoding`：CSV 编码，默认为 `utf-8-sig`。
+- `--encoding`：CSV 编码，默认 `auto`，依次尝试 `utf-8-sig` 和
+  `gb18030`，兼容 Windows Excel 导出的中文 ANSI CSV。也可显式传入
+  `--encoding gb18030`、`--encoding gbk` 等编码名称。
 
 录屏路径拼接规则：
 

@@ -189,3 +189,20 @@ def test_index_can_build_id_without_sequence_column(tmp_path: Path):
     assert exported["id"] == "V1_case_007"
     assert exported["index"] == "case_007"
     assert "序号" not in exported
+
+
+def test_windows_gb18030_csv_is_detected_automatically(tmp_path: Path):
+    video = tmp_path / "录屏.mp4"
+    video.write_bytes(b"video")
+    source = tmp_path / "windows_cases.csv"
+    pd.DataFrame([{
+        "index": "中文_001",
+        "query": "打开蓝牙设置",
+        "video_path": str(video),
+    }]).to_csv(source, index=False, encoding="gb18030")
+
+    result = convert_table(source, input_prefix="Windows", project_root=tmp_path)
+
+    exported = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert exported["id"] == "Windows_中文_001"
+    assert exported["query"] == "打开蓝牙设置"

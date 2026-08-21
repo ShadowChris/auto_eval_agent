@@ -369,12 +369,28 @@ def _read_input(
 ) -> pd.DataFrame:
     suffix = input_path.suffix.lower()
     if suffix == ".csv":
-        return pd.read_csv(
-            input_path,
-            keep_default_na=False,
-            dtype=object,
-            encoding=encoding,
+        requested_encoding = str(encoding or "auto").strip().lower()
+        candidates = (
+            ("utf-8-sig", "gb18030")
+            if requested_encoding == "auto"
+            else (requested_encoding,)
         )
+        last_error: UnicodeDecodeError | None = None
+        for candidate in candidates:
+            try:
+                return pd.read_csv(
+                    input_path,
+                    keep_default_na=False,
+                    dtype=object,
+                    encoding=candidate,
+                )
+            except UnicodeDecodeError as exc:
+                last_error = exc
+        tried = "、".join(str(value) for value in candidates)
+        raise ValueError(
+            f"CSV 编码解析失败：{input_path}；已尝试 {tried}。"
+            "可使用 --encoding 显式指定实际编码。"
+        ) from last_error
     if suffix in {".xlsx", ".xls", ".xlsm"}:
         return pd.read_excel(
             input_path,
@@ -395,7 +411,7 @@ def convert_table(
     video_prefix: str = DEFAULT_VIDEO_PREFIX,
     current_location: str = DEFAULT_CURRENT_LOCATION,
     sheet: str | int = 0,
-    encoding: str = "utf-8-sig",
+    encoding: str = "auto",
     project_root: Path = PROJECT_ROOT,
 ) -> ConversionResult:
     input_path = input_path.resolve()
@@ -604,8 +620,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--encoding",
-        default="utf-8-sig",
-        help="CSV 编码，默认 utf-8-sig",
+        default="auto",
+        help="CSV 编码；默认 auto，依次尝试 utf-8-sig 和 gb18030",
     )
     return parser
 
