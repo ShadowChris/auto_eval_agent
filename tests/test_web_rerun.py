@@ -205,6 +205,10 @@ def test_frontend_exposes_manual_and_failed_item_rerun_actions():
     assert 'fetch(`/api/eval/${taskId.value}/rerun`' in js
     assert "judge_backend: rerunBackend" in js
     assert "本次使用：${rerunBackendLabel}" in js
+    assert "本次重跑（{{ rerunProgressIndices.length }}）" in html
+    assert "完整进度（{{ progressRows.length }}）" in html
+    assert 'setProgressView("rerun")' in js
+    assert "visibleProgressRows" in js
 
 
 @pytest.mark.asyncio

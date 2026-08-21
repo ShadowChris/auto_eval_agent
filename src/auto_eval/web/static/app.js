@@ -60,6 +60,8 @@ createApp({
     const runKind = ref("initial");
     const rerunProgress = ref(0);
     const rerunTotal = ref(0);
+    const rerunProgressIndices = ref([]);
+    const progressView = ref("all");
     const selectedRerunIndices = ref(new Set());
     const itemProgress = ref({});
     const progressEvents = ref({});
@@ -258,11 +260,20 @@ createApp({
         ? rows.sort((left, right) => compareItemIds(left.itemId, right.itemId))
         : rows;
     });
-    const progressPageCount = computed(() => Math.max(1, Math.ceil(progressRows.value.length / pageSize)));
+    const rerunProgressIndexSet = computed(
+      () => new Set(rerunProgressIndices.value),
+    );
+    const hasRerunProgress = computed(() => rerunProgressIndices.value.length > 0);
+    const visibleProgressRows = computed(() => (
+      progressView.value === "rerun" && hasRerunProgress.value
+        ? progressRows.value.filter((row) => rerunProgressIndexSet.value.has(row.index))
+        : progressRows.value
+    ));
+    const progressPageCount = computed(() => Math.max(1, Math.ceil(visibleProgressRows.value.length / pageSize)));
     const pagedProgressRows = computed(() => {
       const page = Math.min(progressPage.value, progressPageCount.value);
       const start = (page - 1) * pageSize;
-      return progressRows.value.slice(start, start + pageSize);
+      return visibleProgressRows.value.slice(start, start + pageSize);
     });
     const historyPageCount = computed(
       () => Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value)),
@@ -954,6 +965,13 @@ createApp({
     function changeProgressPage(delta) {
       setTablePage("progress", progressPage.value + delta);
     }
+    function setProgressView(view) {
+      progressView.value = view === "rerun" && hasRerunProgress.value
+        ? "rerun"
+        : "all";
+      progressPage.value = 1;
+      progressJumpPage.value = "";
+    }
     function changeHistoryPage(delta) {
       setTablePage("history", historyPage.value + delta);
     }
@@ -1039,6 +1057,8 @@ createApp({
       runKind.value = "initial";
       rerunProgress.value = 0;
       rerunTotal.value = 0;
+      rerunProgressIndices.value = [];
+      progressView.value = "all";
       selectedRerunIndices.value = new Set();
     }
 
@@ -1271,6 +1291,8 @@ createApp({
       );
       running.value = true;
       runKind.value = "initial";
+      rerunProgressIndices.value = [];
+      progressView.value = "all";
       const body = {
         mode: mode.value,
         items: items.value,
@@ -1388,6 +1410,11 @@ createApp({
         if (runKind.value === "rerun") {
           rerunProgress.value = Number(d.rerun_progress || d.active_rerun?.done || 0);
           rerunTotal.value = Number(d.rerun_total || d.active_rerun?.total || 0);
+          const indices = d.active_rerun?.item_indices || [];
+          if (indices.length) {
+            rerunProgressIndices.value = [...indices];
+            setProgressView("rerun");
+          }
         }
       });
       es.addEventListener("rerun_start", (e) => {
@@ -1397,6 +1424,8 @@ createApp({
         runKind.value = "rerun";
         rerunProgress.value = Number(d.done || 0);
         rerunTotal.value = Number(d.total || 0);
+        rerunProgressIndices.value = [...(d.item_indices || [])];
+        setProgressView("rerun");
         running.value = true;
       });
       es.addEventListener("item_progress", (e) => {
@@ -1815,6 +1844,7 @@ createApp({
       historyTaskLoadController = controller;
       loadingHistoryTaskId.value = id;
       const timeout = setTimeout(() => controller.abort("timeout"), 30_000);
+      const keepRerunView = taskId.value === id && progressView.value === "rerun";
       try {
         const r = await fetch(`/api/history/${id}?compact=true`, { signal: controller.signal });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1840,6 +1870,15 @@ createApp({
         runKind.value = d.status === "rerunning" ? "rerun" : "initial";
         rerunProgress.value = Number(d.active_rerun?.done || 0);
         rerunTotal.value = Number(d.active_rerun?.total || 0);
+        const latestRerun = (d.rerun_history || []).at(-1) || {};
+        const restoredRerunIndices = d.active_rerun?.item_indices
+          || latestRerun.item_indices
+          || [];
+        rerunProgressIndices.value = [...restoredRerunIndices];
+        progressView.value = restoredRerunIndices.length
+          && (d.status === "rerunning" || keepRerunView)
+          ? "rerun"
+          : "all";
         selectedRerunIndices.value = new Set();
         runError.value = d.status === "cancelled"
           ? (d.error || "任务已中断")
@@ -2012,6 +2051,8 @@ createApp({
       runKind.value = "rerun";
       rerunProgress.value = 0;
       rerunTotal.value = indices.length;
+      rerunProgressIndices.value = [...indices];
+      setProgressView("rerun");
       running.value = true;
       clearRerunSelection();
       connectSSE();
@@ -2212,7 +2253,9 @@ createApp({
       providerMessage, providerError, onProviderChange, loadProviders, newProvider,
       editProvider, saveProvider, deleteProvider, testProvider,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
-      runKind, rerunProgress, rerunTotal, selectedRerunIndices, selectedRerunCount, allPagedResultsSelected,
+      runKind, rerunProgress, rerunTotal, rerunProgressIndices, progressView,
+      hasRerunProgress, visibleProgressRows, selectedRerunIndices,
+      selectedRerunCount, allPagedResultsSelected,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, loadingHistoryTaskId, historyTotal, pageSize,
       historyPage, historyPageSize, historyPageCount, historyJumpPage,
@@ -2231,7 +2274,7 @@ createApp({
       isRerunSelected, setRerunSelected, togglePagedRerunSelection,
       selectFailedResults, clearRerunSelection, startRerun, rerunOne,
       selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
-      changePreviewPage, changeProgressPage, changeOpPage, changeHistoryPage,
+      changePreviewPage, changeProgressPage, setProgressView, changeOpPage, changeHistoryPage,
       changeResultPageSize, changeHistoryPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage,

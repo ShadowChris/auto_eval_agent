@@ -305,7 +305,21 @@
   </section>
 
   <section v-if="running || Object.keys(itemProgress).length" class="live-progress">
-    <h2>逐题运行进度</h2>
+    <div class="progress-heading">
+      <h2>逐题运行进度</h2>
+      <div v-if="hasRerunProgress" class="progress-view-tabs" role="group" aria-label="进度视图">
+        <button
+          type="button"
+          :class="{active:progressView==='rerun'}"
+          @click="setProgressView('rerun')"
+        >本次重跑（{{ rerunProgressIndices.length }}）</button>
+        <button
+          type="button"
+          :class="{active:progressView==='all'}"
+          @click="setProgressView('all')"
+        >完整进度（{{ progressRows.length }}）</button>
+      </div>
+    </div>
     <div class="result-table-wrap progress-table-wrap">
       <table class="grid progress-table">
         <colgroup>
