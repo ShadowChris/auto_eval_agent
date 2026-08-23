@@ -18,6 +18,18 @@
     .op-import { border:1px solid #bfdbfe; background:#eff6ff; border-radius:8px; padding:12px; }
     .op-import-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
     .op-path { font-size:12px; color:#64748b; overflow-wrap:anywhere; }
+    .multi-group-file { display:grid; grid-template-columns:minmax(130px,180px) auto 1fr auto; gap:10px; align-items:center; margin-bottom:10px; }
+    .multi-group-file input { min-width:0; }
+    .multi-align-summary { margin-top:10px; }
+    .multi-group-matrix { min-width:1100px; table-layout:fixed; }
+    .multi-group-matrix th:nth-child(1) { width:52px; }
+    .multi-group-matrix th:nth-child(2) { width:48px; }
+    .multi-group-matrix th:nth-child(3) { width:240px; }
+    .multi-group-matrix th:nth-child(4) { width:130px; }
+    .multi-group-matrix th small { display:block; margin-top:4px; color:#64748b; font-weight:400; overflow-wrap:anywhere; }
+    .multi-case-cell,.multi-result-cell { vertical-align:top; white-space:normal; overflow-wrap:anywhere; }
+    .multi-result-cell { min-width:280px; line-height:1.45; }
+    .multi-result-cell > div { margin-bottom:5px; }
   </style>
 </head>
 <body>
@@ -48,7 +60,7 @@
               <div>{{ h.dataset_name || '未记录' }}</div>
               <div class="history-task-id" :title="h.task_id">task_id: {{ h.task_id }}</div>
             </td>
-            <td>{{ modeLabel(h.mode) }}</td>
+            <td>{{ historyModeLabel(h) }}</td>
             <td>
               <div>{{ h.judge_provider || '角色默认配置' }}</div>
               <div class="history-task-id" v-if="h.judge_model">{{ h.judge_model }}</div>
@@ -119,7 +131,38 @@
     <h2>① 批量输入</h2>
     <p class="hint">{{ formatHint }}</p>
 
-    <div v-if="isVideoMode" class="op-cards">
+    <div v-if="isMultiGroupMode" class="multi-group-input">
+      <div class="op-import">
+        <div class="multi-group-file" v-for="(group,index) in operationGroups" :key="group._uiKey">
+          <select v-model="group.group_role" title="数据组角色">
+            <option value="control">对照组</option>
+            <option value="experiment">实验组</option>
+          </select>
+          <label class="op-upload-btn">
+            <input type="file" accept=".jsonl,application/json" @change="onOperationGroupFile($event,index)" hidden>
+            {{ group.dataset_name ? '更换 JSONL' : '选择 JSONL' }}
+          </label>
+          <span class="hint"><strong>{{ group.group_name || '上传后自动使用文件名' }}</strong><template v-if="group.count"> · {{ group.count }} 行</template></span>
+          <button v-if="operationGroups.length>2" class="btn-danger" @click="removeOperationGroup(index)">删除组</button>
+        </div>
+        <div class="row">
+          <button @click="addOperationGroup">+ 添加实验组</button>
+          <button class="primary" @click="alignOperationGroups" :disabled="groupAligning">{{ groupAligning ? '正在预校验…' : '预校验并对齐' }}</button>
+        </div>
+        <p class="hint">组名自动取 JSONL 文件名；第一组默认对照组，其余默认实验组，可用下拉框调整。角色只用于页面、统计和导出，不会进入裁判 Prompt。按 case_id 对齐；Query 不一致或仅剩一组时自动回退单组评估。</p>
+        <div v-if="groupAlignment" class="summary multi-align-summary">
+          <span>可评 Case {{ groupAlignment.summary.total_cases }}</span>
+          <span>完整对齐 {{ groupAlignment.summary.complete_cases }}</span>
+          <span>缺组对齐 {{ groupAlignment.summary.partial_cases }}</span>
+          <span>Query 不一致 {{ groupAlignment.summary.query_mismatch_cases }}</span>
+          <span>单组回退 {{ groupAlignment.summary.single_fallback_cases }}</span>
+        </div>
+        <details v-if="groupAlignment?.warnings?.length"><summary>对齐警告（{{ groupAlignment.warnings.length }}）</summary><pre>{{ groupAlignment.warnings.join('\n') }}</pre></details>
+        <details v-if="errors.length"><summary>导入错误（{{ errors.length }}）</summary><pre>{{ errors.join('\n') }}</pre></details>
+      </div>
+    </div>
+
+    <div v-else-if="isVideoMode" class="op-cards">
       <div class="op-import">
         <div class="op-import-row">
           <label class="op-upload-btn">
@@ -217,9 +260,9 @@
     <div class="row">
       <span class="lbl">裁判：</span>
       <label v-for="j in visibleJudges" class="chip">
-        <input type="checkbox" :value="j.name" v-model="selectedJudges" :disabled="mode==='operation'"> {{ j.display || j.name }}
+        <input type="checkbox" :value="j.name" v-model="selectedJudges" :disabled="mode==='operation' || mode==='operation_multi_group'"> {{ j.display || j.name }}
       </label>
-      <span v-if="mode==='operation'" class="hint">任务类固定使用终端用户裁判</span>
+      <span v-if="mode==='operation' || mode==='operation_multi_group'" class="hint">任务类固定使用终端用户裁判</span>
     </div>
     <div class="row" v-if="mode==='rich_content_quality'">
       <span class="lbl">挂卡识别裁判：</span>
@@ -426,6 +469,10 @@
       <span>样本量 {{ summary.total }}</span>
       <span>成功评测 {{ summary.done }}</span>
       <span v-if="summary.failed">失败 {{ summary.failed }}</span>
+      <span v-if="summary.total_submitted_images!=null">输入图片总数 {{ summary.total_submitted_images }}</span>
+      <span v-if="summary.case_duration_stats?.count">平均耗时 {{ formatProgressElapsed(summary.case_duration_stats.mean_s) }}</span>
+      <span v-if="summary.case_duration_stats?.count">P95 {{ formatProgressElapsed(summary.case_duration_stats.p95_s) }}</span>
+      <span v-if="summary.case_duration_stats?.count">最长 {{ formatProgressElapsed(summary.case_duration_stats.max_s) }}</span>
       <span v-if="summary.problem_count!=null">出问题 {{ summary.problem_count }}</span>
       <span v-if="summary.completion_rate!=null">任务闭环率 {{ (summary.completion_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.accuracy!=null">准确率 {{ (summary.accuracy*100).toFixed(0) }}%</span>
@@ -483,7 +530,56 @@
         </template>
       </div>
     </details>
-    <div ref="resultBrowser" class="result-browser">
+    <div v-if="isMultiGroupMode" ref="resultBrowser" class="result-browser multi-group-results">
+      <div v-if="summary?.group_summaries?.length" class="table-scroll">
+        <table class="grid auto-table">
+          <thead><tr><th>实验组</th><th>数据集</th><th>已评</th><th>缺失</th><th>失败</th><th>完成</th><th>闭环率</th><th>平均分</th><th>平均模型耗时</th><th>输入图片数</th></tr></thead>
+          <tbody><tr v-for="group in summary.group_summaries" :key="'summary-'+group.group_id">
+            <td>{{ groupRoleLabel(group.group_role) }}｜{{ group.group_name }}</td><td>{{ group.dataset_name }}</td><td>{{ group.evaluated }}</td><td>{{ group.missing }}</td><td>{{ group.failed }}</td><td>{{ group.ok_count }}</td>
+            <td>{{ group.completion_rate!=null ? (group.completion_rate*100).toFixed(0)+'%' : '—' }}</td><td>{{ group.mean_total ?? '—' }}</td><td>{{ group.latency_stats?.count ? formatProgressElapsed(group.latency_stats.mean_s) : '—' }}</td><td>{{ group.submitted_images }}</td>
+          </tr></tbody>
+        </table>
+      </div>
+      <div v-if="taskId && results.length" class="rerun-toolbar">
+        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败 Case</button>
+        <button type="button" class="primary" @click="startRerun([...selectedRerunIndices])" :disabled="running || !selectedRerunCount">重跑选中 Case（{{ selectedRerunCount }}）</button>
+        <button type="button" @click="clearRerunSelection" :disabled="running || !selectedRerunCount">清空选择</button>
+        <span class="hint">重跑一个 Case 时会按当前对齐策略重跑该 Case 的所有可用实验组。</span>
+      </div>
+      <div class="result-filters">
+        <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索 case_id、query、实验组、判定或理由">
+        <select v-model="correctnessFilter" @change="resetResultPage">
+          <option value="">全部判定</option><option value="ok">完成</option><option value="nok">未完成或执行错误</option><option value="no_support">客观条件不支持</option><option value="others">其他</option>
+        </select>
+        <span class="result-count">共 {{ filteredResults.length }} 个 Case</span>
+      </div>
+      <div class="result-table-wrap">
+        <table class="grid multi-group-matrix">
+          <thead><tr><th>选择</th><th>#</th><th>case_id / Query</th><th>策略 / 图片数</th><th v-for="group in multiGroupColumns" :key="group.group_id">{{ groupRoleLabel(group.group_role) }}｜{{ group.group_name }}<small>{{ group.dataset_name }}</small></th></tr></thead>
+          <tbody><tr v-for="(result,index) in pagedResults" :key="result.index ?? index" :class="{'result-error':result.error}">
+            <td><input type="checkbox" :checked="isRerunSelected(result)" :disabled="running" @change="setRerunSelected(result,$event.target.checked)"></td>
+            <td>{{ (resultPage-1)*resultPageSize+index+1 }}</td>
+            <td class="multi-case-cell"><strong>{{ result.case_id || result.item_id }}</strong><div>{{ result.query }}</div><div class="err" v-if="result.alignment_warnings?.length">{{ result.alignment_warnings.join('；') }}</div><div class="err" v-if="result.error">{{ result.error }}</div></td>
+            <td><div>{{ result.evaluation_strategy || '—' }}</div><div>{{ result.input_image_count || 0 }} 张</div><div>总耗时 {{ result.duration_s!=null ? formatProgressElapsed(result.duration_s) : '—' }}</div><div v-if="result.failure_stage" class="err">失败阶段：{{ result.failure_stage }}</div><a v-if="!running" href="#" class="row-export-link" @click.prevent="rerunOne(result)">重跑 Case</a></td>
+            <td v-for="group in multiGroupColumns" :key="'cell-'+group.group_id" class="multi-result-cell">
+              <template v-if="multiGroupResult(result,group.group_id)">
+                <div><strong>correctness：</strong>{{ multiGroupResult(result,group.group_id).correctness || '—' }}</div>
+                <div><strong>issue_types：</strong>{{ displayArray(multiGroupResult(result,group.group_id).issue_types) }}</div>
+                <div><strong>执行链路：</strong>{{ displayArray(multiGroupResult(result,group.group_id).execution_routes) }}</div>
+                <div><strong>rationale：</strong>{{ multiGroupResult(result,group.group_id).rationale || '—' }}</div>
+                <div class="hint">图片 {{ multiGroupResult(result,group.group_id).submitted_image_count || 0 }} 张 · 模型耗时 {{ multiGroupResult(result,group.group_id).latency_s!=null ? formatProgressElapsed(multiGroupResult(result,group.group_id).latency_s) : '—' }} · {{ multiGroupResult(result,group.group_id).evaluation_status || 'pending' }}</div>
+                <div class="err" v-if="multiGroupResult(result,group.group_id).error">{{ multiGroupResult(result,group.group_id).error }}</div>
+              </template><span v-else>—</span>
+            </td>
+          </tr></tbody>
+        </table>
+      </div>
+      <div class="pagination" v-if="filteredResults.length">
+        <span class="page-size">每页 <select v-model.number="resultPageSize" @change="changeResultPageSize"><option :value="10">10</option><option :value="20">20</option><option :value="50">50</option></select> 条</span>
+        <button @click="changePage(-1)" :disabled="resultPage<=1">上一页</button><span>{{ resultPage }}/{{ pageCount }}</span><button @click="changePage(1)" :disabled="resultPage>=pageCount">下一页</button>
+      </div>
+    </div>
+    <div v-else ref="resultBrowser" class="result-browser">
       <div v-if="mode!=='compare'" class="skill-tabs">
         <button v-for="s in skillTabs" :key="s.key" :class="{active:activeSkill===s.key}" @click="selectSkill(s.key)">
           {{ s.label }} {{ s.count }}

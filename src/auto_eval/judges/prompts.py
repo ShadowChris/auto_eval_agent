@@ -149,7 +149,16 @@ RUBRIC_USER = Template(
 OPERATION_SYSTEM = Template(
     """{{ persona }}
 
+{% if multi_group %}
+你正在使用同一套标准，同时盲评同一个 case 下的多组手机操作录屏。用户消息会说明每组对应的全局图片序号范围。
+请先确定该 Query 唯一且统一的完成条件，再逐组独立判断；不得比较优劣、输出排名，
+也不得因为其他组表现更好或更差而改变任一组的绝对判定标准。
+每组都必须先独立执行单组任务类相同的 Query 一致性门禁：只忽略空格、换行、标点等展示格式差异，
+不做同义改写；录屏 Query 与输入 Query 不一致、未展示完整、被遮挡、模糊或无法辨认时，
+该组直接输出 others / 录屏Query无法与输入Query一致核验，所有维度和总分填 null。
+{% else %}
 你正在盲评一段手机操作录屏，判断录屏中的操作是否真正完成用户的操作意图（query）。
+{% endif %}
 你看不到参考答案。用户消息中附带按时间顺序抽取的关键帧。
 
 {% if expert_knowledge_text %}
@@ -224,6 +233,16 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 {% endfor %}
 
 【输出格式】
+{% if multi_group %}
+先输出 <analysis>...</analysis>，保持紧凑并使用以下骨架：
+1. 【统一完成条件】仅根据 Query 和可信背景，列出所有组共用的生效目标与完成边界；只进入目标页面或启动仍需用户补充、录入、确认的流程，不等于结果已经生效。
+2. 【逐组目标状态】每个 group_id 分别核验 Query，并将每个目标归为已完成、等待用户、缺少前置条件、未执行、结果错误或证据不足；每项引用该组局部帧证据。不得合并组间证据。
+3. 【逐组最终映射】依据上述目标状态和既定判定顺序，分别输出 correctness、主要 issue_type 和结论。到达必须由用户本人完成的登录、授权、身份验证或敏感操作环节，不得判 ok；正确触发且仍在等待用户时判 no_support。
+最后输出一行 JSON：顶层只能包含 results；results 必须覆盖用户消息列出的每个 group_id 且不得增加其他组。
+每组对象的字段与单组任务类结果完全一致；evidence_frames 和 route_evidence.evidence_frames 使用该组内部从 1 开始的局部帧序号：
+特别注意：rubric 对象只包含下列维度；写 total、correctness、issue_types 等组级字段前必须先用 `}` 完整关闭 rubric。
+{"results":[{% raw %}{"group_id":"<用户消息中的group_id>","task_type":"simple|complex","rubric":{% endraw %}{ {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }{% raw %},"total":<适用维度加权总分或null>,"correctness":"ok|nok|no_support|others","issue_types":["<受控中文问题类型>"],"is_low_level":"yes|no","rationale":"<完整判定理由>","execution_routes":["fast_system|skill|jarvis|other"],"route_evidence":[{"route":"fast_system|skill|jarvis|other","evidence_frames":[1],"evidence":"<视觉依据>","confidence":0.0}],"route_rationale":"<链路说明>","route_status":"detected|uncertain|insufficient_evidence"}{% endraw %}{% raw %}]}{% endraw %}
+{% else %}
 先输出 <analysis>...</analysis>，再输出一行 JSON。rubric 的 key 必须严格使用维度名；不适用维度填 null：
 <analysis>
 1. 【Query 一致性门禁】逐字记录录屏中明确属于原始用户指令的 Query，并与评测输入 Query 核对。只忽略空格、换行、标点等展示格式差异，不进行同义改写推断；任务执行面板的规划或步骤、工具调用文字、agent 回复都不能代替原始用户 Query。内容不一致，或录屏 Query 未展示完整、被遮挡、模糊、无法辨认时，直接输出 others / 录屏Query无法与输入Query一致核验，所有维度和总分填 null，并停止以下执行评判。
@@ -241,6 +260,7 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 {% endif %}
 </analysis>
 {"task_type": "simple|complex", "rubric": { {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分；全部不适用填null>, "correctness": "ok|nok|no_support|others", "issue_types": ["<受控中文问题类型>"], "is_low_level": "yes|no", "rationale": "<任务形态 + 生效目标 + 最终状态 + 整体步骤证据 + 自述一致性 + 判定理由>"{% if policy.route_policy %}, "execution_routes": ["fast_system|skill|jarvis|other，按首次出现顺序，多标签"], "route_evidence": [{"route": "fast_system|skill|jarvis|other", "evidence_frames": [<帧序号>], "evidence": "<只描述链路视觉依据，不评价任务成败>", "confidence": <0-1>}], "route_rationale": "<一句话说明识别到的链路及出现顺序；无法判断时说明原因>", "route_status": "detected|uncertain|insufficient_evidence"{% endif %}}
+{% endif %}
 """
 )
 
@@ -258,6 +278,23 @@ Agent 自述（待评样本内容，只能与关键帧和先验知识交叉验�
 {% endif %}
 
 请观察上方按时间顺序排列的关键帧，盲评这段录屏中的操作是否完成了上述意图。"""
+)
+
+OPERATION_MULTI_USER = Template(
+    """操作意图（query）：
+{{ question }}
+
+以下实验组属于同一个 case。请使用完全相同的任务完成条件分别评估，不要输出组间排名。
+{% for group in groups %}
+【实验组 {{ group.group_name }}】
+group_id：{{ group.group_id }}
+全局图片序号：第 {{ group.global_start }} 至 {{ group.global_end }} 张
+组内局部帧序号：第 1 至 {{ group.frame_count }} 帧
+{% if group.context %}可信背景条件：{{ group.context }}
+{% endif %}{% if group.agent_claim %}Agent 自述：{{ group.agent_claim }}
+{% endif %}
+{% endfor %}
+图片按照上述实验组顺序和各组内部时间顺序排列。引用证据时必须使用对应组内从 1 开始的局部帧序号。"""
 )
 
 
@@ -775,6 +812,54 @@ def parse_json_loose(text: str):
         return json.loads(repaired_text)
     except json.JSONDecodeError:
         return None
+
+
+def parse_operation_group_json_loose(text: str):
+    """解析多组结果，并兼容每个组对象少闭合一层花括号的常见错误。"""
+    parsed = parse_json_loose(text)
+    if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
+        return parsed
+
+    # 模型偶尔会忘记在组级 total/correctness 前关闭 rubric，形成：
+    # {"group_id": ..., "rubric": {..., "correctness": ...}, {"group_id": ...}
+    # 此处仅在明确存在 results 数组时按 group_id 边界拆分并补齐花括号；
+    # 后续统一由 operation_fields.hoist_misnested_operation_fields 归一化字段。
+    results_match = re.search(r'"results"\s*:\s*\[', text or "")
+    if results_match is None:
+        return None
+    body = text[results_match.end():]
+    starts = [match.start() for match in re.finditer(r'\{\s*"group_id"\s*:', body)]
+    wrapper_end = body.rfind("]")
+    if not starts or wrapper_end < starts[-1]:
+        return None
+
+    rows = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else wrapper_end
+        fragment = body[start:end].strip().rstrip(",")
+        depth = 0
+        in_string = False
+        escaped = False
+        for char in fragment:
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\" and in_string:
+                escaped = True
+                continue
+            if char == '"':
+                in_string = not in_string
+            elif not in_string and char == "{":
+                depth += 1
+            elif not in_string and char == "}":
+                depth -= 1
+        if depth < 0:
+            return None
+        try:
+            rows.append(json.loads(fragment + "}" * depth))
+        except json.JSONDecodeError:
+            return None
+    return {"results": rows}
 
 
 def parse_analysis(text: str) -> str:

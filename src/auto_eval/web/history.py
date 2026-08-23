@@ -202,6 +202,7 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "dataset_name": data.get("dataset_name") or "",
             "note": data.get("note") or "",
             "mode": data.get("mode"),
+            "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
             "status": status,
             "total": len(data.get("items") or []),
             "done": len([r for r in (data.get("results") or []) if "error" not in r]),
@@ -271,6 +272,7 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             "dataset_name": data.get("dataset_name") or "",
             "note": data.get("note") or "",
             "mode": data.get("mode"),
+            "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
             "status": status,
             "total": len(data.get("items") or []),
             "done": len([
@@ -314,6 +316,8 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
     if compact:
         item_fields = {
             "id", "query", "question", "context", "category", "source_line",
+            "case_id", "evaluation_strategy", "alignment_status",
+            "alignment_warnings", "group_variants", "image_input",
         }
         items = [
             {key: value for key, value in item.items() if key in item_fields}
@@ -487,6 +491,11 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
     ``evaluation`` 与 ``eval_run``，避免覆盖源数据自带的 status/error。
     """
     snapshot = _with_operation_compat(snapshot)
+    if (
+        snapshot.get("mode") == "operation"
+        and (snapshot.get("options") or {}).get("operation_layout") == "multi_group"
+    ):
+        return _operation_multi_jsonl_rows(snapshot)
     items = snapshot.get("items") or []
     results = _results_with_identity(snapshot)
     by_index: dict[int, dict] = {}
@@ -544,6 +553,70 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
             "eval_run": dict(eval_run),
         })
         rows.append(row)
+    return rows
+
+
+def _operation_multi_jsonl_rows(snapshot: dict) -> list[dict]:
+    """多组任务类按 case × 实验组导出，保留每组原始 JSONL 字段。"""
+    results_by_index = {
+        int(row.get("index")): row
+        for row in (snapshot.get("results") or [])
+        if str(row.get("index", "")).isdigit()
+    }
+    eval_run = _jsonl_eval_run(snapshot)
+    rows: list[dict] = []
+    for case_index, case in enumerate(snapshot.get("items") or []):
+        case_result = results_by_index.get(case_index) or {}
+        result_by_group = {
+            str(row.get("group_id") or ""): row
+            for row in (case_result.get("group_results") or [])
+        }
+        for variant in case.get("group_variants") or []:
+            group_id = str(variant.get("group_id") or "")
+            item = variant.get("item") if isinstance(variant.get("item"), dict) else {}
+            source = _source_data_for_item(item) if item else {}
+            row = dict(source)
+            item_id = str(item.get("id") or row.get("id") or "")
+            if item_id:
+                row.setdefault("id", item_id)
+            row.setdefault("case_id", case.get("case_id") or case.get("id") or "")
+            row.setdefault("query", item.get("query") or case.get("query") or "")
+            if item.get("context") is not None:
+                row.setdefault("context", item.get("context"))
+            if item.get("video_path") is not None:
+                row.setdefault("video_path", _project_relative_path(item.get("video_path")))
+            frames = [Path(str(path)) for path in (item.get("frames") or [])]
+            group_result = result_by_group.get(group_id)
+            evaluation = _jsonl_evaluation(
+                group_result,
+                {},
+                str(snapshot.get("status") or ""),
+            )
+            evaluation["status"] = (
+                (group_result or {}).get("evaluation_status")
+                or ("missing_input" if not item else evaluation["status"])
+            )
+            row.update({
+                "dataset_index": case_index + 1,
+                "source_line": item.get("source_line") or case_index + 1,
+                "group_id": group_id,
+                "group_name": variant.get("group_name") or group_id,
+                "group_role": variant.get("group_role") or "experiment",
+                "group_dataset_name": variant.get("dataset_name") or "",
+                "availability": variant.get("availability") or "missing",
+                "frames_dir": _project_relative_path(frames[0].parent) if frames else "",
+                "evaluation": evaluation,
+                "eval_run": {
+                    **eval_run,
+                    "operation_layout": "multi_group",
+                    "evaluation_strategy": case_result.get("evaluation_strategy")
+                    or case.get("evaluation_strategy"),
+                    "failure_stage": case_result.get("failure_stage"),
+                    "input_image_count": case_result.get("input_image_count") or 0,
+                    "case_duration_s": case_result.get("duration_s"),
+                },
+            })
+            rows.append(row)
     return rows
 
 
@@ -605,11 +678,16 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     overview = by_skill.get("overview") or []
     sections = by_skill.get("sections") or []
     mode = snapshot.get("mode")
+    multi_operation = (
+        mode == "operation"
+        and (snapshot.get("options") or {}).get("operation_layout") == "multi_group"
+    )
 
     rows: dict[str, list[dict]] = {
-        "数据集明细": _dataset_rows(
-            snapshot,
-            compact_media=mode == "operation",
+        "数据集明细": (
+            _operation_multi_dataset_rows(snapshot)
+            if multi_operation
+            else _dataset_rows(snapshot, compact_media=mode == "operation")
         ),
         "逐题结果": _result_rows_compact(
             aligned_results,
@@ -620,10 +698,14 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
         # 垂域视觉评测：使用中文列名并按固定顺序导出
         rows["逐题结果"] = _rich_content_export_rows(aligned_results)
     elif mode == "operation":
-        rows["逐题结果"] = _operation_export_rows(
-            aligned_results,
-            snapshot.get("items") or [],
-        )
+        if multi_operation:
+            rows["多组对照"] = _operation_multi_comparison_rows(snapshot)
+            rows["逐题结果"] = _operation_multi_result_rows(snapshot)
+        else:
+            rows["逐题结果"] = _operation_export_rows(
+                aligned_results,
+                snapshot.get("items") or [],
+            )
     frame_rows = _frame_manifest_rows(
         snapshot,
         include_original_video=mode != "operation",
@@ -637,6 +719,8 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
         # 任务类只有一个固定垂域，不再生成重复的按垂域拆分表、
         # 失败表和通用垂域统计表。失败与告警仍在“逐题结果”原行展示。
         rows["运行汇总"] = [_operation_run_summary(snapshot)]
+        if multi_operation and (summary.get("group_summaries") or []):
+            rows["实验组汇总"] = list(summary["group_summaries"])
         return rows
     rows["运行信息"] = [_run_info(snapshot)]
     if mode == "compare":
@@ -782,6 +866,16 @@ _OPERATION_ROUTE_DISPLAY = {
     "other": "其他",
 }
 
+_OPERATION_GROUP_ROLE_DISPLAY = {
+    "control": "对照组",
+    "experiment": "实验组",
+}
+
+
+def _operation_group_role_zh(value: Any) -> str:
+    raw = str(value or "experiment")
+    return _OPERATION_GROUP_ROLE_DISPLAY.get(raw, raw)
+
 
 def _format_operation_routes_zh(value: Any) -> str:
     """将任务类执行链路转换为适合人工查看的中文文本。"""
@@ -862,6 +956,135 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
             )
         export.append({key: values[key] for key in _OPERATION_EXPORT_COLUMNS})
     return export
+
+
+def _operation_multi_case_results(snapshot: dict) -> dict[int, dict]:
+    rows: dict[int, dict] = {}
+    for position, result in enumerate(snapshot.get("results") or []):
+        try:
+            index = int(result.get("index", position))
+        except (TypeError, ValueError):
+            index = position
+        rows[index] = result
+    return rows
+
+
+def _operation_multi_dataset_rows(snapshot: dict) -> list[dict]:
+    """多组数据集明细：每个 case 的每个实验组占一行。"""
+    rows: list[dict] = []
+    for case_index, case in enumerate(snapshot.get("items") or []):
+        for variant in case.get("group_variants") or []:
+            item = variant.get("item") if isinstance(variant.get("item"), dict) else {}
+            source = _source_data_for_item(item) if item else {}
+            frames = [str(path) for path in (item.get("frames") or [])]
+            row: dict[str, Any] = {
+                "数据集序号": case_index + 1,
+                "case_id": case.get("case_id") or case.get("id") or "",
+                "实验组": variant.get("group_name") or variant.get("group_id") or "",
+                "数据组角色": _operation_group_role_zh(variant.get("group_role")),
+                "group_id": variant.get("group_id") or "",
+                "数据集文件": variant.get("dataset_name") or "",
+                "availability": variant.get("availability") or "missing",
+                "id": item.get("id") or "",
+                "query": item.get("query") or case.get("query") or "",
+            }
+            for key, value in source.items():
+                row.setdefault(key, value)
+            row["录屏项目相对路径"] = _project_relative_path(item.get("video_path"))
+            row["抽帧目录项目相对路径"] = (
+                _project_relative_path(Path(frames[0]).parent) if frames else ""
+            )
+            rows.append(row)
+    return rows
+
+
+def _operation_multi_result_rows(snapshot: dict) -> list[dict]:
+    """多组逐题结果：按 case × 实验组展开，便于筛选和二次统计。"""
+    results_by_index = _operation_multi_case_results(snapshot)
+    rows: list[dict] = []
+    for case_index, case in enumerate(snapshot.get("items") or []):
+        case_result = results_by_index.get(case_index) or {}
+        result_by_group = {
+            str(row.get("group_id") or ""): row
+            for row in (case_result.get("group_results") or [])
+        }
+        for variant in case.get("group_variants") or []:
+            group_id = str(variant.get("group_id") or "")
+            item = variant.get("item") if isinstance(variant.get("item"), dict) else {}
+            group_result = result_by_group.get(group_id) or {}
+            merged = {
+                **group_result,
+                "数据集序号": case_index + 1,
+                "item_id": group_result.get("item_id") or item.get("id") or "",
+                "query": group_result.get("query") or item.get("query") or case.get("query") or "",
+                "评估状态": (
+                    "缺少输入" if not item else
+                    "评估失败" if group_result.get("error") else
+                    "已完成" if group_result else "待评估"
+                ),
+            }
+            base = _operation_export_rows([merged], [item])[0]
+            rows.append({
+                "case_id": case.get("case_id") or case.get("id") or "",
+                "实验组": variant.get("group_name") or group_id,
+                "数据组角色": _operation_group_role_zh(variant.get("group_role")),
+                "group_id": group_id,
+                "数据集文件": variant.get("dataset_name") or "",
+                "availability": variant.get("availability") or "missing",
+                "evaluation_strategy": case_result.get("evaluation_strategy")
+                or case.get("evaluation_strategy") or "",
+                "失败阶段": case_result.get("failure_stage") or "",
+                "输入图片数": group_result.get("submitted_image_count") or 0,
+                "Case总耗时（秒）": case_result.get("duration_s") or "",
+                **base,
+            })
+    return rows
+
+
+def _operation_multi_comparison_rows(snapshot: dict) -> list[dict]:
+    """每个 case 一行、每个实验组一组关键列，供横向对照。"""
+    results_by_index = _operation_multi_case_results(snapshot)
+    rows: list[dict] = []
+    for case_index, case in enumerate(snapshot.get("items") or []):
+        case_result = results_by_index.get(case_index) or {}
+        result_by_group = {
+            str(row.get("group_id") or ""): row
+            for row in (case_result.get("group_results") or [])
+        }
+        row: dict[str, Any] = {
+            "数据集序号": case_index + 1,
+            "case_id": case.get("case_id") or case.get("id") or "",
+            "query": case.get("query") or "",
+            "对齐状态": case.get("alignment_status") or "",
+            "对齐警告": "；".join(case.get("alignment_warnings") or []),
+            "评估策略": case_result.get("evaluation_strategy")
+            or case.get("evaluation_strategy") or "",
+            "失败阶段": case_result.get("failure_stage") or "",
+            "输入图片总数": case_result.get("input_image_count") or 0,
+            "Case总耗时（秒）": case_result.get("duration_s") or "",
+        }
+        for variant in case.get("group_variants") or []:
+            group_id = str(variant.get("group_id") or "")
+            group_name = str(variant.get("group_name") or group_id)
+            role_name = _operation_group_role_zh(variant.get("group_role"))
+            result = result_by_group.get(group_id) or {}
+            prefix = f"{role_name}｜{group_name}_"
+            row[f"{prefix}correctness"] = result.get("correctness") or ""
+            issue_types = result.get("issue_types") or []
+            row[f"{prefix}issue_types"] = (
+                "；".join(str(value) for value in issue_types)
+                if isinstance(issue_types, list) else issue_types
+            )
+            routes = result.get("execution_routes") or []
+            row[f"{prefix}执行链路"] = _format_operation_routes_zh(routes)
+            row[f"{prefix}rationale"] = result.get("rationale") or ""
+            row[f"{prefix}输入图片数"] = result.get("submitted_image_count") or 0
+            row[f"{prefix}模型耗时（秒）"] = result.get("latency_s") or ""
+            row[f"{prefix}状态"] = result.get("evaluation_status") or (
+                "missing_input" if variant.get("item") is None else "pending"
+            )
+        rows.append(row)
+    return rows
 
 
 def operation_item_result_row(snapshot: dict, item_index: int) -> dict:
@@ -1072,7 +1295,20 @@ def _frame_manifest_rows(
 ) -> list[dict]:
     """生成一帧一行的导出清单；没有成功抽帧的条目也保留一行。"""
     rows: list[dict] = []
-    for item_index, item in enumerate(snapshot.get("items") or []):
+    manifest_items: list[tuple[int, dict, dict]] = []
+    multi_operation = (
+        snapshot.get("mode") == "operation"
+        and (snapshot.get("options") or {}).get("operation_layout") == "multi_group"
+    )
+    for item_index, case in enumerate(snapshot.get("items") or []):
+        if multi_operation:
+            for variant in case.get("group_variants") or []:
+                item = variant.get("item")
+                if isinstance(item, dict):
+                    manifest_items.append((item_index, item, variant))
+        else:
+            manifest_items.append((item_index, case, {}))
+    for item_index, item, variant in manifest_items:
         if not (
             item.get("video_path")
             or item.get("media")
@@ -1084,6 +1320,9 @@ def _frame_manifest_rows(
         selected, _ = _frame_metadata(frames[0].parent) if frames else ({}, {})
         base = {
             "数据集序号": item_index + 1,
+            "实验组": variant.get("group_name") or "",
+            "数据组角色": _operation_group_role_zh(variant.get("group_role")),
+            "group_id": variant.get("group_id") or "",
             "id": item.get("id") or f"q{item_index}",
             "query": item.get("query") or item.get("question") or "",
             "录屏项目相对路径": _project_relative_path(item.get("video_path")),
@@ -1405,17 +1644,41 @@ def write_frames_zip(
     target = Path(destination)
     target.parent.mkdir(parents=True, exist_ok=True)
     manifest: list[dict] = []
-    items = snapshot.get("items") or []
+    source_items = snapshot.get("items") or []
+    multi_operation = (
+        snapshot.get("mode") == "operation"
+        and (snapshot.get("options") or {}).get("operation_layout") == "multi_group"
+    )
+    items: list[dict] = []
+    for source_index, source_item in enumerate(source_items):
+        if multi_operation:
+            for variant in source_item.get("group_variants") or []:
+                group_item = variant.get("item")
+                if not isinstance(group_item, dict):
+                    continue
+                items.append({
+                    **group_item,
+                    "_export_source_index": source_index,
+                    "_export_group_id": variant.get("group_id") or "",
+                    "_export_group_name": variant.get("group_name") or "",
+                    "_export_group_role": variant.get("group_role") or "experiment",
+                })
+        else:
+            items.append({**source_item, "_export_source_index": source_index})
     width = max(3, len(str(max(len(items), 1))))
 
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item_index, item in enumerate(items):
-            if item_indexes is not None and item_index not in item_indexes:
+            source_index = int(item.get("_export_source_index", item_index))
+            if item_indexes is not None and source_index not in item_indexes:
                 continue
             sequence = str(item_index + 1).zfill(width)
             raw_id = str(item.get("id") or f"q{item_index + 1}")
             safe_id = _safe_name(raw_id).strip("_")[:100] or f"q{item_index + 1}"
-            item_dir = f"{sequence}_{safe_id}"
+            group_id = str(item.get("_export_group_id") or "")
+            group_name = str(item.get("_export_group_name") or "")
+            group_role = str(item.get("_export_group_role") or "")
+            item_dir = f"{sequence}_{_safe_name(group_id)}_{safe_id}" if group_id else f"{sequence}_{safe_id}"
             frames = [Path(str(path)) for path in (item.get("frames") or [])]
             selected, metadata = (
                 _frame_metadata(frames[0].parent) if frames else ({}, {})
@@ -1424,7 +1687,10 @@ def write_frames_zip(
             source_video = source.get("video_path") or ""
             if not frames:
                 manifest.append({
-                    "dataset_index": item_index + 1,
+                    "dataset_index": source_index + 1,
+                    "group_id": group_id,
+                    "group_name": group_name,
+                    "group_role": group_role,
                     "id": raw_id,
                     "query": item.get("query") or item.get("question") or "",
                     "source_video_path": source_video,
@@ -1448,7 +1714,10 @@ def write_frames_zip(
                 if exists:
                     zf.write(frame, archive_frame)
                 manifest.append({
-                    "dataset_index": item_index + 1,
+                    "dataset_index": source_index + 1,
+                    "group_id": group_id,
+                    "group_name": group_name,
+                    "group_role": group_role,
                     "id": raw_id,
                     "query": item.get("query") or item.get("question") or "",
                     "source_video_path": source_video,

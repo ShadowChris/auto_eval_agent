@@ -179,12 +179,26 @@ def _valid_cached_frames(item: dict) -> bool:
     return bool(frames) and all(Path(str(frame)).is_file() for frame in frames)
 
 
+def _is_multi_group_operation(item: dict) -> bool:
+    return bool(item.get("group_variants"))
+
+
 def _prepare_rerun_items(task: Task, item_indices: list[int]) -> None:
     """复用有效抽帧；缓存缺失时回退到原视频重新抽取。"""
     if task.mode not in {"operation", "rich_content", "rich_content_quality"}:
         return
     for index in item_indices:
         item = task.items[index]
+        if task.mode == "operation" and _is_multi_group_operation(item):
+            for variant in item.get("group_variants") or []:
+                group_item = variant.get("item")
+                if not isinstance(group_item, dict):
+                    continue
+                group_item.pop("prepare_error", None)
+                if group_item.get("frames") and not _valid_cached_frames(group_item):
+                    group_item.pop("frames", None)
+                    group_item.pop("frame_count", None)
+            continue
         if item.get("frames") and not _valid_cached_frames(item):
             item.pop("frames", None)
             item.pop("frame_count", None)
@@ -521,7 +535,101 @@ async def _run(
                 )
                 last_error = None
                 res = None
-                if task.mode in ("operation", "rich_content", "rich_content_quality") and not item_dict.get("frames"):
+                if task.mode == "operation" and _is_multi_group_operation(item_dict):
+                    variants = item_dict.get("group_variants") or []
+                    total_group_items = max(1, len(task.items) * max(1, len(variants)))
+                    image_counts: list[dict] = []
+                    for group_position, variant in enumerate(variants):
+                        group_item = variant.get("item")
+                        if not isinstance(group_item, dict):
+                            image_counts.append({
+                                "group_id": variant.get("group_id"),
+                                "group_name": variant.get("group_name"),
+                                "status": "missing_input",
+                                "count": 0,
+                            })
+                            continue
+                        if _valid_cached_frames(group_item):
+                            group_item.pop("prepare_error", None)
+                            image_counts.append({
+                                "group_id": variant.get("group_id"),
+                                "group_name": variant.get("group_name"),
+                                "status": "ready",
+                                "count": len(group_item.get("frames") or []),
+                            })
+                            continue
+                        try:
+                            log_event(
+                                "视频准备",
+                                f"校验并抽帧：{variant.get('group_name') or variant.get('group_id')}",
+                                details={"视频路径": group_item.get("video_path")},
+                                progress=3,
+                                progress_message="正在校验多组视频并分析场景",
+                            )
+                            prepared_input = dict(group_item)
+                            prepared_input["id"] = (
+                                f"{item_id}__{variant.get('group_id') or group_position + 1}"
+                            )
+                            prepared = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    prepare_session_operation_item,
+                                    prepared_input,
+                                    session_name=task.session_name,
+                                    item_index=idx * max(1, len(variants)) + group_position,
+                                    total_items=total_group_items,
+                                ),
+                                timeout=float(task.options.get("video_prepare_timeout_s") or 300),
+                            )
+                            prepared["id"] = group_item.get("id") or prepared["id"]
+                            group_item.clear()
+                            group_item.update(prepared)
+                            group_item.pop("prepare_error", None)
+                            image_counts.append({
+                                "group_id": variant.get("group_id"),
+                                "group_name": variant.get("group_name"),
+                                "status": "ready",
+                                "count": len(group_item.get("frames") or []),
+                            })
+                        except Exception as exc:
+                            group_item["prepare_error"] = f"{type(exc).__name__}: {exc}"
+                            image_counts.append({
+                                "group_id": variant.get("group_id"),
+                                "group_name": variant.get("group_name"),
+                                "status": "error",
+                                "count": 0,
+                                "error": group_item["prepare_error"],
+                            })
+                            log_event(
+                                "视频准备",
+                                f"失败：{variant.get('group_name') or variant.get('group_id')}",
+                                level=logging.ERROR,
+                                details=error_details(exc),
+                                progress=10,
+                                progress_message="部分实验组视频准备失败",
+                            )
+                    item_dict["image_input"] = {
+                        "total_images": sum(row["count"] for row in image_counts),
+                        "groups": image_counts,
+                    }
+                    _persist_task(task, force=True)
+                    ready_count = sum(row["status"] == "ready" for row in image_counts)
+                    if ready_count == 0:
+                        last_error = ValueError("所有实验组视频均无法完成抽帧")
+                    else:
+                        log_event(
+                            "视频准备",
+                            "多组关键帧提取完成",
+                            details={
+                                "可评实验组": ready_count,
+                                "输入图片总数": item_dict["image_input"]["total_images"],
+                                "各组图片数": image_counts,
+                            },
+                            progress=12,
+                            progress_message=(
+                                f"多组关键帧准备完成（共 {item_dict['image_input']['total_images']} 张）"
+                            ),
+                        )
+                elif task.mode in ("operation", "rich_content", "rich_content_quality") and not item_dict.get("frames"):
                     try:
                         log_event(
                             "视频准备",
@@ -634,12 +742,17 @@ async def _run(
                                 continue
                             break
                 if res is None:
-                    res = {
+                    error_result = {
                         "index": idx,
                         "item_id": item_id,
                         "query": item_dict.get("query", ""),
                         "error": f"{type(last_error).__name__}: {last_error}",
                     }
+                    if task.mode == "operation" and _is_multi_group_operation(item_dict):
+                        error_result.update(
+                            _operation_group_failure_result(item_dict, last_error)
+                        )
+                    res = error_result
                     if item_dict.get("context"):
                         res["context"] = item_dict["context"]
                     _write_eval_error(
@@ -650,10 +763,16 @@ async def _run(
                         request_id=request_id,
                     )
             res["index"] = idx
+            res["duration_s"] = round(time.perf_counter() - started, 1)
             res["judge_provider"] = run_provider_name
             res["judge_provider_id"] = run_provider_id
             res["judge_model"] = run_model
             res["judge_provider_revision"] = run_provider_revision
+            for group_result in res.get("group_results") or []:
+                group_result["judge_provider"] = run_provider_name
+                group_result["judge_provider_id"] = run_provider_id
+                group_result["judge_model"] = run_model
+                group_result["judge_provider_revision"] = run_provider_revision
             if rerun is not None:
                 prior = next(
                     (row for row in task.results if _result_index(row) == idx),
@@ -770,6 +889,216 @@ def _write_eval_error(
         pass
 
 
+def _operation_group_result_base(variant: dict) -> dict:
+    group_item = variant.get("item") if isinstance(variant.get("item"), dict) else {}
+    return {
+        "group_id": variant.get("group_id"),
+        "group_name": variant.get("group_name"),
+        "group_role": variant.get("group_role") or "experiment",
+        "dataset_name": variant.get("dataset_name"),
+        "availability": variant.get("availability") or ("available" if group_item else "missing"),
+        "item_id": group_item.get("id"),
+        "query": group_item.get("query"),
+        "context": group_item.get("context"),
+        "answer": group_item.get("answer"),
+        "video_path": group_item.get("video_path"),
+        "frame_count": len(group_item.get("frames") or []),
+        "submitted_image_count": len(group_item.get("frames") or []),
+        "video_prepare_warnings": list(group_item.get("video_prepare_warnings") or []),
+    }
+
+
+def _operation_group_failure_result(item_dict: dict, error: Exception | None) -> dict:
+    """构造多组失败结果，保留抽帧、对齐和每组输入等已知信息。"""
+    variants = list(item_dict.get("group_variants") or [])
+    common_error = f"{type(error).__name__}: {error}" if error else "unknown"
+    group_results = []
+    for variant in variants:
+        row = _operation_group_result_base(variant)
+        group_item = variant.get("item")
+        if not isinstance(group_item, dict):
+            row["evaluation_status"] = "missing_input"
+        else:
+            row.update(
+                evaluation_status="error",
+                error=group_item.get("prepare_error") or common_error,
+            )
+        group_results.append(row)
+    image_input = item_dict.get("image_input") or {
+        "total_images": sum(row.get("submitted_image_count") or 0 for row in group_results),
+        "groups": [
+            {
+                "group_id": row.get("group_id"),
+                "group_name": row.get("group_name"),
+                "status": row.get("evaluation_status"),
+                "count": row.get("submitted_image_count") or 0,
+                **({"error": row.get("error")} if row.get("error") else {}),
+            }
+            for row in group_results
+        ],
+    }
+    ready_groups = [
+        row for row in (image_input.get("groups") or [])
+        if row.get("status") == "ready"
+    ]
+    return {
+        "case_id": item_dict.get("case_id") or item_dict.get("id"),
+        "alignment_status": item_dict.get("alignment_status"),
+        "alignment_warnings": list(item_dict.get("alignment_warnings") or []),
+        "requested_evaluation_strategy": item_dict.get("evaluation_strategy") or "",
+        "evaluation_strategy": item_dict.get("evaluation_strategy") or "",
+        "failure_stage": "evaluation" if ready_groups else "video_prepare",
+        "image_input": image_input,
+        "input_image_count": image_input.get("total_images") or 0,
+        "group_results": group_results,
+    }
+
+
+async def _eval_operation_groups(
+    item: EvalItem,
+    item_dict: dict,
+    rubrics,
+    cfg: AppConfig,
+) -> dict:
+    """执行一个已对齐 case；能联合时一次调用，异常/不一致时按组回退。"""
+    variants = list(item_dict.get("group_variants") or [])
+    results: dict[str, dict] = {}
+    evaluable: list[dict] = []
+    for variant in variants:
+        group_id = str(variant.get("group_id") or "")
+        base = _operation_group_result_base(variant)
+        group_item = variant.get("item")
+        if not isinstance(group_item, dict):
+            base["evaluation_status"] = "missing_input"
+            results[group_id] = base
+        elif group_item.get("prepare_error"):
+            base.update(
+                evaluation_status="error",
+                error=group_item["prepare_error"],
+            )
+            results[group_id] = base
+        elif not group_item.get("frames"):
+            base.update(evaluation_status="error", error="缺少可用关键帧")
+            results[group_id] = base
+        else:
+            evaluable.append(variant)
+
+    op_skill = cfg.domain_skills.get("operation")
+    op_dims = op_skill.rubrics if op_skill and op_skill.rubrics else cfg.rubrics
+    issue_types = (
+        op_skill.operation_policy.issue_types
+        if op_skill and op_skill.operation_policy
+        else None
+    )
+    requested_strategy = str(item_dict.get("evaluation_strategy") or "")
+    use_joint = (
+        requested_strategy.startswith("multi_group") and len(evaluable) >= 2
+    )
+
+    if use_joint:
+        judge_outputs = await asyncio.gather(
+            *[judge.score_operation_groups(item, evaluable) for judge in rubrics]
+        )
+        for variant in evaluable:
+            group_id = str(variant.get("group_id") or "")
+            scores = [output[group_id] for output in judge_outputs if group_id in output]
+            verdict = aggregate_operation_scores(
+                scores,
+                op_dims,
+                cfg.ensemble,
+                cfg.ensemble.flag_low_agreement,
+                issue_types,
+            )
+            row = _operation_group_result_base(variant)
+            _fill_operation_verdict(row, verdict)
+            row["latency_s"] = round(
+                max((score.latency_ms for score in scores), default=0) / 1000,
+                1,
+            )
+            row["evaluation_status"] = "done" if not row.get("error") else "error"
+            results[group_id] = row
+        actual_strategy = (
+            "multi_group" if len(evaluable) == len(variants) else "multi_group_partial"
+        )
+    else:
+        async def score_one(variant: dict) -> tuple[str, dict]:
+            group_id = str(variant.get("group_id") or "")
+            group_item = variant["item"]
+            row = _operation_group_result_base(variant)
+            try:
+                eval_item = _to_evalitem(group_item, 0)
+                answer = str(group_item.get("answer") or "")
+                scores = await asyncio.gather(*[
+                    judge.score(eval_item, "answer", answer, eval_mode="operation")
+                    for judge in rubrics
+                ])
+                verdict = aggregate_operation_scores(
+                    list(scores),
+                    op_dims,
+                    cfg.ensemble,
+                    cfg.ensemble.flag_low_agreement,
+                    issue_types,
+                )
+                _fill_operation_verdict(row, verdict)
+                row["latency_s"] = round(
+                    max((score.latency_ms for score in scores), default=0) / 1000,
+                    1,
+                )
+                row["evaluation_status"] = "done" if not row.get("error") else "error"
+            except Exception as exc:
+                row.update(
+                    evaluation_status="error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            return group_id, row
+
+        for group_id, row in await asyncio.gather(*[score_one(v) for v in evaluable]):
+            results[group_id] = row
+        actual_strategy = "single_fallback"
+
+    ordered_results = [
+        results[str(variant.get("group_id") or "")]
+        for variant in variants
+        if str(variant.get("group_id") or "") in results
+    ]
+    done_count = sum(row.get("evaluation_status") == "done" for row in ordered_results)
+    if done_count == 0:
+        errors = [row.get("error") for row in ordered_results if row.get("error")]
+        raise ValueError("；".join(errors) or "没有可用的实验组评估结果")
+    image_input = item_dict.get("image_input") or {
+        "total_images": sum(row.get("submitted_image_count") or 0 for row in ordered_results),
+        "groups": [
+            {
+                "group_id": row.get("group_id"),
+                "group_name": row.get("group_name"),
+                "count": row.get("submitted_image_count") or 0,
+            }
+            for row in ordered_results
+        ],
+    }
+    log_event(
+        "结果聚合",
+        "多组结果已按组输出",
+        details={
+            "执行策略": actual_strategy,
+            "完成组数": done_count,
+            "输入图片总数": image_input.get("total_images"),
+        },
+        progress=90,
+        progress_message="正在整理多组对照结果",
+    )
+    return {
+        "case_id": item_dict.get("case_id") or item_dict.get("id"),
+        "alignment_status": item_dict.get("alignment_status"),
+        "alignment_warnings": list(item_dict.get("alignment_warnings") or []),
+        "requested_evaluation_strategy": requested_strategy,
+        "evaluation_strategy": actual_strategy,
+        "image_input": image_input,
+        "input_image_count": image_input.get("total_images") or 0,
+        "group_results": ordered_results,
+    }
+
+
 async def _eval_one(
     mode,
     idx,
@@ -862,49 +1191,59 @@ async def _eval_one(
         _maybe_meta(out, item, answer, v)
 
     elif mode == "operation":
-        answer = item_dict.get("answer", "") or ""  # agent 自述（可选，用于「自述×证据」交叉）
-        if answer:
-            out["answer"] = answer
-        out["has_video"] = bool(item_dict.get("media") or item_dict.get("frames"))
-
-        async def _score_op(r):
-            return await r.score(item, "answer", answer, eval_mode="operation")
-
-        raw = await asyncio.gather(*[_score_op(r) for r in rubrics])
-        scores = [s for s in raw if s is not None]
-        op_skill = cfg.domain_skills.get("operation")
-        op_dims = op_skill.rubrics if op_skill and op_skill.rubrics else cfg.rubrics
-        v = aggregate_operation_scores(
-            scores,
-            op_dims,
-            cfg.ensemble,
-            cfg.ensemble.flag_low_agreement,
-            op_skill.operation_policy.issue_types
-            if op_skill and op_skill.operation_policy
-            else None,
-        )
-        # 多裁判分歧 → 主席仲裁（纯文本，不带帧；兜底）
-        if v and v.low_agreement and len(scores) >= 2 and arbitrator:
-            try:
-                arb = await arbitrator.arbitrate(
+        if _is_multi_group_operation(item_dict):
+            out.update(
+                await _eval_operation_groups(
                     item,
-                    answer,
-                    list(scores),
-                    eval_mode="operation",
-                    dims=op_dims,
-                    policy=op_skill.operation_policy if op_skill else None,
+                    item_dict,
+                    rubrics,
+                    cfg,
                 )
-                v.correctness, v.total, v.rubric = arb["correctness"], arb["total"], arb["rubric"]
-                v.task_type = arb["task_type"]
-                v.issue_types = arb["issue_types"]
-                v.is_low_level = arb["is_low_level"]
-                v.arbitrated = True
-                v.arbitrator_confidence = arb["confidence"]
-                v.arbitrator_rationale = arb["rationale"]
-                v.rationale = f"[主席仲裁·置信度{arb['confidence']}] {arb['rationale']}"
-            except Exception:
-                pass
-        _fill_operation_verdict(out, v)
+            )
+        else:
+            answer = item_dict.get("answer", "") or ""  # agent 自述（可选，用于「自述×证据」交叉）
+            if answer:
+                out["answer"] = answer
+            out["has_video"] = bool(item_dict.get("media") or item_dict.get("frames"))
+
+            async def _score_op(r):
+                return await r.score(item, "answer", answer, eval_mode="operation")
+
+            raw = await asyncio.gather(*[_score_op(r) for r in rubrics])
+            scores = [s for s in raw if s is not None]
+            op_skill = cfg.domain_skills.get("operation")
+            op_dims = op_skill.rubrics if op_skill and op_skill.rubrics else cfg.rubrics
+            v = aggregate_operation_scores(
+                scores,
+                op_dims,
+                cfg.ensemble,
+                cfg.ensemble.flag_low_agreement,
+                op_skill.operation_policy.issue_types
+                if op_skill and op_skill.operation_policy
+                else None,
+            )
+            # 多裁判分歧 → 主席仲裁（纯文本，不带帧；兜底）
+            if v and v.low_agreement and len(scores) >= 2 and arbitrator:
+                try:
+                    arb = await arbitrator.arbitrate(
+                        item,
+                        answer,
+                        list(scores),
+                        eval_mode="operation",
+                        dims=op_dims,
+                        policy=op_skill.operation_policy if op_skill else None,
+                    )
+                    v.correctness, v.total, v.rubric = arb["correctness"], arb["total"], arb["rubric"]
+                    v.task_type = arb["task_type"]
+                    v.issue_types = arb["issue_types"]
+                    v.is_low_level = arb["is_low_level"]
+                    v.arbitrated = True
+                    v.arbitrator_confidence = arb["confidence"]
+                    v.arbitrator_rationale = arb["rationale"]
+                    v.rationale = f"[主席仲裁·置信度{arb['confidence']}] {arb['rationale']}"
+                except Exception:
+                    pass
+            _fill_operation_verdict(out, v)
 
     elif mode == "rich_content":
         if not rich_judges:
@@ -1145,6 +1484,33 @@ def _maybe_meta(out: dict, item: EvalItem, answer: str, v) -> None:
         out["agree"] = (v.correctness == obj["objective_correct"]) if v.correctness != "unclear" else None
 
 
+def _duration_stats(rows: list[dict], field: str) -> dict:
+    values = []
+    for row in rows:
+        try:
+            value = float(row[field])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if value >= 0:
+            values.append(value)
+    values.sort()
+    if not values:
+        return {}
+
+    def percentile(ratio: float) -> float:
+        index = round((len(values) - 1) * ratio)
+        return round(values[index], 2)
+
+    return {
+        "count": len(values),
+        "mean_s": round(sum(values) / len(values), 2),
+        "p50_s": percentile(0.5),
+        "p95_s": percentile(0.95),
+        "max_s": round(values[-1], 2),
+        "total_s": round(sum(values), 2),
+    }
+
+
 def _summarize(task: Task, cfg: AppConfig) -> dict:
     if task.mode == "rich_content":
         return _summarize_rich_content(task)
@@ -1194,6 +1560,66 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
 
 
 def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
+    if task.options.get("operation_layout") == "multi_group":
+        results = task.results
+        group_rows = [
+            group
+            for case in results
+            for group in (case.get("group_results") or [])
+        ]
+        group_meta = list(task.options.get("operation_groups") or [])
+        known_ids = {str(group.get("group_id") or "") for group in group_meta}
+        for row in group_rows:
+            group_id = str(row.get("group_id") or "")
+            if group_id and group_id not in known_ids:
+                group_meta.append({
+                    "group_id": group_id,
+                    "group_name": row.get("group_name") or group_id,
+                    "group_role": row.get("group_role") or "experiment",
+                    "dataset_name": row.get("dataset_name") or "",
+                })
+                known_ids.add(group_id)
+        group_summaries = []
+        for group in group_meta:
+            group_id = str(group.get("group_id") or "")
+            rows = [row for row in group_rows if str(row.get("group_id") or "") == group_id]
+            judged = [row for row in rows if row.get("evaluation_status") == "done"]
+            totals = [row["total"] for row in judged if row.get("total") is not None]
+            ok_count = sum(row.get("correctness") == "ok" for row in judged)
+            group_summaries.append({
+                "group_id": group_id,
+                "group_name": group.get("group_name") or group_id,
+                "group_role": group.get("group_role") or "experiment",
+                "dataset_name": group.get("dataset_name") or "",
+                "total_cases": len(results),
+                "present": sum(row.get("availability") != "missing" for row in rows),
+                "evaluated": len(judged),
+                "missing": sum(row.get("evaluation_status") == "missing_input" for row in rows),
+                "failed": sum(row.get("evaluation_status") == "error" for row in rows),
+                "ok_count": ok_count,
+                "completion_rate": round(ok_count / len(judged), 3) if judged else None,
+                "mean_total": round(sum(totals) / len(totals), 2) if totals else None,
+                "correctness_dist": dict(collections.Counter(
+                    row.get("correctness") for row in judged if row.get("correctness")
+                )),
+                "submitted_images": sum(row.get("submitted_image_count") or 0 for row in rows),
+                "latency_stats": _duration_stats(judged, "latency_s"),
+            })
+        completed_cases = [row for row in results if "error" not in row]
+        return {
+            "total": len(results),
+            "done": len(completed_cases),
+            "failed": len(results) - len(completed_cases),
+            "mode": task.mode,
+            "operation_layout": "multi_group",
+            "group_summaries": group_summaries,
+            "total_group_evaluations": sum(group["evaluated"] for group in group_summaries),
+            "total_submitted_images": sum(
+                int((row.get("image_input") or {}).get("total_images") or 0)
+                for row in results
+            ),
+            "case_duration_stats": _duration_stats(results, "duration_s"),
+        }
     results = task.results
     completed = [row for row in results if "error" not in row]
     judged = [row for row in completed if row.get("correctness") is not None]

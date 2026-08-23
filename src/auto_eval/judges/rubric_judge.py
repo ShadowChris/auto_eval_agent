@@ -24,6 +24,7 @@ from .operation_fields import (
     normalize_operation_routes,
 )
 from .prompts import (
+    OPERATION_MULTI_USER,
     OPERATION_SYSTEM,
     OPERATION_USER,
     RUBRIC_COMPARE_SYSTEM,
@@ -34,6 +35,7 @@ from .prompts import (
     RUBRIC_USER,
     parse_analysis,
     parse_json_loose,
+    parse_operation_group_json_loose,
     resolve_prompt_context,
 )
 
@@ -88,6 +90,83 @@ def _flatten_rubric(raw, dim_names=None):
     return out, reasons, na_dims
 
 
+def _operation_score_from_data(
+    data: dict,
+    *,
+    item_id: str,
+    model_name: str,
+    judge,
+    dims,
+    policy,
+    reply,
+    latency: int,
+    run_idx: int = 0,
+    analysis: str = "",
+) -> OperationSingleScore:
+    """把单组或多组数组中的一个对象规范为同一个任务类结果模型。"""
+    data = hoist_misnested_operation_fields(data)
+    rubric, rubric_reasons, na_dimensions = _flatten_rubric(
+        data.get("rubric") or {},
+        dim_names=[dim.name for dim in dims],
+    )
+    if data.get("total") is not None:
+        total: float | None = float(data["total"])
+    else:
+        total = sum(rubric.values()) / len(rubric) if rubric else None
+    task_type = str(data.get("task_type") or "").strip().lower()
+    if "复杂多任务" in analysis:
+        task_type = "complex"
+    elif "简单任务" in analysis and task_type not in {"simple", "complex"}:
+        task_type = "simple"
+    if task_type not in {"simple", "complex"}:
+        task_type = None
+    correctness, issue_types, is_low_level = normalize_operation_fields(
+        data.get("correctness"),
+        data.get("issue_types", data.get("error_type")),
+        data.get("is_low_level", "no"),
+        task_type,
+        policy.issue_types if policy else None,
+    )
+    execution_routes, route_evidence, route_status = normalize_operation_routes(
+        data.get("execution_routes"),
+        data.get("route_evidence"),
+        data.get("route_status"),
+    )
+    if QUERY_ALIGNMENT_ISSUE in issue_types:
+        rubric = {}
+        rubric_reasons = {}
+        na_dimensions = [dim.name for dim in dims]
+        total = None
+    return OperationSingleScore(
+        item_id=item_id,
+        model=model_name,
+        judge=judge.cfg.name,
+        persona=judge.cfg.persona,
+        run_idx=run_idx,
+        rubric=rubric,
+        rubric_reasons=rubric_reasons,
+        na_dimensions=na_dimensions,
+        total=total,
+        task_type=task_type,
+        correctness=correctness,
+        issue_types=issue_types,
+        is_low_level=is_low_level,
+        rationale=data.get("rationale", ""),
+        execution_routes=execution_routes,
+        route_evidence=route_evidence,
+        route_rationale=format_operation_route_rationale(
+            execution_routes, data.get("route_rationale")
+        ),
+        route_status=route_status,
+        analysis=analysis,
+        used_search=reply.used_search,
+        tool_trace=reply.tool_trace,
+        search_queries=reply.search_queries,
+        truncated=reply.truncated,
+        latency_ms=latency,
+    )
+
+
 async def ensure_classified(item: EvalItem, skill_router, *,
                             model: str, base_url: str, api_key: str,
                             timeout: float = 15.0) -> None:
@@ -135,6 +214,120 @@ class RubricJudge:
         self.evaluation_time = evaluation_time
         self.expert_knowledge = expert_knowledge
 
+    async def score_operation_groups(
+        self,
+        item: EvalItem,
+        groups: list[dict],
+        model_name: str = "answer",
+        run_idx: int = 0,
+    ) -> dict[str, OperationSingleScore]:
+        """一次调用用同一尺度评价同 case 的多个实验组。"""
+        op_skill = self.skill_router.domain.get("operation") if self.skill_router else None
+        dims = (op_skill.rubrics if op_skill and op_skill.rubrics else None) or self.dims
+        policy = op_skill.operation_policy if op_skill else None
+        if policy is None:
+            raise ValueError("任务类评测缺少 config/skills/operation.yaml 的 operation_policy")
+
+        prompt_groups: list[dict] = []
+        user_images: list[str] = []
+        user_image_refs: list[str] = []
+        expected: dict[str, dict] = {}
+        global_index = 1
+        for group_index, group in enumerate(groups, start=1):
+            group_id = str(group.get("group_id") or "").strip()
+            group_item = group.get("item") or {}
+            frames = [str(path) for path in (group_item.get("frames") or [])]
+            if not group_id or not frames:
+                continue
+            expected[group_id] = group
+            prompt_groups.append({
+                "group_id": group_id,
+                # Prompt 使用中性编号，不暴露“对照组/实验组”或文件名，
+                # 防止实验角色影响绝对判定。
+                "group_name": f"组{group_index}",
+                "global_start": global_index,
+                "global_end": global_index + len(frames) - 1,
+                "frame_count": len(frames),
+                "context": str(group_item.get("context") or "").strip(),
+                "agent_claim": str(group_item.get("answer") or "").strip(),
+            })
+            global_index += len(frames)
+            user_images.extend(encode_frame(Path(path)) for path in frames)
+            user_image_refs.extend(frames)
+        if len(expected) < 2:
+            raise ValueError("多组联合评估至少需要两个具有关键帧的实验组")
+
+        system = OPERATION_SYSTEM.render(
+            persona=self.client.persona,
+            dims=dims,
+            scale=dims[0].scale if dims else 5,
+            policy=policy,
+            expert_knowledge_text=render_expert_knowledge(self.expert_knowledge),
+            multi_group=True,
+        )
+        user = OPERATION_MULTI_USER.render(
+            question=item.question,
+            groups=prompt_groups,
+        )
+        started = time.perf_counter()
+        reply = await self.client.complete(
+            system,
+            user,
+            user_images=user_images,
+            user_image_refs=user_image_refs,
+        )
+        latency = int((time.perf_counter() - started) * 1000)
+        data = parse_operation_group_json_loose(reply.content)
+        if data is None or not isinstance(data.get("results"), list):
+            repaired = await self.client.repair_json(
+                reply.content,
+                label="任务类多组裁判输出",
+                round_no=reply.rounds + 1,
+            )
+            data = parse_operation_group_json_loose(repaired)
+            if data is None or not isinstance(data.get("results"), list):
+                raise JudgeOutputParseError(
+                    "任务类多组裁判输出修复后仍缺少 results 数组",
+                    raw_output=reply.content,
+                    repair_output=repaired,
+                    judge=self.client.cfg.name,
+                    model=self.client.model,
+                )
+
+        rows: dict[str, dict] = {}
+        for raw in data["results"]:
+            if not isinstance(raw, dict):
+                continue
+            group_id = str(raw.get("group_id") or "").strip()
+            if group_id in expected and group_id not in rows:
+                rows[group_id] = raw
+        missing = [group_id for group_id in expected if group_id not in rows]
+        if missing:
+            raise JudgeOutputParseError(
+                f"任务类多组裁判缺少实验组结果：{', '.join(missing)}",
+                raw_output=reply.content,
+                repair_output="",
+                judge=self.client.cfg.name,
+                model=self.client.model,
+            )
+        return {
+            group_id: _operation_score_from_data(
+                rows[group_id],
+                item_id=str((group["item"] or {}).get("id") or f"{item.id}:{group_id}"),
+                model_name=model_name,
+                judge=self.client,
+                dims=dims,
+                policy=policy,
+                reply=reply,
+                latency=latency,
+                run_idx=run_idx,
+                # 顶层 analysis 同时讨论多个实验组，不能用于推断某一组的
+                # task_type；组级 task_type 必须来自该组结构化输出。
+                analysis=str(rows[group_id].get("analysis") or ""),
+            )
+            for group_id, group in expected.items()
+        }
+
     async def score(self, item: EvalItem, model_name: str, answer: str, run_idx: int = 0,
                     eval_mode: str = "result", process_dims=None, competitor: str | None = None,
                     stream_callback=None) -> SingleScore | OperationSingleScore:
@@ -175,6 +368,7 @@ class RubricJudge:
                 scale=dims[0].scale if dims else 5,
                 policy=policy,
                 expert_knowledge_text=render_expert_knowledge(self.expert_knowledge),
+                multi_group=False,
             )
             user = OPERATION_USER.render(
                 question=item.question,
@@ -240,68 +434,24 @@ class RubricJudge:
                     model=self.client.model,
                 )
         if eval_mode == "operation":
-            data = hoist_misnested_operation_fields(data)
+            return _operation_score_from_data(
+                data,
+                item_id=item.id,
+                model_name=model_name,
+                judge=self.client,
+                dims=dims,
+                policy=op_skill.operation_policy if op_skill else None,
+                reply=reply,
+                latency=latency,
+                run_idx=run_idx,
+                analysis=analysis,
+            )
         rubric_raw = data.get("rubric") or {}
         rubric, rubric_reasons, na_dimensions = _flatten_rubric(rubric_raw, dim_names=[d.name for d in dims])
         if data.get("total") is not None:
             total: float | None = float(data["total"])
         else:
             total = sum(rubric.values()) / len(rubric) if rubric else None
-        if eval_mode == "operation":
-            task_type = str(data.get("task_type") or "").strip().lower()
-            if "复杂多任务" in analysis:
-                task_type = "complex"
-            elif "简单任务" in analysis and task_type not in {"simple", "complex"}:
-                task_type = "simple"
-            if task_type not in {"simple", "complex"}:
-                task_type = None
-            policy = op_skill.operation_policy if op_skill else None
-            correctness, issue_types, is_low_level = normalize_operation_fields(
-                data.get("correctness"),
-                data.get("issue_types", data.get("error_type")),
-                data.get("is_low_level", "no"),
-                task_type,
-                policy.issue_types if policy else None,
-            )
-            execution_routes, route_evidence, route_status = normalize_operation_routes(
-                data.get("execution_routes"),
-                data.get("route_evidence"),
-                data.get("route_status"),
-            )
-            if QUERY_ALIGNMENT_ISSUE in issue_types:
-                rubric = {}
-                rubric_reasons = {}
-                na_dimensions = [dim.name for dim in dims]
-                total = None
-            return OperationSingleScore(
-                item_id=item.id,
-                model=model_name,
-                judge=self.client.cfg.name,
-                persona=self.client.cfg.persona,
-                run_idx=run_idx,
-                rubric=rubric,
-                rubric_reasons=rubric_reasons,
-                na_dimensions=na_dimensions,
-                total=total,
-                task_type=task_type,
-                correctness=correctness,
-                issue_types=issue_types,
-                is_low_level=is_low_level,
-                rationale=data.get("rationale", ""),
-                execution_routes=execution_routes,
-                route_evidence=route_evidence,
-                route_rationale=format_operation_route_rationale(
-                    execution_routes, data.get("route_rationale")
-                ),
-                route_status=route_status,
-                analysis=analysis,
-                used_search=reply.used_search,
-                tool_trace=reply.tool_trace,
-                search_queries=reply.search_queries,
-                truncated=reply.truncated,
-                latency_ms=latency,
-            )
-
         if total is None:
             total = 0.0
         correctness = data.get("correctness", "unclear")

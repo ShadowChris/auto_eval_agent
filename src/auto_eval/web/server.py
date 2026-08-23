@@ -59,6 +59,7 @@ from .operation_media import (
     prepare_cached_operation_item,
     resolve_operation_video_path,
 )
+from .operation_groups import align_operation_groups
 from .llm_providers import LLMProviderPayload, LLMProviderStore
 from .runner import run_eval, run_rerun, run_single_api_item
 from .tasks import get_live_task, get_task, new_task
@@ -135,6 +136,18 @@ class SingleEvalReq(BaseModel):
 class OperationPrepareReq(BaseModel):
     items: list[dict]
     concurrency: int = 2
+
+
+class OperationGroupManifest(BaseModel):
+    group_id: str
+    group_name: str
+    group_role: str = "experiment"
+    dataset_name: str = ""
+    jsonl: str
+
+
+class OperationGroupsAlignReq(BaseModel):
+    groups: list[OperationGroupManifest]
 
 
 class HistoryNoteReq(BaseModel):
@@ -522,6 +535,45 @@ def api_parse(req: ParseReq):
     else:
         raise HTTPException(400, "需提供 text 或 jsonl")
     return {"items": items, "errors": errs, "count": len(items)}
+
+
+@app.post("/api/operation/groups/align")
+def api_align_operation_groups(req: OperationGroupsAlignReq):
+    if len(req.groups) < 2:
+        raise HTTPException(422, "任务类多组评估至少需要两个实验组")
+    group_ids = [group.group_id.strip() for group in req.groups]
+    if any(not group_id for group_id in group_ids):
+        raise HTTPException(422, "group_id 不能为空")
+    if len(set(group_ids)) != len(group_ids):
+        raise HTTPException(422, "group_id 不能重复")
+    group_names = [group.group_name.strip() for group in req.groups]
+    if any(not group_name for group_name in group_names):
+        raise HTTPException(422, "实验组名称不能为空")
+    if len(set(group_names)) != len(group_names):
+        raise HTTPException(422, "实验组名称不能重复")
+    invalid_roles = [
+        group.group_role for group in req.groups
+        if group.group_role not in {"control", "experiment"}
+    ]
+    if invalid_roles:
+        raise HTTPException(422, "数据组角色只能是 control 或 experiment")
+    parsed_groups: list[dict] = []
+    parse_errors: list[str] = []
+    for group in req.groups:
+        items, errors = parse_jsonl(group.jsonl, "operation")
+        parse_errors.extend(
+            f"{group.group_name}：{error}" for error in errors
+        )
+        parsed_groups.append({
+            "group_id": group.group_id,
+            "group_name": group.group_name,
+            "group_role": group.group_role,
+            "dataset_name": group.dataset_name,
+            "items": items,
+        })
+    aligned = align_operation_groups(parsed_groups)
+    aligned["errors"] = [*parse_errors, *aligned["errors"]]
+    return aligned
 
 
 @app.post("/api/eval")

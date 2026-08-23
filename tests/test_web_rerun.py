@@ -201,7 +201,8 @@ def test_frontend_exposes_manual_and_failed_item_rerun_actions():
     assert "选择全部失败项" in html
     assert "重跑选中项" in html
     assert "rerunOne(r)" in html
-    assert 'filter((result) => Boolean(result?.error))' in js
+    assert 'filter((result) => Boolean(result?.error) || (' in js
+    assert 'group?.evaluation_status === "error"' in js
     assert 'fetch(`/api/eval/${taskId.value}/rerun`' in js
     assert "judge_backend: rerunBackend" in js
     assert "本次使用：${rerunBackendLabel}" in js

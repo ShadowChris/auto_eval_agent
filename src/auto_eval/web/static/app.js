@@ -10,14 +10,21 @@ createApp({
       { key: "online", label: "接模型在线评估" },
       { key: "process", label: "过程盲评(含轨迹)" },
       { key: "operation", label: "任务类（录屏）" },
+      { key: "operation_multi_group", label: "任务类多组评估" },
       { key: "rich_content", label: "垂域视觉评测" },
       { key: "rich_content_quality", label: "垂域视觉综合评测" },
     ];
     function modeLabel(key) {
       return modes.find((item) => item.key === key)?.label || key;
     }
+    function historyModeLabel(item) {
+      return item?.mode === "operation" && item?.operation_layout === "multi_group"
+        ? "任务类多组评估"
+        : modeLabel(item?.mode);
+    }
     const mode = ref("single");
-    const isVideoMode = computed(() => ["operation", "rich_content", "rich_content_quality"].includes(mode.value));
+    const isMultiGroupMode = computed(() => mode.value === "operation_multi_group");
+    const isVideoMode = computed(() => ["operation", "operation_multi_group", "rich_content", "rich_content_quality"].includes(mode.value));
     const text = ref("");
     const fileText = ref("");
     const isJsonl = ref(false);
@@ -28,12 +35,28 @@ createApp({
     const opPage = ref(1);
     const opJumpPage = ref("");
     const opPreparing = ref(false);
+    let operationGroupSequence = 0;
+    function newOperationGroup(role = "experiment") {
+      const sequence = ++operationGroupSequence;
+      return {
+        _uiKey: sequence,
+        group_id: `group_${sequence}`,
+        group_name: "",
+        group_role: role,
+        dataset_name: "",
+        jsonl: "",
+        count: 0,
+      };
+    }
+    const operationGroups = ref([newOperationGroup("control"), newOperationGroup("experiment")]);
+    const groupAlignment = ref(null);
+    const groupAligning = ref(false);
     const errors = ref([]);
     const judges = ref([]);
     const models = ref([]);
     const selectedJudges = ref([]);
     const visibleJudges = computed(() => {
-      if (mode.value !== "operation") return judges.value;
+      if (!["operation", "operation_multi_group"].includes(mode.value)) return judges.value;
       const judge = terminalUserJudge();
       return judge ? [judge] : [];
     });
@@ -166,6 +189,7 @@ createApp({
           online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
           operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
+          operation_multi_group: "分别导入至少两组任务类 JSONL，按 case_id 对齐并校验 query；同一 case 的多组录屏使用同一次模型调用和同一套任务类标准评估。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/content_start_time/content_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
           rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域视觉评测相同。",
         }[mode.value])
@@ -178,6 +202,7 @@ createApp({
           online: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场\n计算 17 × 24 等于多少？",
           process: "规划回家路线 ||| @context: 当前位于上海人民广场，目的地徐家汇 ||| 最终回答 ||| 推理轨迹\n某函数是否正确？ ||| 正确 ||| def f(n): return 1 if n<=1 else n*f(n-1)",
           operation: "",
+          operation_multi_group: "",
           rich_content: "",
           rich_content_quality: "",
         }[mode.value])
@@ -860,6 +885,30 @@ createApp({
 
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
+      if (isMultiGroupMode.value) {
+        return results.value.filter((result) => {
+          const groupResults = result.group_results || [];
+          if (correctnessFilter.value && !groupResults.some(
+            (group) => group.correctness === correctnessFilter.value,
+          )) return false;
+          const searchable = [
+            result.case_id,
+            result.query,
+            ...(result.alignment_warnings || []),
+            ...groupResults.flatMap((group) => [
+              group.group_name,
+              group.item_id,
+              group.query,
+              group.correctness,
+              ...(group.issue_types || []),
+              ...(group.execution_routes || []),
+              group.rationale,
+              group.error,
+            ]),
+          ].join(" ").toLowerCase();
+          return !q || searchable.includes(q);
+        });
+      }
       const threshold = (summary.value && summary.value.by_skill && summary.value.by_skill.threshold) || 2;
       const rows = skillResults.value.filter((r) => {
         if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
@@ -879,6 +928,31 @@ createApp({
       const start = (safePage - 1) * resultPageSize.value;
       return filteredResults.value.slice(start, start + resultPageSize.value);
     });
+    const multiGroupColumns = computed(() => {
+      const configured = loadedTaskOptions.value?.operation_groups
+        || groupAlignment.value?.groups
+        || [];
+      if (configured.length) return configured;
+      const map = new Map();
+      results.value.forEach((result) => (result.group_results || []).forEach((group) => {
+        if (!map.has(group.group_id)) map.set(group.group_id, {
+          group_id: group.group_id,
+          group_name: group.group_name || group.group_id,
+          group_role: group.group_role || "experiment",
+          dataset_name: group.dataset_name || "",
+        });
+      }));
+      return [...map.values()];
+    });
+    function multiGroupResult(result, groupId) {
+      return (result.group_results || []).find((group) => group.group_id === groupId) || null;
+    }
+    function displayArray(value) {
+      return Array.isArray(value) ? (value.length ? value.join("；") : "—") : (value || "—");
+    }
+    function groupRoleLabel(value) {
+      return value === "control" ? "对照组" : "实验组";
+    }
     const selectedRerunCount = computed(() => selectedRerunIndices.value.size);
     const allPagedResultsSelected = computed(() => {
       const indexes = pagedResults.value
@@ -1006,7 +1080,7 @@ createApp({
     }
 
     function defaultJudgeSelection(targetMode) {
-      if (["single", "operation", "rich_content"].includes(targetMode)) {
+      if (["single", "operation", "operation_multi_group", "rich_content"].includes(targetMode)) {
         const endUserJudge = terminalUserJudge();
         if (endUserJudge) return [endUserJudge.name];
       }
@@ -1074,10 +1148,15 @@ createApp({
       fileText.value = "";
       isJsonl.value = false;
       datasetName.value = "";
+      groupAlignment.value = null;
       if (["operation", "rich_content", "rich_content_quality"].includes(k)) {
         opItems.value = [newOpItem()];
         opPage.value = 1;
         opJumpPage.value = "";
+      }
+      if (k === "operation_multi_group") {
+        operationGroupSequence = 0;
+        operationGroups.value = [newOperationGroup("control"), newOperationGroup("experiment")];
       }
     }
 
@@ -1194,8 +1273,67 @@ createApp({
       }
     }
 
+    function addOperationGroup() {
+      operationGroups.value.push(newOperationGroup("experiment"));
+      groupAlignment.value = null;
+    }
+
+    function removeOperationGroup(index) {
+      if (operationGroups.value.length <= 2) return;
+      operationGroups.value.splice(index, 1);
+      groupAlignment.value = null;
+    }
+
+    async function onOperationGroupFile(event, index) {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file) return;
+      const group = operationGroups.value[index];
+      group.dataset_name = file.name || "";
+      group.group_name = (file.name || "").replace(/\.jsonl$/i, "") || `数据组 ${index + 1}`;
+      group.jsonl = await file.text();
+      group.count = group.jsonl.split(/\r?\n/).filter((line) => line.trim()).length;
+      groupAlignment.value = null;
+      errors.value = [];
+    }
+
+    async function alignOperationGroups() {
+      const groups = operationGroups.value.filter((group) => group.jsonl.trim());
+      if (groups.length < 2) {
+        errors.value = ["请至少为两个实验组选择 JSONL 数据集"];
+        return false;
+      }
+      groupAligning.value = true;
+      errors.value = [];
+      try {
+        const response = await fetch("/api/operation/groups/align", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ groups }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(providerApiErrorText(data, "多组预校验失败"));
+        groupAlignment.value = data;
+        items.value = data.cases || [];
+        errors.value = [...(data.errors || [])];
+        datasetName.value = groups.map((group) => group.dataset_name).filter(Boolean).join(" + ");
+        return items.value.length > 0;
+      } catch (error) {
+        groupAlignment.value = null;
+        items.value = [];
+        errors.value = [error?.message || String(error)];
+        return false;
+      } finally {
+        groupAligning.value = false;
+      }
+    }
+
     const canSubmit = computed(() => {
       if (selectedProviderId.value && !selectedProviderModel.value.trim()) return false;
+      if (isMultiGroupMode.value) {
+        return !groupAligning.value
+          && operationGroups.value.filter((group) => group.jsonl.trim()).length >= 2;
+      }
       if (isVideoMode.value)
         return !opPreparing.value && opItems.value.some(
           (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
@@ -1221,7 +1359,14 @@ createApp({
 
     async function submit() {
       runError.value = "";
-      if (isVideoMode.value) {
+      if (isMultiGroupMode.value) {
+        if (!(await alignOperationGroups())) return;
+        items.value = groupAlignment.value?.cases || [];
+        if (!items.value.length) {
+          alert("预校验后没有可评估的 case，请检查 case_id 和数据格式。");
+          return;
+        }
+      } else if (isVideoMode.value) {
         const valid = opItems.value.filter(
           (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
         );
@@ -1294,11 +1439,11 @@ createApp({
       rerunProgressIndices.value = [];
       progressView.value = "all";
       const body = {
-        mode: mode.value,
+        mode: isMultiGroupMode.value ? "operation" : mode.value,
         items: items.value,
         dataset_name: datasetName.value || (isVideoMode.value ? "手动录入" : (isJsonl.value ? "未命名数据集.jsonl" : "文本输入")),
         options: {
-          judges: mode.value === "operation"
+          judges: ["operation", "operation_multi_group"].includes(mode.value)
             ? defaultJudgeSelection("operation")
             : selectedJudges.value,
           visual_judge: visualJudge.value,
@@ -1311,6 +1456,11 @@ createApp({
           } : {}),
           concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
+          ...(isMultiGroupMode.value ? {
+            operation_layout: "multi_group",
+            operation_groups: groupAlignment.value?.groups || [],
+            alignment_summary: groupAlignment.value?.summary || {},
+          } : {}),
         },
       };
       let r;
@@ -1853,7 +2003,9 @@ createApp({
         disconnectSSE();
         taskId.value = d.task_id || id;
         eventCursor.value = Math.max(0, Number(d.event_cursor) || 0);
-        mode.value = d.mode || mode.value;
+        mode.value = d.mode === "operation" && d.options?.operation_layout === "multi_group"
+          ? "operation_multi_group"
+          : (d.mode || mode.value);
         datasetName.value = d.dataset_name || "";
         items.value = d.items || [];
         results.value = d.results || [];
@@ -1977,7 +2129,10 @@ createApp({
     function selectFailedResults() {
       selectedRerunIndices.value = new Set(
         results.value
-          .filter((result) => Boolean(result?.error))
+          .filter((result) => Boolean(result?.error) || (
+            isMultiGroupMode.value
+            && (result?.group_results || []).some((group) => group?.evaluation_status === "error")
+          ))
           .map((result) => Number(result.index))
           .filter((index) => Number.isInteger(index) && index >= 0),
       );
@@ -2247,7 +2402,7 @@ createApp({
 
     return {
       workspacePage,
-      modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
+      modes, mode, modeLabel, historyModeLabel, isVideoMode, isMultiGroupMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       llmProviders, selectedProviderId, selectedProviderModel, selectedProvider,
       selectedProviderModels, providerModelOptions, providerManagerOpen, providerForm, providerBusy,
       providerMessage, providerError, onProviderChange, loadProviders, newProvider,
@@ -2266,8 +2421,9 @@ createApp({
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
+      operationGroups, groupAlignment, groupAligning, multiGroupColumns, multiGroupResult, displayArray, groupRoleLabel,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,
