@@ -139,17 +139,19 @@
             <option value="experiment">实验组</option>
           </select>
           <label class="op-upload-btn">
-            <input type="file" accept=".jsonl,application/json" @change="onOperationGroupFile($event,index)" hidden>
-            {{ group.dataset_name ? '更换 JSONL' : '选择 JSONL' }}
+            <input type="file" accept=".jsonl,.csv,.xlsx,.xls,.xlsm,application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" @change="onOperationGroupFile($event,index)" hidden>
+            {{ group.dataset_name ? '更换数据集' : '选择数据集' }}
           </label>
-          <span class="hint"><strong>{{ group.group_name || '上传后自动使用文件名' }}</strong><template v-if="group.count"> · {{ group.count }} 行</template></span>
+          <span class="hint"><strong>{{ group.group_name || '上传后自动使用文件名' }}</strong><template v-if="group.importing"> · 正在解析…</template><template v-else-if="group.count"> · {{ group.count }} 行</template><template v-if="group.import_summary?.format"> · {{ group.import_summary.format }}</template><template v-if="group.import_summary?.sheet != null"> · 工作表：{{ group.import_summary.sheet }}</template><template v-if="group.import_warnings?.length"> · ⚠ {{ group.import_warnings.length }} 行警告</template></span>
           <button v-if="operationGroups.length>2" class="btn-danger" @click="removeOperationGroup(index)">删除组</button>
+          <details v-if="group.import_warnings?.length" class="dataset-import-detail"><summary>导入警告（{{ group.import_warnings.length }} 行）</summary><div class="hint">涉及 ID：{{ importWarningIds(group.import_warnings) }}<template v-if="group.import_warnings.length>10"> 等，另有 {{ group.import_warnings.length-10 }} 行</template></div></details>
+          <details v-if="group.import_errors?.length" class="dataset-import-detail"><summary>导入错误（{{ group.import_errors.length }}）</summary><div v-for="(error,errorIndex) in group.import_errors" :key="group._uiKey+'-error-'+errorIndex">{{ error }}</div></details>
         </div>
         <div class="row">
           <button @click="addOperationGroup">+ 添加实验组</button>
           <button class="primary" @click="alignOperationGroups" :disabled="groupAligning">{{ groupAligning ? '正在预校验…' : '预校验并对齐' }}</button>
         </div>
-        <p class="hint">组名自动取 JSONL 文件名；第一组默认对照组，其余默认实验组，可用下拉框调整。角色只用于页面、统计和导出，不会进入裁判 Prompt。按 case_id 对齐；Query 不一致或仅剩一组时自动回退单组评估。</p>
+        <p class="hint">支持 JSONL、CSV、XLSX；表格必需列：<strong>query</strong>，以及 <strong>index / 序号</strong> 二选一。视频优先读取 <strong>video_path</strong>；没有该列时使用<strong>原文件名</strong>拼接，<strong>文件路径</strong>可选。Excel 优先读取“合并数据”工作表，否则读取第一个有效工作表。组名自动取文件名，按 case_id 对齐。</p>
         <div v-if="groupAlignment" class="summary multi-align-summary">
           <span>可评 Case {{ groupAlignment.summary.total_cases }}</span>
           <span>完整对齐 {{ groupAlignment.summary.complete_cases }}</span>
@@ -166,16 +168,25 @@
       <div class="op-import">
         <div class="op-import-row">
           <label class="op-upload-btn">
-            <input type="file" accept=".jsonl,application/json" @change="onOpManifestFile" hidden>
-            导入{{ mode==='operation' ? '任务类' : '垂域视觉评测' }} JSONL
+            <input type="file" accept=".jsonl,.csv,.xlsx,.xls,.xlsm,application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" @change="onOpManifestFile" hidden>
+            导入{{ mode==='operation' ? '任务类' : '垂域视觉评测' }}数据集
           </label>
-          <span v-if="opPreparing" class="running">正在解析 JSONL…</span>
+          <span v-if="opPreparing" class="running">正在解析数据集…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
           <span v-if="datasetName" class="hint">数据集：{{ datasetName }}</span>
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
-        <p v-if="mode==='operation'" class="hint">示例：{"id":"op_001","query":"设置7点闹钟","context":"当前时间22:00","video_path":"data/videos/alarm.mp4","task_start_time":7,"task_end_time":28.5,"agent_statement":"已设置完成"}</p>
+        <p v-if="mode==='operation'" class="hint">支持 JSONL、CSV、XLSX。表格必需列：<strong>query</strong>，以及 <strong>index / 序号</strong> 二选一。视频优先读取 <strong>video_path</strong>；没有该列时使用<strong>原文件名</strong>拼接，<strong>文件路径</strong>可选。Excel 优先读取“合并数据”工作表。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","content_start_time":0,"content_end_time":18.5}</p>
+        <div v-if="datasetImportSummary" class="summary dataset-import-summary">
+          <span>格式 {{ datasetImportSummary.format }}</span>
+          <span v-if="datasetImportSummary.sheet != null">工作表 {{ datasetImportSummary.sheet }}</span>
+          <span>源数据 {{ datasetImportSummary.source_rows }} 行</span>
+          <span>导入 {{ datasetImportSummary.imported_rows }} 行</span>
+          <span v-if="datasetImportSummary.ignored_empty_rows">忽略空白 {{ datasetImportSummary.ignored_empty_rows }} 行</span>
+          <span v-if="datasetImportSummary.missing_video_rows">视频不可访问 {{ datasetImportSummary.missing_video_rows }} 行</span>
+        </div>
+        <details v-if="datasetImportWarnings.length"><summary>导入警告（{{ datasetImportWarnings.length }} 行）</summary><div class="hint">涉及 ID：{{ importWarningIds(datasetImportWarnings) }}<template v-if="datasetImportWarnings.length>10"> 等，另有 {{ datasetImportWarnings.length-10 }} 行</template></div></details>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
       </div>
       <div v-for="entry in pagedOpItems" :key="entry.item._uiKey" class="op-card"

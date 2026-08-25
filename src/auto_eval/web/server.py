@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 import uuid
 from datetime import datetime
@@ -34,6 +35,7 @@ from ..config import ExpertKnowledgeBase, load_config
 from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
 from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
+from ..table_dataset import convert_table
 from ..llm_stream import build_openai_client, stream_chat_completion
 from .parse_input import Mode, parse_jsonl, parse_text
 from .history import (
@@ -541,6 +543,65 @@ def api_parse(req: ParseReq):
     else:
         raise HTTPException(400, "需提供 text 或 jsonl")
     return {"items": items, "errors": errs, "count": len(items)}
+
+
+_TABLE_DATASET_SUFFIXES = {".csv", ".xlsx", ".xls", ".xlsm"}
+_MAX_TABLE_DATASET_BYTES = 100 * 1024 * 1024
+
+
+@app.post("/api/operation/import-table")
+async def api_import_operation_table(file: UploadFile = File(...)):
+    """把 CSV/Excel 转为与任务类 JSONL 相同的标准题目。"""
+    filename = Path(file.filename or "dataset").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in _TABLE_DATASET_SUFFIXES:
+        supported = "、".join(sorted(_TABLE_DATASET_SUFFIXES))
+        raise HTTPException(422, f"不支持的表格格式；请选择 {supported}")
+    content = await file.read(_MAX_TABLE_DATASET_BYTES + 1)
+    if len(content) > _MAX_TABLE_DATASET_BYTES:
+        raise HTTPException(413, "表格文件超过 100MB 限制")
+    if not content:
+        raise HTTPException(422, "表格文件为空")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="auto_eval_table_") as temp_dir:
+            temp_root = Path(temp_dir)
+            input_path = temp_root / f"input{suffix}"
+            output_path = temp_root / "output.jsonl"
+            input_path.write_bytes(content)
+            result = convert_table(
+                input_path,
+                input_prefix=Path(filename).stem,
+                output_path=output_path,
+                sheet="auto",
+                project_root=BASE_DIR,
+            )
+            jsonl = "\n".join(
+                json.dumps(row, ensure_ascii=False, allow_nan=False)
+                for row in result.rows
+            )
+    except (FileNotFoundError, ImportError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    items, errors = parse_jsonl(jsonl, "operation")
+    return {
+        "items": items,
+        "errors": errors,
+        "count": len(items),
+        "jsonl": jsonl,
+        "warnings": result.warnings,
+        "summary": {
+            "filename": filename,
+            "format": suffix.lstrip(".").upper(),
+            "sheet": result.selected_sheet,
+            "source_rows": len(result.rows),
+            "imported_rows": len(items),
+            "warning_rows": len(result.warnings),
+            "missing_video_rows": len(result.missing_video_ids),
+            "ignored_empty_rows": result.ignored_empty_rows,
+            "direct_standard_columns": list(result.direct_standard_columns),
+        },
+    }
 
 
 @app.post("/api/operation/groups/align")

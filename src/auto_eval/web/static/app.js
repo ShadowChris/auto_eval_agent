@@ -10,21 +10,21 @@ createApp({
       online: "接模型在线评估",
       process: "过程盲评(含轨迹)",
       operation: "任务类（录屏）",
-      operation_multi_group: "任务类多组评估",
+      operation_multi_group: "任务类多组评估（Beta）",
       rich_content: "垂域视觉评测",
       rich_content_quality: "垂域视觉综合评测",
     };
     // 当前 Web 评估台只开放任务类入口；其他模式仍保留后端和历史兼容能力。
     const modes = [
       { key: "operation", label: "任务类（录屏）" },
-      { key: "operation_multi_group", label: "任务类多组评估" },
+      { key: "operation_multi_group", label: "任务类多组评估（Beta）" },
     ];
     function modeLabel(key) {
       return modeLabels[key] || key;
     }
     function historyModeLabel(item) {
       return item?.mode === "operation" && item?.operation_layout === "multi_group"
-        ? "任务类多组评估"
+        ? "任务类多组评估（Beta）"
         : modeLabel(item?.mode);
     }
     const mode = ref("operation");
@@ -40,6 +40,8 @@ createApp({
     const opPage = ref(1);
     const opJumpPage = ref("");
     const opPreparing = ref(false);
+    const datasetImportSummary = ref(null);
+    const datasetImportWarnings = ref([]);
     let operationGroupSequence = 0;
     function newOperationGroup(role = "experiment") {
       const sequence = ++operationGroupSequence;
@@ -51,6 +53,10 @@ createApp({
         dataset_name: "",
         jsonl: "",
         count: 0,
+        importing: false,
+        import_summary: null,
+        import_warnings: [],
+        import_errors: [],
       };
     }
     const operationGroups = ref([newOperationGroup("control"), newOperationGroup("experiment")]);
@@ -193,8 +199,8 @@ createApp({
           compare: "每行一题：query [||| @context: 背景] ||| answerA ||| answerB [||| reference]",
           online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
-          operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
-          operation_multi_group: "分别导入至少两组任务类 JSONL，按 case_id 对齐并校验 query；同一 case 的多组录屏使用同一次模型调用和同一套任务类标准评估。",
+          operation: "可逐题上传，也可导入 JSONL、CSV、XLSX：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
+          operation_multi_group: "分别导入至少两组任务类 JSONL、CSV 或 XLSX，按 case_id 对齐并校验 query；同一 case 的多组录屏使用同一次模型调用和同一套任务类标准评估。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/content_start_time/content_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
           rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域视觉评测相同。",
         }[mode.value])
@@ -1153,6 +1159,8 @@ createApp({
       fileText.value = "";
       isJsonl.value = false;
       datasetName.value = "";
+      datasetImportSummary.value = null;
+      datasetImportWarnings.value = [];
       groupAlignment.value = null;
       if (["operation", "rich_content", "rich_content_quality"].includes(k)) {
         opItems.value = [newOpItem()];
@@ -1230,26 +1238,23 @@ createApp({
       datasetName.value = file.name || "";
       opPreparing.value = true;
       errors.value = [];
+      datasetImportSummary.value = null;
+      datasetImportWarnings.value = [];
       items.value = [];
       opItems.value = [newOpItem()];
       opPage.value = 1;
       opJumpPage.value = "";
       try {
-        const content = await file.text();
-        const parseResponse = await fetch("/api/parse", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: mode.value, jsonl: content }),
-        });
-        const parsed = await parseResponse.json().catch(() => ({}));
-        if (!parseResponse.ok) throw new Error(parsed.detail || "JSONL 解析请求失败");
+        const parsed = await parseOperationDatasetFile(file);
         const importErrors = [...(parsed.errors || [])];
         if (!(parsed.items || []).length) {
-          errors.value = importErrors.length ? importErrors : ["JSONL 中没有可导入的数据"];
+          errors.value = importErrors.length ? importErrors : ["数据集中没有可导入的数据"];
           return;
         }
 
         errors.value = importErrors;
+        datasetImportSummary.value = parsed.summary || null;
+        datasetImportWarnings.value = parsed.warnings || [];
         const imported = parsed.items || [];
         if (imported.length) {
           items.value = imported;
@@ -1278,6 +1283,60 @@ createApp({
       }
     }
 
+    function operationDatasetStem(filename) {
+      return String(filename || "").replace(/\.(jsonl|csv|xlsx|xlsm|xls)$/i, "");
+    }
+
+    function importWarningIds(warnings, limit = 10) {
+      return (warnings || [])
+        .slice(0, limit)
+        .map((warning) => warning?.id || `第${warning?.["输入行号"] || "?"}行`)
+        .join("、");
+    }
+
+    function isOperationTableFile(file) {
+      return /\.(csv|xlsx|xlsm|xls)$/i.test(file?.name || "");
+    }
+
+    async function parseOperationDatasetFile(file) {
+      let response;
+      if (isOperationTableFile(file)) {
+        const body = new FormData();
+        body.append("file", file);
+        response = await fetch("/api/operation/import-table", {
+          method: "POST",
+          body,
+        });
+      } else {
+        const content = await file.text();
+        response = await fetch("/api/parse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "operation", jsonl: content }),
+        });
+        const parsed = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(providerApiErrorText(parsed, "JSONL 解析请求失败"));
+        return {
+          ...parsed,
+          jsonl: content,
+          warnings: [],
+          summary: {
+            filename: file.name || "",
+            format: "JSONL",
+            sheet: null,
+            source_rows: content.split(/\r?\n/).filter((line) => line.trim()).length,
+            imported_rows: parsed.count || 0,
+            warning_rows: 0,
+            missing_video_rows: 0,
+            ignored_empty_rows: 0,
+          },
+        };
+      }
+      const parsed = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(providerApiErrorText(parsed, "表格解析请求失败"));
+      return parsed;
+    }
+
     function addOperationGroup() {
       operationGroups.value.push(newOperationGroup("experiment"));
       groupAlignment.value = null;
@@ -1295,17 +1354,39 @@ createApp({
       if (!file) return;
       const group = operationGroups.value[index];
       group.dataset_name = file.name || "";
-      group.group_name = (file.name || "").replace(/\.jsonl$/i, "") || `数据组 ${index + 1}`;
-      group.jsonl = await file.text();
-      group.count = group.jsonl.split(/\r?\n/).filter((line) => line.trim()).length;
+      group.group_name = operationDatasetStem(file.name) || `数据组 ${index + 1}`;
+      group.jsonl = "";
+      group.count = 0;
+      group.importing = true;
+      group.import_summary = null;
+      group.import_warnings = [];
+      group.import_errors = [];
       groupAlignment.value = null;
       errors.value = [];
+      try {
+        const parsed = await parseOperationDatasetFile(file);
+        group.jsonl = parsed.jsonl || "";
+        group.count = parsed.count || 0;
+        group.import_summary = parsed.summary || null;
+        group.import_warnings = parsed.warnings || [];
+        group.import_errors = parsed.errors || [];
+        if (!group.count) {
+          errors.value = group.import_errors.length
+            ? group.import_errors.map((error) => `${group.group_name}：${error}`)
+            : [`${group.group_name}：数据集中没有可导入的数据`];
+        }
+      } catch (error) {
+        group.import_errors = [error?.message || String(error)];
+        errors.value = [`${group.group_name}：${group.import_errors[0]}`];
+      } finally {
+        group.importing = false;
+      }
     }
 
     async function alignOperationGroups() {
       const groups = operationGroups.value.filter((group) => group.jsonl.trim());
       if (groups.length < 2) {
-        errors.value = ["请至少为两个实验组选择 JSONL 数据集"];
+        errors.value = ["请至少为两个实验组选择可用的数据集"];
         return false;
       }
       groupAligning.value = true;
@@ -1337,6 +1418,7 @@ createApp({
       if (selectedProviderId.value && !selectedProviderModel.value.trim()) return false;
       if (isMultiGroupMode.value) {
         return !groupAligning.value
+          && !operationGroups.value.some((group) => group.importing)
           && operationGroups.value.filter((group) => group.jsonl.trim()).length >= 2;
       }
       if (isVideoMode.value)
@@ -2427,8 +2509,8 @@ createApp({
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       operationGroups, groupAlignment, groupAligning, multiGroupColumns, multiGroupResult, displayArray, groupRoleLabel,
-      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit,
+      trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,
