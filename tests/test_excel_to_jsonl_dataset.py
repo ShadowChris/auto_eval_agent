@@ -260,6 +260,55 @@ def test_index_can_build_id_without_sequence_column(tmp_path: Path):
     assert "序号" not in exported
 
 
+def test_generated_standard_field_keeps_raw_collision_with_numbered_suffix(
+    tmp_path: Path,
+):
+    video = tmp_path / "direct.mp4"
+    video.write_bytes(b"video")
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([{
+        "id": "raw-id",
+        "id_1": "already-numbered",
+        "index": "simple_001",
+        "query": "打开设置",
+        "video_path": str(video),
+    }]).to_csv(source, index=False, encoding="utf-8-sig")
+
+    result = convert_table(source, input_prefix="V1", project_root=tmp_path)
+
+    exported = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert exported["id"] == "V1_simple_001"
+    assert exported["id_1"] == "raw-id"
+    assert exported["id_2"] == "already-numbered"
+
+
+def test_auto_sheet_prefers_merged_data(tmp_path: Path):
+    video = tmp_path / "direct.mp4"
+    video.write_bytes(b"video")
+    source = tmp_path / "cases.xlsx"
+    with pd.ExcelWriter(source, engine="openpyxl") as writer:
+        pd.DataFrame([{"note": "不应读取"}]).to_excel(
+            writer,
+            sheet_name="设备原始",
+            index=False,
+        )
+        pd.DataFrame([{
+            "index": "simple_001",
+            "query": "打开设置",
+            "video_path": str(video),
+        }]).to_excel(writer, sheet_name="合并数据", index=False)
+
+    result = convert_table(
+        source,
+        input_prefix="V1",
+        sheet="auto",
+        project_root=tmp_path,
+    )
+
+    assert result.selected_sheet == "合并数据"
+    assert result.rows[0]["query"] == "打开设置"
+
+
 def test_windows_gb18030_csv_is_detected_automatically(tmp_path: Path):
     video = tmp_path / "录屏.mp4"
     video.write_bytes(b"video")
