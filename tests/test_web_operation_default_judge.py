@@ -1,7 +1,31 @@
+import re
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_web_only_exposes_operation_evaluation_modes() -> None:
+    app_js = (PROJECT_ROOT / "src/auto_eval/web/static/app.js").read_text(encoding="utf-8")
+
+    visible_modes = re.search(
+        r"const modes = \[(.*?)\n    \];",
+        app_js,
+        flags=re.DOTALL,
+    )
+    assert visible_modes is not None
+    assert 'key: "operation"' in visible_modes.group(1)
+    assert 'key: "operation_multi_group"' in visible_modes.group(1)
+    assert 'key: "single"' not in visible_modes.group(1)
+    assert 'key: "compare"' not in visible_modes.group(1)
+    assert 'key: "online"' not in visible_modes.group(1)
+    assert 'key: "process"' not in visible_modes.group(1)
+    assert 'key: "rich_content"' not in visible_modes.group(1)
+    assert 'key: "rich_content_quality"' not in visible_modes.group(1)
+    assert 'const mode = ref("operation");' in app_js
+    # 隐藏入口不影响旧历史任务的中文模式名称。
+    assert 'single: "垂域问答类"' in app_js
+    assert 'rich_content: "垂域视觉评测"' in app_js
 
 
 def test_single_and_operation_default_to_end_user_judge() -> None:

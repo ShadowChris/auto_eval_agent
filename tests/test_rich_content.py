@@ -257,7 +257,7 @@ def test_rich_content_runner_skips_extra_domain_classification() -> None:
     ) in runner_source
 
 
-def test_web_exposes_rich_content_mode_and_columns() -> None:
+def test_web_keeps_rich_content_history_label_and_columns() -> None:
     app_js = (PROJECT_ROOT / "src/auto_eval/web/static/app.js").read_text(
         encoding="utf-8"
     )
@@ -265,7 +265,7 @@ def test_web_exposes_rich_content_mode_and_columns() -> None:
         PROJECT_ROOT / "src/auto_eval/web/static/index.html"
     ).read_text(encoding="utf-8")
 
-    assert '{ key: "rich_content", label: "垂域视觉评测" }' in app_js
+    assert 'rich_content: "垂域视觉评测"' in app_js
     assert '{ key: "card_presence", label: "挂卡" }' in app_js
     assert '{ key: "superlink_count", label: "链接数" }' in app_js
     assert '{ key: "needs_review", label: "需人工复核" }' in app_js

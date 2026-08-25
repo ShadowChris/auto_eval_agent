@@ -4,25 +4,30 @@ import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 createApp({
   setup() {
     const workspacePage = ref("evaluation");
+    const modeLabels = {
+      single: "垂域问答类",
+      compare: "两回答对比",
+      online: "接模型在线评估",
+      process: "过程盲评(含轨迹)",
+      operation: "任务类（录屏）",
+      operation_multi_group: "任务类多组评估",
+      rich_content: "垂域视觉评测",
+      rich_content_quality: "垂域视觉综合评测",
+    };
+    // 当前 Web 评估台只开放任务类入口；其他模式仍保留后端和历史兼容能力。
     const modes = [
-      { key: "single", label: "垂域问答类" },
-      { key: "compare", label: "两回答对比" },
-      { key: "online", label: "接模型在线评估" },
-      { key: "process", label: "过程盲评(含轨迹)" },
       { key: "operation", label: "任务类（录屏）" },
       { key: "operation_multi_group", label: "任务类多组评估" },
-      { key: "rich_content", label: "垂域视觉评测" },
-      { key: "rich_content_quality", label: "垂域视觉综合评测" },
     ];
     function modeLabel(key) {
-      return modes.find((item) => item.key === key)?.label || key;
+      return modeLabels[key] || key;
     }
     function historyModeLabel(item) {
       return item?.mode === "operation" && item?.operation_layout === "multi_group"
         ? "任务类多组评估"
         : modeLabel(item?.mode);
     }
-    const mode = ref("single");
+    const mode = ref("operation");
     const isMultiGroupMode = computed(() => mode.value === "operation_multi_group");
     const isVideoMode = computed(() => ["operation", "operation_multi_group", "rich_content", "rich_content_quality"].includes(mode.value));
     const text = ref("");
