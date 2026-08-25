@@ -202,7 +202,7 @@ class LLMProviderStore:
                     label = urlparse(base_url).hostname or "内置服务"
                 record = {
                     "id": f"builtin-{digest}",
-                    "name": f"{label}（配置默认）",
+                    "name": label,
                     "base_url": base_url,
                     "models": [],
                     "default_model": model,

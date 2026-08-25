@@ -157,6 +157,13 @@ createApp({
       () => llmProviders.value.find((item) => item.id === selectedProviderId.value) || null,
     );
 
+    const defaultJudgeBaseUrl = computed(
+      () => String(terminalUserJudge()?.base_url || "").trim(),
+    );
+    const defaultJudgeModel = computed(
+      () => String(terminalUserJudge()?.model || "").trim(),
+    );
+
     const selectedProviderModels = computed(() => selectedProvider.value?.models || []);
 
     const providerModelOptions = computed(() => {
@@ -2491,6 +2498,7 @@ createApp({
       workspacePage,
       modes, mode, modeLabel, historyModeLabel, isVideoMode, isMultiGroupMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       llmProviders, selectedProviderId, selectedProviderModel, selectedProvider,
+      defaultJudgeBaseUrl, defaultJudgeModel,
       selectedProviderModels, providerModelOptions, providerManagerOpen, providerForm, providerBusy,
       providerMessage, providerError, onProviderChange, loadProviders, newProvider,
       editProvider, saveProvider, deleteProvider, testProvider,

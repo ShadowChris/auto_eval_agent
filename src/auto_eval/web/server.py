@@ -390,7 +390,14 @@ def api_config():
     c = cfg()
     return {
         "judges": [
-            {"name": j.name, "display": j.display or j.name, "persona": j.persona, "enable_web_search": j.enable_web_search}
+            {
+                "name": j.name,
+                "display": j.display or j.name,
+                "persona": j.persona,
+                "enable_web_search": j.enable_web_search,
+                "base_url": j.base_url or "",
+                "model": j.model,
+            }
             for j in c.judges
         ],
         "models": [m.name for m in c.models],

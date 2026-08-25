@@ -109,6 +109,7 @@ def test_builtin_providers_are_grouped_by_connection_not_judge_role(
     providers = store.list_public(cfg)
 
     assert len(providers) == 2
+    assert all("配置默认" not in item["name"] for item in providers)
     assert all(role not in json.dumps(providers, ensure_ascii=False) for role in (
         "研发人员", "终端用户", "产品专家",
     ))

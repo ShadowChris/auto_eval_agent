@@ -41,6 +41,12 @@ def test_single_and_operation_default_to_end_user_judge() -> None:
     assert ':disabled="mode===\'operation\' || mode===\'operation_multi_group\'"' in index_html
     assert "selectedJudges.value = defaultJudgeSelection(k)" in app_js
     assert "selectedJudges.value = defaultJudgeSelection(mode.value)" in app_js
+    assert "const defaultJudgeBaseUrl = computed" in app_js
+    assert "const defaultJudgeModel = computed" in app_js
+    assert '默认接口：{{ defaultJudgeBaseUrl' in index_html
+    assert '默认模型：{{ defaultJudgeModel' in index_html
+    assert ':title="defaultJudgeBaseUrl"' not in index_html
+    assert 'v-if="!selectedProviderId" class="row provider-default-row"' in index_html
 
 
 def test_operation_results_show_issue_types_and_low_level_fields() -> None:

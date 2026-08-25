@@ -289,7 +289,7 @@
     <div class="row">
       <span class="lbl">Provider：</span>
       <select v-model="selectedProviderId" @change="onProviderChange">
-        <option value="">跟随裁判角色默认配置</option>
+        <option value="">默认配置</option>
         <option v-for="provider in llmProviders" :key="provider.id" :value="provider.id" :disabled="!provider.enabled">
           {{ provider.name }}{{ provider.has_api_key ? '' : '（缺少 Key）' }}
         </option>
@@ -301,7 +301,13 @@
       </select>
       <button type="button" @click="testProvider()" :disabled="providerBusy || !selectedProviderId">测试连接</button>
       <button type="button" @click="providerManagerOpen=!providerManagerOpen">管理模型服务</button>
-      <span class="hint" style="margin:0">不选择时沿用当前裁判默认配置；选择后本批次使用对应 Provider 和模型。</span>
+    </div>
+    <div v-if="!selectedProviderId" class="row provider-default-row">
+      <span class="lbl provider-default-spacer" aria-hidden="true"></span>
+      <div class="hint provider-default-config">
+        <div>默认接口：{{ defaultJudgeBaseUrl || '未配置' }}</div>
+        <div>默认模型：{{ defaultJudgeModel || '未配置' }}</div>
+      </div>
     </div>
     <div v-if="providerManagerOpen" class="provider-manager">
       <div class="provider-list">

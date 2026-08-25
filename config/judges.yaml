@@ -17,13 +17,13 @@ judges:
     enable_python: false             # 代码执行默认关
     concurrency: 3
 
-  # —— 裁判2：终端用户（普通用户视角，deepseek-v4-pro-openai）——
+  # —— 裁判2：终端用户（普通用户视角，阿里云百炼 Qwen3.5 397B）——
   - name: judge_2
     display: 终端用户
     runner: openai_compat
-    base_url: https://api.siliconflow.cn/v1
-    api_key_env: SILICON_FLOW_API_KEY
-    model: Qwen/Qwen3.5-397B-A17B
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    model: qwen3.5-397b-a17b
     temperature: 0
     persona: end_user              # 与 judge_1(strict_expert) 形成视角差异
     enable_web_search: true

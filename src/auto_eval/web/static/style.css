@@ -27,6 +27,8 @@ textarea {
   padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; resize: vertical;
 }
 .row { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.provider-default-row { align-items: flex-start; margin-top: 4px; }
+.provider-default-config { margin: 0; line-height: 1.5; }
 .lbl { color: #374151; font-size: 14px; min-width: 64px; }
 .chip { display: inline-flex; align-items: center; gap: 4px; background: #f3f4f6;
   padding: 4px 10px; border-radius: 16px; font-size: 13px; cursor: pointer; }
