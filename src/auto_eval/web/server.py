@@ -62,7 +62,13 @@ from .operation_media import (
 from .operation_groups import align_operation_groups
 from .llm_providers import LLMProviderPayload, LLMProviderStore
 from .runner import run_eval, run_rerun, run_single_api_item
-from .tasks import get_live_task, get_task, new_task
+from .tasks import (
+    get_live_task,
+    get_task,
+    new_task,
+    prune_task_cache,
+    remove_task,
+)
 
 # auto_eval_agent/ 目录（src/auto_eval/web/server.py 往上 4 层）
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -1005,6 +1011,7 @@ def api_history(
     page: int | None = None,
     page_size: int | None = None,
 ):
+    prune_task_cache()
     if page_size is not None:
         safe_page = max(1, int(page or 1))
         safe_size = max(1, min(int(page_size), 100))
@@ -1039,7 +1046,10 @@ def api_history(
 
 @app.get("/api/history/{task_id}")
 def api_history_detail(task_id: str, compact: bool = False):
-    task = get_task(task_id)
+    task = get_live_task(task_id)
+    if task is None:
+        # 查看旧历史只临时反序列化，不把完整任务永久放入全局缓存。
+        task = get_task(task_id, cache=False)
     if task:
         # 先读游标再构建快照：两者之间产生的事件最多重复，
         # 不会因游标超前而丢失。
@@ -1060,6 +1070,7 @@ def api_history_delete(task_id: str):
         raise HTTPException(409, "运行中的任务请先中断，再删除历史记录")
     if not delete_snapshot(task_id):
         raise HTTPException(404, "task not found")
+    remove_task(task_id)
     return {"ok": True}
 
 
@@ -1261,7 +1272,7 @@ def _eval_download_names(
 
 @app.get("/api/eval/{task_id}/export")
 def api_export(task_id: str, format: str = "json"):
-    task = get_task(task_id)
+    task = get_live_task(task_id)
     data = task_to_snapshot(task) if task else load_snapshot(task_id)
     if not data:
         raise HTTPException(404, "task not found")
@@ -1332,7 +1343,7 @@ def api_export(task_id: str, format: str = "json"):
 @app.get("/api/eval/{task_id}/items/{item_index}/export")
 def api_export_item(task_id: str, item_index: int, format: str):
     """导出单条结果关联的原视频、关键帧或裁判调用 JSON。"""
-    task = get_task(task_id)
+    task = get_live_task(task_id)
     data = task_to_snapshot(task) if task else load_snapshot(task_id)
     if not data:
         raise HTTPException(404, "task not found")

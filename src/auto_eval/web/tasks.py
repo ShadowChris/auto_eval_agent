@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -10,7 +11,20 @@ from typing import Any
 from .history import load_snapshot, make_session_name, save_task
 
 
+def _nonnegative_env_number(name: str, default: str, cast):
+    try:
+        return max(cast(0), cast(os.getenv(name, default)))
+    except (TypeError, ValueError):
+        return cast(default)
+
+
 MAX_EVENT_LOG_SIZE = 20_000
+MAX_TERMINAL_EVENT_LOG_SIZE = 200
+MAX_SSE_QUEUE_SIZE = 2_000
+MAX_CACHED_COMPLETED_TASKS = 8
+COMPLETED_TASK_CACHE_TTL_S = 1800.0
+_ACTIVE_STATUSES = {"pending", "running", "rerunning"}
+_TERMINAL_EVENTS = {"done", "error", "cancelled", "rerun_done", "rerun_cancelled"}
 
 
 @dataclass
@@ -44,6 +58,7 @@ class Task:
     event_cursor: int = 0
     event_log: list[dict] = field(default_factory=list, repr=False)
     last_persist_at: float = field(default=0.0, repr=False)
+    last_accessed_at: float = field(default_factory=time.monotonic, repr=False)
 
     async def publish(self, event: str, data: dict) -> None:
         self.publish_nowait(event, data)
@@ -58,11 +73,22 @@ class Task:
         self.event_log.append(message)
         if len(self.event_log) > MAX_EVENT_LOG_SIZE:
             del self.event_log[:-MAX_EVENT_LOG_SIZE]
+        if event in _TERMINAL_EVENTS and len(self.event_log) > MAX_TERMINAL_EVENT_LOG_SIZE:
+            del self.event_log[:-MAX_TERMINAL_EVENT_LOG_SIZE]
         for queue in list(self.subscribers):
-            queue.put_nowait(message)
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                # 极慢客户端只丢弃 Web 实时投影；完整进度仍已写入任务快照。
+                pass
 
     def subscribe(self) -> asyncio.Queue:
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=MAX_SSE_QUEUE_SIZE)
         self.subscribers.add(queue)
         return queue
 
@@ -75,12 +101,17 @@ class Task:
             self.started_at = time.time() if now is None else now
         self.finished_at = None
         self.duration_s = None
+        self.touch()
 
     def mark_finished(self, now: float | None = None) -> None:
         """记录批跑终止时间和实际墙钟耗时。"""
         self.finished_at = time.time() if now is None else now
         if self.started_at is not None:
             self.duration_s = round(max(0.0, self.finished_at - self.started_at), 3)
+        self.touch()
+
+    def touch(self) -> None:
+        self.last_accessed_at = time.monotonic()
 
     def elapsed_s(self, now: float | None = None) -> float | None:
         """返回已结束或运行中的批跑墙钟耗时。"""
@@ -97,6 +128,76 @@ class Task:
 TASKS: dict[str, Task] = {}
 
 
+def _task_is_active(task: Task) -> bool:
+    if task.status in _ACTIVE_STATUSES:
+        return True
+    if task.execution is not None and not task.execution.done():
+        return True
+    if any(not execution.done() for execution in task.item_executions.values()):
+        return True
+    return bool(task.subscribers)
+
+
+def prune_task_cache(
+    *,
+    now: float | None = None,
+    keep_task_ids: set[str] | None = None,
+) -> list[str]:
+    """淘汰已结束任务的内存对象；磁盘快照不受影响。"""
+    current = time.monotonic() if now is None else now
+    keep = keep_task_ids or set()
+    max_completed = _nonnegative_env_number(
+        "AUTO_EVAL_MAX_CACHED_COMPLETED_TASKS",
+        str(MAX_CACHED_COMPLETED_TASKS),
+        int,
+    )
+    ttl_s = _nonnegative_env_number(
+        "AUTO_EVAL_COMPLETED_TASK_CACHE_TTL_S",
+        str(COMPLETED_TASK_CACHE_TTL_S),
+        float,
+    )
+    protected_completed = [
+        task for task in list(TASKS.values())
+        if task.id in keep and not _task_is_active(task)
+    ]
+    completed = [
+        task for task in list(TASKS.values())
+        if task.id not in keep and not _task_is_active(task)
+    ]
+    completed.sort(key=lambda task: task.last_accessed_at, reverse=True)
+    remaining_capacity = max(
+        0,
+        max_completed - len(protected_completed),
+    )
+    retained_ids = {
+        task.id for task in completed[:remaining_capacity]
+    }
+    removed: list[str] = []
+    for task in completed:
+        expired = (
+            ttl_s > 0
+            and current - task.last_accessed_at > ttl_s
+        )
+        if task.id in retained_ids and not expired:
+            continue
+        if TASKS.pop(task.id, None) is not None:
+            removed.append(task.id)
+    return removed
+
+
+def remove_task(task_id: str) -> Task | None:
+    """显式释放一个非运行中任务；主要供删除历史记录使用。"""
+    task = TASKS.get(task_id)
+    if task is not None:
+        if task.status in _ACTIVE_STATUSES:
+            return None
+        if task.execution is not None and not task.execution.done():
+            return None
+        if any(not execution.done() for execution in task.item_executions.values()):
+            return None
+    return TASKS.pop(task_id, None)
+
+
 def new_task(
     mode: str,
     items: list[dict],
@@ -105,6 +206,7 @@ def new_task(
     *,
     task_id: str | None = None,
 ) -> Task:
+    prune_task_cache()
     task_id = task_id or uuid.uuid4().hex[:12]
     created_at = time.time()
     t = Task(
@@ -121,9 +223,10 @@ def new_task(
     return t
 
 
-def get_task(task_id: str) -> Task | None:
+def get_task(task_id: str, *, cache: bool = True) -> Task | None:
     task = TASKS.get(task_id)
     if task:
+        task.touch()
         return task
     snapshot = load_snapshot(task_id)
     if not snapshot:
@@ -190,7 +293,10 @@ def get_task(task_id: str) -> Task | None:
         rerun_history=rerun_history,
         event_cursor=int(snapshot.get("event_cursor") or 0),
     )
-    TASKS[task.id] = task
+    task.touch()
+    if cache:
+        TASKS[task.id] = task
+        prune_task_cache(keep_task_ids={task.id})
     if recovered_rerun:
         save_task(task)
     return task

@@ -49,7 +49,7 @@ from .operation_media import (
     prepare_session_operation_item,
     prepare_session_rich_content_item,
 )
-from .tasks import Task
+from .tasks import Task, prune_task_cache
 
 
 logger = logging.getLogger(__name__)
@@ -138,6 +138,8 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             "error",
             {"message": task.error, "duration_s": task.duration_s},
         )
+    finally:
+        prune_task_cache(keep_task_ids={task.id})
 
 
 def _result_index(result: dict) -> int | None:
@@ -292,6 +294,7 @@ async def run_rerun(
                 "total": len(task.items),
             },
         )
+        prune_task_cache(keep_task_ids={task.id})
 
 
 async def run_single_api_item(
@@ -388,6 +391,7 @@ async def run_single_api_item(
                 "error",
                 {"message": task.error, "duration_s": task.duration_s},
             )
+        prune_task_cache(keep_task_ids={task.id})
 
 
 async def _run(
