@@ -480,6 +480,7 @@
       <button @click="exportJson" :disabled="!taskId">导出任务快照 JSON</button>
       <button @click="exportJsonl" :disabled="!taskId">导出逐题 JSONL</button>
       <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
+      <button v-if="operationStatistics" @click="exportStatisticsJson" :disabled="!taskId">导出统计 JSON</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId">导出抽帧 ZIP</button>
     </h2>
     <div class="summary" v-if="summary">
@@ -505,6 +506,61 @@
       <span v-if="summary.solved_ok_rate!=null">OK率 {{ (summary.solved_ok_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
     </div>
+    <details
+      v-if="operationStatistics"
+      class="operation-statistics"
+      open
+    >
+      <summary>📊 任务类统计分布</summary>
+      <div class="operation-statistics-overview">
+        <span>有效评估 {{ operationStatistics.valid_count }}/{{ operationStatistics.total_cases }}</span>
+        <span>评估覆盖率 {{ operationStatistics.coverage_rate!=null ? (operationStatistics.coverage_rate*100).toFixed(2)+'%' : '—' }}</span>
+        <span>OK 率 {{ operationStatistics.ok_rate!=null ? (operationStatistics.ok_rate*100).toFixed(2)+'%' : '—' }}（有效评估={{ operationStatistics.ok_rate_denominator }}）</span>
+        <span v-if="operationStatistics.failed_count">评估失败 {{ operationStatistics.failed_count }}</span>
+        <span v-if="operationStatistics.pending_count">待评估 {{ operationStatistics.pending_count }}</span>
+      </div>
+      <div class="operation-statistics-grid">
+        <div>
+          <h3>Correctness 分布</h3>
+          <table class="grid operation-statistics-table">
+            <thead><tr><th>判定</th><th>频次</th><th>占有效评估比例</th></tr></thead>
+            <tbody>
+              <tr v-for="row in operationStatistics.correctness_rows" :key="'correctness-stat-'+row.correctness">
+                <td>{{ row.correctness }}</td>
+                <td>{{ row.count }}</td>
+                <td>{{ row.rate!=null ? (row.rate*100).toFixed(2)+'%' : '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <h3>Issue Type 分布</h3>
+          <div class="table-scroll">
+            <table class="grid operation-statistics-table">
+              <thead><tr><th>问题类型</th><th>涉及 Case 数</th><th>占比</th><th>主问题数</th><th>关联判定</th></tr></thead>
+              <tbody>
+                <tr v-for="row in visibleOperationIssueStats" :key="'issue-stat-'+row.issue_type">
+                  <td>{{ row.issue_type }}</td>
+                  <td>{{ row.case_count }}</td>
+                  <td>{{ row.rate!=null ? (row.rate*100).toFixed(2)+'%' : '—' }}</td>
+                  <td>{{ row.primary_count }}</td>
+                  <td>{{ (row.correctness || []).join('；') }}</td>
+                </tr>
+                <tr v-if="!operationStatistics.issue_type_rows.length"><td colspan="5" class="hint">暂无问题类型</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <a
+            v-if="operationStatistics.issue_type_rows.length>10"
+            href="#"
+            class="history-text-link operation-statistics-more"
+            @click.prevent="issueStatsExpanded=!issueStatsExpanded"
+          >{{ issueStatsExpanded ? '收起' : `展开全部（${operationStatistics.issue_type_rows.length} 类）` }}</a>
+        </div>
+      </div>
+      <p class="operation-statistics-conclusion"><strong>结论：</strong>{{ operationStatistics.conclusion }}</p>
+      <p class="hint operation-statistics-note">口径：OK 率、Correctness 和问题类型占比均以全部有效评估 Case 为分母。同一 Case 的同一问题类型只计一次，因此问题类型占比之和可能超过 100%。</p>
+    </details>
     <details class="skill-breakdown" v-if="summary && summary.by_skill && summary.by_skill.overview && summary.by_skill.overview.length" open>
       <summary>📊 按垂域分析（{{ summary.by_skill.overview.length }} 个垂域 · 维度问题阈值 ≤ {{ summary.by_skill.threshold }}）</summary>
       <div ref="pieChart" style="width:100%;height:260px;"></div>

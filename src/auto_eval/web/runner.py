@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from ..analysis.operation_statistics import summarize_operation_results
 from ..paths import RUNS_DIR
 from ..config import AppConfig
 from ..dataset import to_prompt
@@ -1635,6 +1636,10 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
         and cfg.domain_skills["operation"].rubrics
         else 5
     )
+    statistics = summarize_operation_results(
+        results,
+        total_cases=len(task.items),
+    )
     return {
         "total": len(results),
         "done": len(completed),
@@ -1650,6 +1655,7 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
             else None
         ),
         "correctness_dist": dict(collections.Counter(row["correctness"] for row in judged)),
+        "operation_statistics": statistics,
     }
 
 

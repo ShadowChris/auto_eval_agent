@@ -48,6 +48,7 @@ from .history import (
     load_item_judge_calls,
     load_snapshot,
     operation_item_result_row,
+    operation_statistics_payload,
     rows_to_csv,
     rows_to_jsonl,
     save_task,
@@ -1336,6 +1337,36 @@ def _eval_download_names(
     utf8_name = f"{safe_dataset}_{suffix}" if safe_dataset else suffix
     ascii_name = suffix
     return ascii_name, utf8_name
+
+
+@app.get("/api/eval/{task_id}/statistics")
+def api_operation_statistics(task_id: str, download: bool = False):
+    """返回任务类单批统计 JSON；下载的 Excel 统计 Sheet 使用同一结构。"""
+    task = get_live_task(task_id)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "task not found")
+    try:
+        payload = operation_statistics_payload(data)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not download:
+        return JSONResponse(payload)
+
+    dataset_stem = Path(str(payload.get("dataset_name") or "")).stem
+    utf8_name = f"{_download_stem(dataset_stem, 'operation')}_statistics.json"
+    ascii_name = f"operation_statistics_{_download_stem(task_id, 'task')[:8]}.json"
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    return Response(
+        content,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+            ),
+        },
+    )
 
 
 @app.get("/api/eval/{task_id}/export")

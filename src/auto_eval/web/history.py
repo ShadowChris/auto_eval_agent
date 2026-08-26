@@ -19,6 +19,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from ..analysis.operation_statistics import summarize_operation_results
 from ..judges.operation_fields import map_legacy_operation_result
 from ..judges.trace_storage import (
     configured_legacy_trace_path,
@@ -654,6 +655,11 @@ def _with_operation_compat(data: dict) -> dict:
         summary["ok_count"] = ok_count
         summary["problem_count"] = len(judged) - ok_count
         summary["completion_rate"] = round(ok_count / len(judged), 3)
+    if (data.get("options") or {}).get("operation_layout") != "multi_group":
+        summary["operation_statistics"] = summarize_operation_results(
+            results,
+            total_cases=len(data.get("items") or []),
+        )
     normalized["summary"] = summary
     return normalized
 
@@ -721,6 +727,8 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
         rows["运行汇总"] = [_operation_run_summary(snapshot)]
         if multi_operation and (summary.get("group_summaries") or []):
             rows["实验组汇总"] = list(summary["group_summaries"])
+        if not multi_operation:
+            rows["统计分布"] = _operation_statistics_export_rows(snapshot)
         return rows
     rows["运行信息"] = [_run_info(snapshot)]
     if mode == "compare":
@@ -1494,6 +1502,122 @@ def _operation_run_summary(snapshot: dict) -> dict:
     }
 
 
+def operation_statistics_payload(snapshot: dict) -> dict:
+    """构建供 API、Web 和 Excel 共用的任务类统计 JSON。"""
+    if snapshot.get("mode") != "operation":
+        raise ValueError("仅任务类评估支持统计分布")
+    if (snapshot.get("options") or {}).get("operation_layout") == "multi_group":
+        raise ValueError("任务类多组评估的统计口径尚未启用")
+    normalized = _with_operation_compat(snapshot)
+    results = _results_with_identity(normalized)
+    aligned = _aligned_results(normalized, results)
+    return {
+        "schema_version": 1,
+        "task_id": normalized.get("task_id") or "",
+        "dataset_name": normalized.get("dataset_name") or "",
+        "mode": "operation",
+        "statistics": summarize_operation_results(
+            aligned,
+            total_cases=len(normalized.get("items") or []),
+        ),
+    }
+
+
+def _operation_statistics_export_rows(snapshot: dict) -> list[dict]:
+    """统计分布的结构化行；XLSX 会将其渲染为同 Sheet 内的两张表。"""
+    statistics = operation_statistics_payload(snapshot)["statistics"]
+    rows: list[dict] = []
+    for row in statistics["correctness_rows"]:
+        rows.append({
+            "统计类型": "Correctness 分布",
+            "类别": row["correctness"],
+            "频次": row["count"],
+            "占有效评估比例": row["rate"],
+            "作为主问题数": "",
+            "关联判定": "",
+        })
+    for row in statistics["issue_type_rows"]:
+        rows.append({
+            "统计类型": "Issue Type 分布",
+            "类别": row["issue_type"],
+            "频次": row["case_count"],
+            "占有效评估比例": row["rate"],
+            "作为主问题数": row["primary_count"],
+            "关联判定": "；".join(row["correctness"]),
+        })
+    if not rows:
+        rows.append({
+            "统计类型": "统计说明",
+            "类别": statistics["conclusion"],
+            "频次": "",
+            "占有效评估比例": "",
+            "作为主问题数": "",
+            "关联判定": "",
+        })
+    return rows
+
+
+def _display_percent(value: Any) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _operation_statistics_sheet(payload: dict) -> tuple[list[list[Any]], set[int], list[int]]:
+    """把统计 JSON 渲染为统计 Sheet 的矩阵、加粗行号和列宽。"""
+    statistics = payload["statistics"]
+    matrix: list[list[Any]] = [
+        ["任务类评估统计"],
+        ["数据集名称", payload.get("dataset_name") or ""],
+        ["数据集总量", statistics["total_cases"]],
+        ["有效评估数", statistics["valid_count"]],
+        ["评估失败数", statistics["failed_count"]],
+        ["待评估数", statistics["pending_count"]],
+        ["评估覆盖率", _display_percent(statistics["coverage_rate"])],
+        ["OK 率（有效评估口径）", _display_percent(statistics["ok_rate"])],
+        ["OK 率分母（有效评估数）", statistics["ok_rate_denominator"]],
+        [],
+        ["Correctness 分布"],
+        ["判定", "频次", "占有效评估比例"],
+    ]
+    for row in statistics["correctness_rows"]:
+        matrix.append([
+            row["correctness"],
+            row["count"],
+            _display_percent(row["rate"]),
+        ])
+    matrix.extend([
+        [],
+        ["Issue Type 分布"],
+        ["问题类型", "涉及 Case 数", "占有效 Case 比例", "作为主问题数", "关联判定"],
+    ])
+    if statistics["issue_type_rows"]:
+        for row in statistics["issue_type_rows"]:
+            matrix.append([
+                row["issue_type"],
+                row["case_count"],
+                _display_percent(row["rate"]),
+                row["primary_count"],
+                "；".join(row["correctness"]),
+            ])
+    else:
+        matrix.append(["暂无问题类型", 0, "0.00%", 0, ""])
+    matrix.extend([
+        [],
+        ["统计结论"],
+        [statistics["conclusion"]],
+        [],
+        ["口径说明"],
+        ["OK 率、Correctness 和问题类型占比均以具有合法 correctness 的全部有效评估 Case 为分母。同一 Case 的同一问题类型只计一次，问题类型占比之和可能超过 100%。"],
+    ])
+    # 行号从 1 开始，与 OOXML 一致。
+    bold_rows = {1, 11, 12, 17, 18, len(matrix) - 4, len(matrix) - 1}
+    return matrix, bold_rows, [34, 18, 20, 18, 24]
+
+
 def _format_ts(value) -> str:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
@@ -1894,8 +2018,20 @@ def build_xlsx(snapshot: dict, cfg: Any | None = None) -> bytes:
         zf.writestr("xl/workbook.xml", _workbook_xml(names))
         zf.writestr("xl/_rels/workbook.xml.rels", _workbook_rels(len(sheets)))
         zf.writestr("xl/styles.xml", _styles_xml())
-        for i, (_name, rows) in enumerate(sheets.items(), start=1):
-            zf.writestr(f"xl/worksheets/sheet{i}.xml", _sheet_xml(rows))
+        for i, (name, rows) in enumerate(sheets.items(), start=1):
+            if name == "统计分布" and snapshot.get("mode") == "operation":
+                statistics_payload = operation_statistics_payload(snapshot)
+                matrix, bold_rows, widths = _operation_statistics_sheet(
+                    statistics_payload
+                )
+                sheet_xml = _matrix_sheet_xml(
+                    matrix,
+                    bold_rows=bold_rows,
+                    widths=widths,
+                )
+            else:
+                sheet_xml = _sheet_xml(rows)
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", sheet_xml)
     return buf.getvalue()
 
 
@@ -2000,25 +2136,43 @@ def _styles_xml() -> str:
 def _sheet_xml(rows: list[dict]) -> str:
     headers = _headers(rows)
     table = [headers] + [[row.get(h) for h in headers] for row in rows]
+    return _matrix_sheet_xml(
+        table,
+        bold_rows={1},
+        widths=[_width(header) for header in headers],
+    )
+
+
+def _matrix_sheet_xml(
+    table: list[list[Any]],
+    *,
+    bold_rows: set[int] | None = None,
+    widths: list[int] | None = None,
+) -> str:
+    """生成支持标题、空行及多段表头的简单工作表。"""
+    bold_rows = bold_rows or set()
     rows_xml = []
     for r_idx, row in enumerate(table, start=1):
         cells = []
         for c_idx, value in enumerate(row, start=1):
             ref = f"{_col(c_idx)}{r_idx}"
-            style = ' s="1"' if r_idx == 1 else ""
+            style = ' s="1"' if r_idx in bold_rows else ""
             if (
-                r_idx > 1
-                and isinstance(value, (int, float))
+                isinstance(value, (int, float))
                 and not isinstance(value, bool)
                 and (not isinstance(value, float) or math.isfinite(value))
             ):
-                cells.append(f'<c r="{ref}"><v>{value}</v></c>')
+                cells.append(f'<c r="{ref}"{style}><v>{value}</v></c>')
             else:
                 cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t>{escape(_cell(value))}</t></is></c>')
         rows_xml.append(f'<row r="{r_idx}">{"".join(cells)}</row>')
+    max_columns = max((len(row) for row in table), default=0)
+    resolved_widths = list(widths or [])
+    if len(resolved_widths) < max_columns:
+        resolved_widths.extend([18] * (max_columns - len(resolved_widths)))
     cols = "".join(
-        f'<col min="{i}" max="{i}" width="{_width(h)}" customWidth="1"/>'
-        for i, h in enumerate(headers, start=1)
+        f'<col min="{i}" max="{i}" width="{width}" customWidth="1"/>'
+        for i, width in enumerate(resolved_widths[:max_columns], start=1)
     )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'

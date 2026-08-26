@@ -184,12 +184,96 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     assert "原始video_path" not in frames[0]
     assert frames[-1]["抽帧状态"] == "无抽帧结果"
 
-    assert set(sheets) == {"数据集明细", "逐题结果", "抽帧清单", "运行汇总"}
+    assert set(sheets) == {
+        "数据集明细",
+        "逐题结果",
+        "抽帧清单",
+        "运行汇总",
+        "统计分布",
+    }
     run_summary = sheets["运行汇总"][0]
     assert run_summary["total"] == 3
     assert run_summary["done"] == 1
     assert run_summary["failed"] == 1
     assert run_summary["pending"] == 1
+
+    statistics = sheets["统计分布"]
+    assert statistics[0] == {
+        "统计类型": "Correctness 分布",
+        "类别": "ok",
+        "频次": 1,
+        "占有效评估比例": 1.0,
+        "作为主问题数": "",
+        "关联判定": "",
+    }
+
+
+def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    snapshot = _snapshot(tmp_path)
+    content = history.build_xlsx(snapshot)
+    workbook_path = tmp_path / "operation.xlsx"
+    workbook_path.write_bytes(content)
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert "统计分布" in workbook.sheetnames
+    sheet = workbook["统计分布"]
+    values = [
+        [cell.value for cell in row]
+        for row in sheet.iter_rows()
+    ]
+    assert values[0][0] == "任务类评估统计"
+    assert ["Correctness 分布", None, None, None, None] in values
+    assert ["Issue Type 分布", None, None, None, None] in values
+    assert any(row[0] == "统计结论" for row in values)
+    assert any(
+        row[0] == "OK 率（有效评估口径）" and row[1] == "100.00%"
+        for row in values
+    )
+
+
+def test_operation_statistics_api_returns_excel_source_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    snapshot = _snapshot(tmp_path)
+    monkeypatch.setattr(server, "get_live_task", lambda _: None)
+    monkeypatch.setattr(server, "load_snapshot", lambda _: snapshot)
+
+    response = server.api_operation_statistics("task-1")
+    payload = json.loads(response.body)
+
+    assert payload["schema_version"] == 1
+    assert payload["task_id"] == "task-1"
+    assert payload["dataset_name"] == "operation_cases.jsonl"
+    assert payload["statistics"]["valid_count"] == 1
+    assert payload["statistics"]["ok_rate"] == 1.0
+    assert [
+        row["correctness"]
+        for row in payload["statistics"]["correctness_rows"]
+    ] == ["ok", "nok", "no_support", "others"]
+
+    download = server.api_operation_statistics("task-1", download=True)
+    assert download.media_type == "application/json"
+    assert "operation_cases_statistics.json" in unquote(
+        download.headers["content-disposition"]
+    )
+
+
+def test_operation_statistics_api_defers_multi_group_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    snapshot = _snapshot(tmp_path)
+    snapshot["options"] = {"operation_layout": "multi_group"}
+    monkeypatch.setattr(server, "get_live_task", lambda _: None)
+    monkeypatch.setattr(server, "load_snapshot", lambda _: snapshot)
+
+    with pytest.raises(server.HTTPException) as raised:
+        server.api_operation_statistics("task-1")
+
+    assert raised.value.status_code == 409
+    assert "多组评估" in str(raised.value.detail)
 
 
 def test_operation_export_cleanup_is_decoupled_from_other_modes(

@@ -88,6 +88,15 @@ createApp({
     const total = ref(0);
     const results = ref([]);
     const summary = ref(null);
+    const issueStatsExpanded = ref(false);
+    const operationStatistics = computed(() => {
+      if (isMultiGroupMode.value) return null;
+      return summary.value?.operation_statistics || null;
+    });
+    const visibleOperationIssueStats = computed(() => {
+      const rows = operationStatistics.value?.issue_type_rows || [];
+      return issueStatsExpanded.value ? rows : rows.slice(0, 10);
+    });
     const taskId = ref("");
     const loadedTaskOptions = ref({});
     const runError = ref("");
@@ -2179,6 +2188,9 @@ createApp({
     function exportXlsx() {
       window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
     }
+    function exportStatisticsJson() {
+      window.open(`/api/eval/${taskId.value}/statistics?download=true`);
+    }
     function exportFrames() {
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
@@ -2503,6 +2515,7 @@ createApp({
       providerMessage, providerError, onProviderChange, loadProviders, newProvider,
       editProvider, saveProvider, deleteProvider, testProvider,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
+      operationStatistics, visibleOperationIssueStats, issueStatsExpanded,
       runKind, rerunProgress, rerunTotal, rerunProgressIndices, progressView,
       hasRerunProgress, visibleProgressRows, selectedRerunIndices,
       selectedRerunCount, allPagedResultsSelected,
@@ -2518,7 +2531,7 @@ createApp({
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       operationGroups, groupAlignment, groupAligning, multiGroupColumns, multiGroupResult, displayArray, groupRoleLabel,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportStatisticsJson, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,
