@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
+from ..analysis.operation_comparison import compare_operation_batches
 from ..config import ExpertKnowledgeBase, load_config
 from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
 from ..media import extract_scene_keyframes, probe_duration
@@ -39,6 +40,7 @@ from ..table_dataset import convert_table
 from ..llm_stream import build_openai_client, stream_chat_completion
 from .parse_input import Mode, parse_jsonl, parse_text
 from .history import (
+    build_operation_comparison_xlsx,
     build_xlsx,
     delete_snapshot,
     export_rows,
@@ -48,6 +50,7 @@ from .history import (
     load_item_judge_calls,
     load_snapshot,
     operation_item_result_row,
+    operation_comparison_batch,
     operation_statistics_payload,
     rows_to_csv,
     rows_to_jsonl,
@@ -161,6 +164,11 @@ class OperationGroupsAlignReq(BaseModel):
 
 class HistoryNoteReq(BaseModel):
     note: str = ""
+
+
+class OperationHistoryComparisonReq(BaseModel):
+    task_ids: list[str]
+    baseline_task_id: str
 
 
 class RerunReq(BaseModel):
@@ -1130,6 +1138,76 @@ def api_history_detail(task_id: str, compact: bool = False):
     if not data:
         raise HTTPException(404, "task not found")
     return snapshot_payload(data, compact=compact)
+
+
+def _operation_history_comparison_payload(
+    request: OperationHistoryComparisonReq,
+    *,
+    include_union_rows: bool = False,
+) -> dict:
+    task_ids = [str(task_id).strip() for task_id in request.task_ids]
+    if not 2 <= len(task_ids) <= 5:
+        raise HTTPException(422, "请选择 2～5 个已完成的任务类历史批次")
+    if not all(task_ids) or len(set(task_ids)) != len(task_ids):
+        raise HTTPException(422, "历史批次不能为空或重复选择")
+    if request.baseline_task_id not in task_ids:
+        raise HTTPException(422, "对照组必须包含在已选历史批次中")
+
+    batches = []
+    for task_id in task_ids:
+        live = get_live_task(task_id)
+        data = task_to_snapshot(live) if live else load_snapshot(task_id)
+        if not data:
+            raise HTTPException(404, f"历史任务不存在：{task_id}")
+        if data.get("status") != "done":
+            raise HTTPException(409, f"只能对比已完成任务：{task_id}")
+        try:
+            batches.append(operation_comparison_batch(data))
+        except ValueError as exc:
+            raise HTTPException(409, f"{task_id}：{exc}") from exc
+    try:
+        return compare_operation_batches(
+            batches,
+            baseline_task_id=request.baseline_task_id,
+            include_union_rows=include_union_rows,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/operation/history-comparison")
+def api_operation_history_comparison(request: OperationHistoryComparisonReq):
+    """生成历史任务类批次的确定性配对对比 JSON。"""
+    return _operation_history_comparison_payload(request)
+
+
+@app.post("/api/operation/history-comparison/export")
+def api_operation_history_comparison_export(
+    request: OperationHistoryComparisonReq,
+):
+    """导出历史任务类批次对比 XLSX。"""
+    payload = _operation_history_comparison_payload(
+        request,
+        include_union_rows=True,
+    )
+    content = build_operation_comparison_xlsx(payload)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    baseline_name = _download_stem(
+        str(payload.get("baseline_name") or "operation"),
+        "operation",
+    )
+    utf8_name = f"{baseline_name}_history_compare_{timestamp}.xlsx"
+    ascii_name = f"operation_history_compare_{timestamp}.xlsx"
+    return Response(
+        content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+            ),
+        },
+    )
 
 
 @app.delete("/api/history/{task_id}")

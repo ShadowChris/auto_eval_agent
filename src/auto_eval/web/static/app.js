@@ -126,6 +126,17 @@ createApp({
     const historyItems = ref([]);
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
+    const comparisonSelectedItems = ref({});
+    const comparisonBaselineTaskId = ref("");
+    const historyComparison = ref(null);
+    const historyComparisonLoading = ref(false);
+    const historyComparisonError = ref("");
+    const comparisonSelectedList = computed(
+      () => Object.values(comparisonSelectedItems.value),
+    );
+    const comparisonSelectedCount = computed(
+      () => comparisonSelectedList.value.length,
+    );
     const loadingHistory = ref(false);
     const loadingHistoryTaskId = ref("");
     const historyTotal = ref(0);
@@ -2056,7 +2067,165 @@ createApp({
         results.value = [];
         summary.value = null;
       }
+      if (comparisonSelectedItems.value[id]) {
+        const next = { ...comparisonSelectedItems.value };
+        delete next[id];
+        comparisonSelectedItems.value = next;
+        if (comparisonBaselineTaskId.value === id) {
+          comparisonBaselineTaskId.value = Object.keys(next)[0] || "";
+        }
+        historyComparison.value = null;
+      }
       await loadHistory();
+    }
+
+    function canCompareHistoryItem(item) {
+      return item?.mode === "operation"
+        && item?.operation_layout !== "multi_group"
+        && item?.status === "done";
+    }
+
+    function isHistoryComparisonSelected(taskId) {
+      return Boolean(comparisonSelectedItems.value[taskId]);
+    }
+
+    function toggleHistoryComparisonItem(item, checked) {
+      const next = { ...comparisonSelectedItems.value };
+      if (checked) {
+        if (!canCompareHistoryItem(item)) return;
+        if (!next[item.task_id] && Object.keys(next).length >= 5) {
+          alert("第一版最多选择 5 个历史批次进行对比");
+          return;
+        }
+        next[item.task_id] = {
+          task_id: item.task_id,
+          dataset_name: item.dataset_name || item.task_id,
+          created_at: item.created_at,
+        };
+      } else {
+        delete next[item.task_id];
+      }
+      comparisonSelectedItems.value = next;
+      const selectedIds = Object.keys(next);
+      if (!selectedIds.includes(comparisonBaselineTaskId.value)) {
+        comparisonBaselineTaskId.value = selectedIds[0] || "";
+      }
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function clearHistoryComparisonSelection() {
+      comparisonSelectedItems.value = {};
+      comparisonBaselineTaskId.value = "";
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function historyComparisonRequestBody() {
+      return {
+        task_ids: comparisonSelectedList.value.map((item) => item.task_id),
+        baseline_task_id: comparisonBaselineTaskId.value,
+      };
+    }
+
+    async function generateHistoryComparison() {
+      if (comparisonSelectedCount.value < 2 || !comparisonBaselineTaskId.value) return;
+      historyComparisonLoading.value = true;
+      historyComparisonError.value = "";
+      try {
+        const response = await fetch("/api/operation/history-comparison", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(historyComparisonRequestBody()),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        for (const pair of data.pairwise || []) {
+          pair._issue_query = "";
+          pair._issue_changed_only = false;
+          pair._issue_sort_by = "target_count";
+          pair._issue_sort_direction = "desc";
+        }
+        historyComparison.value = data;
+      } catch (error) {
+        historyComparison.value = null;
+        historyComparisonError.value = error?.message || "生成对比失败";
+      } finally {
+        historyComparisonLoading.value = false;
+      }
+    }
+
+    async function exportHistoryComparison() {
+      if (!historyComparison.value) return;
+      historyComparisonLoading.value = true;
+      historyComparisonError.value = "";
+      try {
+        const response = await fetch("/api/operation/history-comparison/export", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(historyComparisonRequestBody()),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get("Content-Disposition") || "";
+        const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        const filename = utf8Match
+          ? decodeURIComponent(utf8Match[1])
+          : "operation_history_compare.xlsx";
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        historyComparisonError.value = error?.message || "导出对比报告失败";
+      } finally {
+        historyComparisonLoading.value = false;
+      }
+    }
+
+    function comparisonCorrectnessCount(group, correctness) {
+      const row = (group?.statistics?.correctness_rows || []).find(
+        (item) => item.correctness === correctness,
+      );
+      return row?.count || 0;
+    }
+
+    function comparisonIssueRows(pair) {
+      const keyword = String(pair?._issue_query || "").trim().toLocaleLowerCase();
+      let rows = [...(pair?.issue_type_rows || [])];
+      if (keyword) {
+        rows = rows.filter((row) => String(row.issue_type || "").toLocaleLowerCase().includes(keyword));
+      }
+      if (pair?._issue_changed_only) {
+        rows = rows.filter((row) => Number(row.count_delta || 0) !== 0);
+      }
+      const sortBy = pair?._issue_sort_by || "target_count";
+      const direction = pair?._issue_sort_direction === "asc" ? 1 : -1;
+      const valueOf = (row) => {
+        if (sortBy === "abs_count_delta") return Math.abs(Number(row.count_delta || 0));
+        if (sortBy === "abs_rate_delta") return Math.abs(Number(row.rate_delta || 0));
+        if (sortBy === "issue_type") return String(row.issue_type || "");
+        return Number(row?.[sortBy] || 0);
+      };
+      rows.sort((left, right) => {
+        const leftValue = valueOf(left);
+        const rightValue = valueOf(right);
+        if (typeof leftValue === "string" || typeof rightValue === "string") {
+          const compared = String(leftValue).localeCompare(String(rightValue), "zh-CN");
+          if (compared) return compared * direction;
+        } else if (leftValue !== rightValue) {
+          return (leftValue - rightValue) * direction;
+        }
+        return String(left.issue_type || "").localeCompare(String(right.issue_type || ""), "zh-CN");
+      });
+      return rows;
     }
 
     function isActiveHistoryStatus(status) {
@@ -2518,6 +2687,8 @@ createApp({
       selectedRerunCount, allPagedResultsSelected,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, loadingHistoryTaskId, historyTotal, pageSize,
+      comparisonSelectedItems, comparisonSelectedList, comparisonSelectedCount,
+      comparisonBaselineTaskId, historyComparison, historyComparisonLoading, historyComparisonError,
       historyPage, historyPageSize, historyPageCount, historyJumpPage,
       opPage, opPageSize, opPageCount, opJumpPage,
       previewPage, previewPageCount, previewJumpPage,
@@ -2530,6 +2701,9 @@ createApp({
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit,
       trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
+      canCompareHistoryItem, isHistoryComparisonSelected, toggleHistoryComparisonItem,
+      clearHistoryComparisonSelection, generateHistoryComparison, exportHistoryComparison,
+      comparisonCorrectnessCount, comparisonIssueRows,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,
       isRerunSelected, setRerunSelected, togglePagedRerunSelection,

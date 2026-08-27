@@ -13,7 +13,7 @@ from typing import Any, Iterable
 OPERATION_CORRECTNESS = ("ok", "nok", "no_support", "others")
 
 
-def _issue_types(value: Any) -> list[str]:
+def normalize_operation_issue_types(value: Any) -> list[str]:
     if isinstance(value, str):
         values = re.split(r"[；;,，]", value)
     elif isinstance(value, (list, tuple, set)):
@@ -62,7 +62,7 @@ def summarize_operation_results(
     issue_case_counts: Counter[str] = Counter()
     issue_case_count = 0
     for row in valid:
-        raw_issues = _issue_types(row.get("issue_types"))
+        raw_issues = normalize_operation_issue_types(row.get("issue_types"))
         unique_issues = list(dict.fromkeys(raw_issues))
         if unique_issues:
             issue_case_count += 1

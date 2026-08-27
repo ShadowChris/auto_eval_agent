@@ -1523,6 +1523,45 @@ def operation_statistics_payload(snapshot: dict) -> dict:
     }
 
 
+def operation_comparison_batch(snapshot: dict) -> dict:
+    """将普通任务类历史快照转换为批次对比所需的紧凑输入。"""
+    if snapshot.get("mode") != "operation":
+        raise ValueError("仅任务类历史支持批次对比")
+    if (snapshot.get("options") or {}).get("operation_layout") == "multi_group":
+        raise ValueError("任务类多组评估历史暂不参与批次对比")
+    normalized = _with_operation_compat(snapshot)
+    items = normalized.get("items") or []
+    results = _results_with_identity(normalized)
+    aligned = _aligned_results(normalized, results)
+    export_rows = _operation_export_rows(aligned, items)
+    rows = []
+    for position, item in enumerate(items):
+        source = _source_data_for_item(item)
+        export_row = dict(export_rows[position]) if position < len(export_rows) else {}
+        export_row["case_id"] = item.get("case_id") or source.get("case_id") or ""
+        for video_url_key in ("录屏URL", "录屏url", "video_url", "视频链接"):
+            if source.get(video_url_key):
+                export_row["录屏URL"] = source[video_url_key]
+                break
+        rows.append({
+            "position": position,
+            "item_id": item.get("id") or f"q{position}",
+            "case_id": item.get("case_id") or source.get("case_id") or "",
+            "query": item.get("query") or item.get("question") or "",
+            "result": aligned[position] if position < len(aligned) else {},
+            "export": export_row,
+        })
+    backend = _judge_backend_summary(normalized)
+    return {
+        "task_id": normalized.get("task_id") or "",
+        "dataset_name": normalized.get("dataset_name") or "",
+        "created_at": normalized.get("created_at"),
+        "judge_provider": backend["judge_provider"],
+        "judge_model": backend["judge_model"],
+        "rows": rows,
+    }
+
+
 def _operation_statistics_export_rows(snapshot: dict) -> list[dict]:
     """统计分布的结构化行；XLSX 会将其渲染为同 Sheet 内的两张表。"""
     statistics = operation_statistics_payload(snapshot)["statistics"]
@@ -2027,6 +2066,153 @@ def build_xlsx(snapshot: dict, cfg: Any | None = None) -> bytes:
     return buf.getvalue()
 
 
+def build_operation_comparison_xlsx(payload: dict) -> bytes:
+    """导出统一交集统计和逐题横向并集。"""
+    groups = payload.get("groups") or []
+    overview = [
+        ["任务类历史批次对比"],
+        [
+            "统计口径",
+            "Correctness 与 Issue Type 仅统计所有选中批次共有且均有效的 Case；"
+            "相对对照组表按每个实验组与对照组各自的共同有效 Case 计算；"
+            "“其他”表示 nok、no_support 或 others。",
+        ],
+        ["全组共同 Case", payload.get("all_groups_common_matched_count", 0)],
+        ["全组共同有效 Case", payload.get("all_groups_common_valid_count", 0)],
+        [],
+        ["组别", "数据集", "task_id", "原始数据量", "共有有效数据量", "ok", "nok", "no_support", "others", "OK率"],
+    ]
+    for group in groups:
+        statistics = group.get("statistics") or {}
+        correctness = {
+            row.get("correctness"): row.get("count", 0)
+            for row in statistics.get("correctness_rows") or []
+        }
+        overview.append([
+            group.get("group_label") or "",
+            group.get("group_name") or "",
+            group.get("task_id") or "",
+            group.get("original_count", 0),
+            group.get("common_valid_count", 0),
+            correctness.get("ok", 0),
+            correctness.get("nok", 0),
+            correctness.get("no_support", 0),
+            correctness.get("others", 0),
+            _display_percent(statistics.get("ok_rate")),
+        ])
+    pair_header_row = len(overview) + 2
+    overview.extend([
+        [],
+        ["相对对照组的共同 Case 对比"],
+        ["对比关系", "共同 Case", "共同有效 Case", "对照组OK数", "对照组OK率", "实验组OK数", "实验组OK率", "OK率差值", "其他→OK", "OK→其他", "OK净变化"],
+    ])
+    for pair in payload.get("pairwise") or []:
+        overview.append([
+            f"{pair.get('baseline_label') or '对照组'} / {pair.get('target_label') or '实验组'}",
+            pair.get("matched_count", 0),
+            pair.get("valid_pair_count", 0),
+            pair.get("baseline_ok_count", 0),
+            _display_percent(pair.get("baseline_ok_rate")),
+            pair.get("target_ok_count", 0),
+            _display_percent(pair.get("target_ok_rate")),
+            _display_signed_percent(pair.get("ok_rate_delta")),
+            pair.get("to_ok_count", 0),
+            pair.get("from_ok_count", 0),
+            pair.get("net_ok_change", 0),
+        ])
+    overview.extend([[], ["统计结论"]])
+    overview.extend([
+        [line] for line in str(payload.get("conclusion") or "").splitlines()
+    ])
+
+    issue_rows = []
+    for pair in payload.get("pairwise") or []:
+        for row in pair.get("issue_type_rows") or []:
+            issue_rows.append({
+                "对比关系": f"{pair.get('baseline_label') or '对照组'} / {pair.get('target_label') or '实验组'}",
+                "实验组": pair.get("target_label") or "",
+                "共同有效Case": pair.get("valid_pair_count", 0),
+                "Issue Type": row.get("issue_type") or "",
+                "对照组频次": row.get("baseline_count", 0),
+                "对照组占比": _display_percent(row.get("baseline_rate")),
+                "实验组频次": row.get("target_count", 0),
+                "实验组占比": _display_percent(row.get("target_rate")),
+                "频次差值": row.get("count_delta", 0),
+                "占比差值": _display_signed_percent(row.get("rate_delta")),
+            })
+
+    detail_fields = (
+        "item_id",
+        "序号",
+        "case_id",
+        "query",
+        "sessionid",
+        "answer",
+        "context",
+        "is_low_level",
+        "correctness",
+        "issue_types",
+        "execution_routes",
+        "链路类型",
+        "rationale",
+        "分享链接",
+        "video_path",
+        "录屏URL",
+        "error",
+    )
+    union_rows = []
+    for row in payload.get("union_rows") or []:
+        output = {
+            "匹配键": row.get("match_key") or "",
+            "存在组数": row.get("present_group_count", 0),
+            "所有组共有": "是" if row.get("all_groups_present") else "否",
+        }
+        source_rows = row.get("group_rows") or {}
+        for group in groups:
+            source = source_rows.get(group.get("task_id"), {})
+            label = group.get("group_label") or ""
+            for field in detail_fields:
+                value = source.get(field, "")
+                if isinstance(value, (list, dict)):
+                    value = json.dumps(value, ensure_ascii=False)
+                output[f"{label}_{field}"] = value
+        union_rows.append(output)
+
+    sheets: list[tuple[str, str]] = [
+        ("对比概览", _matrix_sheet_xml(
+            overview,
+            bold_rows={1, 6, pair_header_row, pair_header_row + 1, len(overview) - len(str(payload.get("conclusion") or "").splitlines())},
+            widths=[22, 46, 22, 14, 16, 12, 12, 14, 12, 14, 14],
+        )),
+        ("Issue Type对比", _sheet_xml(issue_rows, auto_filter=True)),
+        ("逐题横向对比", _sheet_xml(union_rows)),
+    ]
+    return _build_xlsx_xml_sheets(sheets)
+
+
+def _display_signed_percent(value: Any) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{float(value) * 100:+.2f}pp"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _build_xlsx_xml_sheets(sheets: list[tuple[str, str]]) -> bytes:
+    names = [name for name, _xml in sheets]
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _content_types(len(sheets)))
+        zf.writestr("_rels/.rels", _root_rels())
+        zf.writestr("xl/workbook.xml", _workbook_xml(names))
+        zf.writestr("xl/_rels/workbook.xml.rels", _workbook_rels(len(sheets)))
+        zf.writestr("xl/styles.xml", _styles_xml())
+        for index, (_name, sheet_xml) in enumerate(sheets, start=1):
+            zf.writestr(f"xl/worksheets/sheet{index}.xml", sheet_xml)
+    return buf.getvalue()
+
+
 def _headers(rows: list[dict]) -> list[str]:
     keys: list[str] = []
     for row in rows:
@@ -2125,13 +2311,17 @@ def _styles_xml() -> str:
     )
 
 
-def _sheet_xml(rows: list[dict]) -> str:
+def _sheet_xml(rows: list[dict], *, auto_filter: bool = False) -> str:
     headers = _headers(rows)
     table = [headers] + [[row.get(h) for h in headers] for row in rows]
     return _matrix_sheet_xml(
         table,
         bold_rows={1},
         widths=[_width(header) for header in headers],
+        auto_filter_ref=(
+            f"A1:{_col(len(headers))}{len(table)}"
+            if auto_filter and headers else None
+        ),
     )
 
 
@@ -2140,6 +2330,7 @@ def _matrix_sheet_xml(
     *,
     bold_rows: set[int] | None = None,
     widths: list[int] | None = None,
+    auto_filter_ref: str | None = None,
 ) -> str:
     """生成支持标题、空行及多段表头的简单工作表。"""
     bold_rows = bold_rows or set()
@@ -2166,10 +2357,15 @@ def _matrix_sheet_xml(
         f'<col min="{i}" max="{i}" width="{width}" customWidth="1"/>'
         for i, width in enumerate(resolved_widths[:max_columns], start=1)
     )
+    auto_filter = (
+        f'<autoFilter ref="{escape(auto_filter_ref)}"/>'
+        if auto_filter_ref else ""
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         f"<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>"
+        f"{auto_filter}"
         "</worksheet>"
     )
 
