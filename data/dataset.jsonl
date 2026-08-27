@@ -1,8 +1,0 @@
-{"id":"q1","question":"中国最长的河流是哪一条？","has_ref":true,"reference":"长江","category":"事实","difficulty":"easy"}
-{"id":"q2","question":"计算 17 × 24 等于多少？","has_ref":true,"reference":"408","category":"计算","difficulty":"easy"}
-{"id":"q3","question":"请简述光合作用的主要过程。","has_ref":true,"reference":"绿色植物利用光能，在叶绿体中将二氧化碳和水合成有机物（如葡萄糖），同时释放氧气，分为光反应和暗反应两个阶段。","key_points":["光能","二氧化碳和水","有机物","氧气","叶绿体"],"category":"科普","difficulty":"medium"}
-{"id":"q4","question":"解释什么是递归，并举一个例子。","has_ref":true,"reference":"递归是函数直接或间接调用自身的编程技巧，必须要有终止条件以避免无限循环。例如计算阶乘：n 的阶乘等于 n 乘以 (n-1) 的阶乘，当 n<=1 时返回 1。","key_points":["调用自身","终止条件","例子"],"category":"编程","difficulty":"medium"}
-{"id":"q5","question":"把 'The quick brown fox' 翻译成中文。","has_ref":true,"reference":"敏捷的棕色狐狸","category":"翻译","difficulty":"easy"}
-{"id":"q6","question":"如果要给想去云南旅游的朋友规划 3 天大理行程，你会怎么安排？","has_ref":false,"category":"开放-规划","difficulty":"medium"}
-{"id":"q7","question":"你如何看待远程办公对团队协作的影响？","has_ref":false,"category":"开放-观点","difficulty":"hard"}
-{"id":"q8","question":"写一首关于春天的现代诗，不超过 4 行。","has_ref":false,"category":"开放-创作","difficulty":"medium"}

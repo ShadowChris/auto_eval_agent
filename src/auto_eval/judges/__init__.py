@@ -1,23 +1,12 @@
-"""盲评引擎：rubric / pairwise / 多裁判聚合 / 主席仲裁 / 联网工具。"""
-from .arbitrator import Arbitrator
-from .base import JudgeClient, JudgeReply
-from .ensemble import aggregate_pairs, aggregate_scores
-from .pairwise_judge import PairwiseJudge
-from .rubric_judge import RubricJudge, ensure_classified
-from .rich_content_judge import RichContentJudge, _format_visual_findings_for_rubric
-from .skill_router import SkillRouter
+"""评测引擎：垂域视觉评测 / 垂域视觉对比评测（裁判单轮直出）。"""
+from .base import JudgeClient
+from .rich_content_judge import RichContentJudge, rich_content_result_fields
 from .visual_compare_judge import VisualCompareJudge, visual_compare_result_fields
 
 __all__ = [
     "JudgeClient",
-    "JudgeReply",
-    "RubricJudge",
     "RichContentJudge",
+    "rich_content_result_fields",
     "VisualCompareJudge",
-    "PairwiseJudge",
-    "Arbitrator",
-    "SkillRouter",
-    "aggregate_scores",
-    "aggregate_pairs",
     "visual_compare_result_fields",
 ]

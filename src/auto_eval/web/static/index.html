@@ -79,15 +79,14 @@
       <div class="op-import">
         <div class="op-import-row">
           <label class="op-upload-btn">
-            <input type="file" accept=".jsonl,application/json" @change="onOpManifestFile" hidden>
-            导入{{ mode==='operation' ? '任务类' : mode==='compare' ? '垂域视觉对比' : '垂域视觉评测' }} JSONL
+            <input type="file" accept=".jsonl,.json,.csv,application/json,text/csv" @change="onOpManifestFile" hidden>
+            导入{{ mode==='compare' ? '垂域视觉对比' : '垂域视觉评测' }} JSONL / CSV
           </label>
-          <span v-if="opPreparing" class="running">正在解析 JSONL…</span>
+          <span v-if="opPreparing" class="running">正在解析…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
           <span v-if="datasetName" class="hint">数据集：{{ datasetName }}</span>
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
-        <p v-if="mode==='operation'" class="hint">示例：{"id":"op_001","query":"设置7点闹钟","context":"当前时间22:00","video_path":"data/videos/alarm.mp4","task_start_time":7,"task_end_time":28.5,"agent_statement":"已设置完成"}</p>
         <p v-if="mode==='compare'" class="hint">示例：{"id":"c001","query":"查询天气","context":"定位上海","video1":"./video_a.mp4","video2":"./video_b.mp4","context1":"产品A背景","answer1":"今天多云","context2":"产品B背景","answer2":"今天晴"}</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","task_start_time":0,"task_end_time":18.5}</p>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
@@ -98,9 +97,9 @@
           <span class="op-idx">题目 {{ entry.index+1 }}<template v-if="entry.item.id"> · {{ entry.item.id }}</template></span>
           <button v-if="opItems.length>1" @click="removeOpItem(entry.index)" class="btn-danger op-del">删除</button>
         </div>
-        <textarea v-model="entry.item.query" rows="2" :placeholder="mode==='operation' ? '操作意图(query)，如：设一个明天早上7点的闹钟' : '用户问题(query)，如：北京明天天气怎么样'"></textarea>
+        <textarea v-model="entry.item.query" rows="2" placeholder="用户问题(query)，如：北京明天天气怎么样"></textarea>
         <textarea v-model="entry.item.context" rows="2" placeholder="(可选) 可信背景(context)，如：当前时间为晚上10点；设备时区为北京时间"></textarea>
-        <input v-if="mode==='rich_content' || mode==='rich_content_quality'" v-model="entry.item.category" placeholder="(可选) 垂域 category，如 weather / music / sports" style="width:100%;box-sizing:border-box;margin-bottom:8px">
+        <input v-if="mode==='rich_content'" v-model="entry.item.category" placeholder="(可选) 垂域 category，如 weather / music / sports" style="width:100%;box-sizing:border-box;margin-bottom:8px">
         <div class="op-upload">
           <label class="op-upload-btn">
             <input type="file" accept="video/*" @change="onOpVideo($event, entry.index)" hidden>
@@ -112,8 +111,7 @@
           <span v-if="entry.item.uploadError" class="err">{{ entry.item.uploadError }}</span>
         </div>
         <div v-if="entry.item.videoPath" class="op-path">{{ entry.item.videoPath }}</div>
-        <textarea v-if="mode==='operation'" v-model="entry.item.answer" rows="1" placeholder="(可选) agent 自述，如「我已设好7点闹钟」—— 用于交叉验证是否只说不做"></textarea>
-        <textarea v-else v-model="entry.item.answer" rows="2" placeholder="(可选) answer_text，只辅助理解回答语义，不能证明画面中存在挂卡或蓝色链接"></textarea>
+        <textarea v-model="entry.item.answer" rows="2" placeholder="(可选) answer_text，只辅助理解回答语义，不能证明画面中存在挂卡或蓝色链接"></textarea>
       </div>
       <div class="pagination" v-if="opPageCount>1 && mode!=='compare'">
         <span class="page-size page-size-fixed">每页 {{ opPageSize }} 条</span>
@@ -130,43 +128,6 @@
       </div>
       <button v-if="mode!=='compare'" @click="addOpItem" class="op-add">+ 添加题目</button>
     </div>
-
-    <div v-else>
-      <textarea v-model="text" rows="7" :placeholder="placeholder"></textarea>
-      <div class="row">
-        <input type="file" @change="onFile" accept=".jsonl,.txt,.csv,.json">
-        <button @click="doParse" :disabled="!text">解析预览</button>
-        <span v-if="errors.length" class="err">⚠ {{ errors.length }} 处解析错误（见控制台）</span>
-        <span v-if="items.length" class="ok">✓ 识别 {{ items.length }} 题</span>
-      </div>
-      <details v-if="errors.length"><summary>错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
-      <details v-if="items.length" open>
-        <summary>预览（{{ items.length }} 题）</summary>
-        <div class="table-scroll">
-          <table class="grid auto-table preview-table">
-            <thead><tr><th>#</th><th v-for="k in previewKeys">{{ k }}</th></tr></thead>
-            <tbody>
-              <tr v-for="entry in pagedPreviewItems" :key="'preview-'+entry.index">
-                <td>{{ entry.index+1 }}</td>
-                <td v-for="k in previewKeys" :title="entry.item[k]">{{ trunc(entry.item[k]) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="pagination" v-if="previewPageCount>1">
-          <button @click="changePreviewPage(-1)" :disabled="previewPage<=1">上一页</button>
-          <template v-for="page in paginationPages(previewPage, previewPageCount)" :key="'preview-page-'+page">
-            <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
-            <button v-else class="page-number" :class="{active:page===previewPage}" @click="setTablePage('preview', page)">{{ page }}</button>
-          </template>
-          <button @click="changePreviewPage(1)" :disabled="previewPage>=previewPageCount">下一页</button>
-          <span class="page-jump">
-            跳至 <input v-model="previewJumpPage" type="number" min="1" :max="previewPageCount" @keyup.enter="jumpTablePage('preview')"> 页
-            <button @click="jumpTablePage('preview')">确定</button>
-          </span>
-        </div>
-      </details>
-    </div>
   </section>
 
   <section>
@@ -174,25 +135,13 @@
     <div class="row">
       <span class="lbl">裁判：</span>
       <label v-for="j in visibleJudges" class="chip">
-        <input type="checkbox" :value="j.name" v-model="selectedJudges" :disabled="mode==='operation'"> {{ j.display || j.name }}
+        <input type="checkbox" :value="j.name" v-model="selectedJudges"> {{ j.display || j.name }}
       </label>
-      <span v-if="mode==='operation'" class="hint">任务类固定使用终端用户裁判</span>
-    </div>
-    <div class="row" v-if="mode==='rich_content_quality'">
-      <span class="lbl">挂卡识别裁判：</span>
-      <select v-model="visualJudge">
-        <option v-for="j in judges" :value="j.name">{{ j.display || j.name }}</option>
-      </select>
-      <span class="hint">（与上方回答评测裁判可使用不同模型）</span>
-    </div>
-    <div class="row" v-if="mode==='online'">
-      <span class="lbl">被测模型：</span>
-      <select v-model="selectedModel"><option v-for="m in models">{{ m }}</option></select>
     </div>
     <div class="row">
       <span class="lbl">并发：</span>
       <input type="number" min="1" max="16" v-model.number="concurrency" style="width:70px">
-      <span class="hint">（裁判 agent loop 含联网查证，过高易触发限流）</span>
+      <span class="hint">（裁判单轮直出多模态调用，过高易触发限流）</span>
     </div>
     <div class="row">
       <span class="lbl">单题超时：</span>
@@ -300,11 +249,6 @@
       <span>样本量 {{ summary.total }}</span>
       <span>成功评测 {{ summary.done }}</span>
       <span v-if="summary.failed">失败 {{ summary.failed }}</span>
-      <span v-if="summary.problem_count!=null">出问题 {{ summary.problem_count }}</span>
-      <span v-if="summary.accuracy!=null">准确率 {{ (summary.accuracy*100).toFixed(0) }}%</span>
-      <span v-if="summary.mean_total!=null">平均总分 {{ summary.mean_total }} / {{ (summary.norm_mean*100).toFixed(0) }}%</span>
-      <span v-if="summary.judge_accuracy!=null">裁判判题准确率 {{ (summary.judge_accuracy*100).toFixed(0) }}% （{{ summary.meta_n }} 题有参考答案）</span>
-      <span v-if="summary.a_winrate!=null">A 胜率 {{ (summary.a_winrate*100).toFixed(0) }}%</span>
       <span v-if="summary.card_presence_rate!=null">挂卡出现率 {{ (summary.card_presence_rate*100).toFixed(0) }}%（{{ summary.card_total }} 张）</span>
       <span v-if="summary.superlink_presence_rate!=null">Superlink 出现率 {{ (summary.superlink_presence_rate*100).toFixed(0) }}%（观察到 {{ summary.superlink_total_observed }} 个）</span>
       <span v-if="summary.both_count!=null">挂卡与链接同现 {{ summary.both_count }} 条</span>
@@ -314,48 +258,6 @@
       <span v-if="summary.solved_ok_rate!=null">OK率 {{ (summary.solved_ok_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
     </div>
-    <details class="skill-breakdown" v-if="summary && summary.by_skill && summary.by_skill.overview && summary.by_skill.overview.length" open>
-      <summary>📊 按垂域分析（{{ summary.by_skill.overview.length }} 个垂域 · 维度问题阈值 ≤ {{ summary.by_skill.threshold }}）</summary>
-      <div ref="pieChart" style="width:100%;height:260px;"></div>
-      <p v-if="fallbackStat && fallbackStat.fbCount > 0" class="fallback-hint">
-        ⚠️ 共 {{ fallbackStat.total }} 题，其中 {{ fallbackStat.fbCount }} 题（{{ (fallbackStat.rate*100).toFixed(0) }}%）未命中明确垂域（落“通用”）→ 建议检查 Skill 匹配表覆盖度或预标 category
-      </p>
-      <div class="table-scroll">
-      <table class="grid auto-table">
-        <thead><tr><th>垂域</th><th>样本量</th><th>成功评测</th><th>出问题数</th><th>正确率</th><th>平均分</th><th>首要错因</th><th>低一致率</th></tr></thead>
-        <tbody>
-          <tr v-for="s in skillOverviewRows" :key="s.skill">
-            <td>{{ s.display }}</td>
-            <td>{{ s.n_items }}</td>
-            <td>{{ s.eval_n ?? s.n_items }}</td>
-            <td>{{ s.problem_count ?? 0 }}</td>
-            <td>{{ s.focal_right_rate != null ? (s.focal_right_rate*100).toFixed(0) + '%' : '—' }}</td>
-            <td>{{ s.focal_mean_total != null ? s.focal_mean_total.toFixed(2) : '—' }}</td>
-            <td>{{ s.first_cluster || '—' }}</td>
-            <td>{{ (s.low_agreement_rate*100).toFixed(0) + '%' }}</td>
-          </tr>
-        </tbody>
-      </table>
-      </div>
-      <div class="skill-chart-grid">
-        <template v-for="(s,i) in (summary.by_skill.sections||[])" :key="'sec-'+s.skill">
-          <div v-if="s.n_items>0 && Object.values(s.dim_problem_dist||{}).some(info => info.rate > 0)" class="skill-section">
-            <div :ref="el => setBarRef(el, i)" class="skill-chart"></div>
-            <div class="chart-actions">
-              <button
-                v-for="(info,dim) in (s.dim_problem_dist||{})"
-                v-show="info.rate > 0"
-                :key="dim"
-                class="drilldown-btn"
-                @click="drillDownDimension(s.skill, dim)"
-              >
-                查看「{{ dim }}」问题题目（{{ info.count ?? (info.item_ids||[]).length }}）
-              </button>
-            </div>
-          </div>
-        </template>
-      </div>
-    </details>
     <div ref="resultBrowser" class="result-browser">
       <div v-if="mode!=='compare'" class="skill-tabs">
         <button v-for="s in skillTabs" :key="s.key" :class="{active:activeSkill===s.key}" @click="selectSkill(s.key)">
@@ -364,21 +266,6 @@
       </div>
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
-        <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="correctnessFilter" @change="resetResultPage">
-          <option value="">全部判定</option>
-          <option value="right">{{ mode==='operation' ? '完成' : '正确' }}</option>
-          <option value="partial">{{ mode==='operation' ? '完成但有瑕疵' : '部分正确' }}</option>
-          <option value="wrong">{{ mode==='operation' ? '未完成' : '错误' }}</option>
-          <option value="unclear">{{ mode==='operation' ? '无法判断' : '不清楚' }}</option>
-        </select>
-        <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="problemDimFilter" @change="resetResultPage">
-          <option value="">全部维度</option>
-          <option v-for="d in rubricDims" :key="d" :value="d">{{ d }}存在问题</option>
-        </select>
-        <span v-if="problemDimFilter" class="active-filter">
-          正在查看「{{ problemDimFilter }}」问题题目
-          <button @click="clearDimensionDrillDown">清除</button>
-        </span>
         <span class="result-count">共 {{ filteredResults.length }} 条</span>
       </div>
       <div class="result-table-wrap">
@@ -392,13 +279,8 @@
           </colgroup>
           <thead>
             <tr>
-              <th :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}">#</th>
-              <th
-                v-for="(c,columnIndex) in resultCols"
-                :key="c.key"
-                :class="{'result-frozen-column':isFrozenResultColumn(c),'result-frozen-edge':mode==='operation' && c.key==='query'}"
-                :style="frozenResultColumnStyle(c,columnIndex)"
-              >{{ c.label }}</th>
+              <th>#</th>
+              <th v-for="c in resultCols" :key="c.key">{{ c.label }}</th>
               <th v-if="isVideoMode">原视频（MP4）</th>
               <th v-if="isVideoMode">抽帧结果（ZIP）</th>
               <th v-if="isVideoMode">轨迹数据（JSON）</th>
@@ -407,18 +289,16 @@
           <tbody>
             <template v-for="(r,i) in pagedResults" :key="r.index ?? i">
               <tr :class="{'result-error':r.error}">
-                <td :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}"><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
+                <td><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
                 <td
-                  v-for="(c,columnIndex) in resultCols"
+                  v-for="c in resultCols"
                   :key="c.key"
-                  :class="{'result-frozen-column':isFrozenResultColumn(c),'result-frozen-edge':mode==='operation' && c.key==='query'}"
-                  :style="frozenResultColumnStyle(c,columnIndex)"
-                  @mouseenter="showCellTooltip($event, cellTitle(r, c) || cell(r, c))"
+                  @mouseenter="showCellTooltip($event, cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
                   <div
                     class="cell-clamp"
-                    :class="{'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
+                    :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','superlink_suitability','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
@@ -435,9 +315,6 @@
                 </td>
               </tr>
               <tr v-if="r.error" class="result-error-detail"><td colspan="99">评估失败：{{ r.error }}</td></tr>
-              <tr v-if="r.tool_trace && r.tool_trace.length" class="trace">
-                <td colspan="99">🔍 裁判查证轨迹：{{ r.tool_trace.join('  |  ') }}</td>
-              </tr>
             </template>
           </tbody>
         </table>
@@ -476,6 +353,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260730_answer_text"></script>
+  <script type="module" src="/static/app.js?v=20260817_single_shot"></script>
 </body>
 </html>

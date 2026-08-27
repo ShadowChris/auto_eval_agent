@@ -1,4 +1,4 @@
-﻿"""Web 评测历史持久化与完整导出。
+"""Web 评测历史持久化与完整导出。
 
 这里刻意不用数据库：评测台是本地/轻量服务，JSON 快照足够支撑历史加载；
 XLSX 直接生成 OOXML，避免给项目额外引入 openpyxl / xlsxwriter 依赖。
@@ -6,6 +6,7 @@ XLSX 直接生成 OOXML，避免给项目额外引入 openpyxl / xlsxwriter 依�
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 import os
@@ -30,20 +31,57 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^0-9a-zA-Z_-]", "_", value)
 
 
+def _task_id_slug(task_id: str) -> str:
+    """task_id 的文件名安全形态；净化有损（如中文/符号 id）时追加短哈希。
+
+    不追加哈希的话，不同原始 id 净化后同名（如同长度中文 id），同一秒创建
+    的两个任务会生成相同 session_name、快照文件互相覆盖。
+    """
+    safe = _safe_name(task_id)
+    if safe != task_id:
+        digest = hashlib.sha1(task_id.encode("utf-8")).hexdigest()[:6]
+        safe = f"{safe}-{digest}"
+    return safe
+
+
 def make_session_name(created_at: float, mode: str, task_id: str) -> str:
     """生成可按文件名排序、同时能关联任务的稳定会话名。"""
     dt = datetime.fromtimestamp(created_at).astimezone()
-    return f"{dt:%Y%m%d_%H%M%S}_{_safe_name(mode)}_{_safe_name(task_id)}"
+    return f"{dt:%Y%m%d_%H%M%S}_{_safe_name(mode)}_{_task_id_slug(task_id)}"
+
+
+def _snapshot_task_id_matches(path: Path, task_id: str) -> bool:
+    """校验快照 JSON 内的 task_id 与请求的原始 id 一致。
+
+    _safe_name 会把非 [0-9a-zA-Z_-] 字符统一替换成 "_"：放开 task_id 字符集后，
+    不同原始 id 可能净化成同一文件名模式（如同长度中文 id）。glob/旧文件名命中
+    后必须读字段校验，只认真正属于该 id 的快照；旧快照缺 task_id 字段时保留
+    原命中以兼容。
+    """
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.loads(f.read())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    stored = data.get("task_id")
+    return stored is None or stored == task_id
 
 
 def _find_task_path(task_id: str) -> Path:
-    """优先查旧文件名，再查带时间前缀的新文件名。"""
-    safe = _safe_name(task_id)
-    legacy = HISTORY_DIR / f"{safe}.json"
-    if legacy.exists():
+    """优先查旧文件名，再查带时间前缀的新文件名。
+
+    新文件名用 _task_id_slug（有损 id 带短哈希），命中后均校验快照内的
+    task_id 字段（见 _snapshot_task_id_matches）；全部不一致时返回不存在
+    的旧路径，调用方按"任务不存在"处理。
+    """
+    legacy = HISTORY_DIR / f"{_safe_name(task_id)}.json"
+    if legacy.exists() and _snapshot_task_id_matches(legacy, task_id):
         return legacy
-    matches = sorted(HISTORY_DIR.glob(f"*_{safe}.json"))
-    return matches[-1] if matches else legacy
+    matches = sorted(HISTORY_DIR.glob(f"*_{_task_id_slug(task_id)}.json"))
+    verified = [p for p in matches if _snapshot_task_id_matches(p, task_id)]
+    return verified[-1] if verified else legacy
 
 
 def _task_path(task_id: str, session_name: str = "") -> Path:
@@ -82,7 +120,8 @@ def save_task(task, *, max_attempts: int = 3) -> bool:
     """
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     path = _task_path(task.id, getattr(task, "session_name", ""))
-    content = json.dumps(task_to_snapshot(task), ensure_ascii=False, indent=2)
+    snapshot = task_to_snapshot(task)
+    content = json.dumps(snapshot, ensure_ascii=False, indent=2)
     last_error: OSError | None = None
     attempts = max(1, max_attempts)
     for attempt in range(attempts):
@@ -90,6 +129,7 @@ def save_task(task, *, max_attempts: int = 3) -> bool:
         try:
             tmp.write_text(content, encoding="utf-8")
             os.replace(tmp, path)
+            _write_meta(path, _snapshot_meta_row(snapshot, path))
             return True
         except OSError as exc:
             last_error = exc
@@ -119,51 +159,122 @@ def load_snapshot(task_id: str) -> dict | None:
 
 
 def delete_snapshot(task_id: str) -> bool:
-    """删除某次评测的快照文件。返回是否删除成功（文件存在且已删除）。"""
+    """删除某次评测的快照文件（连同摘要侧车）。返回是否删除成功。"""
     path = _find_task_path(task_id)
     if not path.exists():
         return False
     try:
         path.unlink()
-        return True
     except Exception:
         return False
+    try:
+        _meta_path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
+    return True
+
+
+_META_SUFFIX = ".meta.json"
+
+
+def _meta_path(path: Path) -> Path:
+    """快照 X.json 的摘要侧车路径（X.json.meta.json）。
+
+    侧车与主快照同名前缀，列表页只读它（几百字节）而不必把每个历史快照
+    全量 read_text + json.loads——快照随使用时间累积后那是数百 MB 级的
+    瞬时内存分配。侧车名以 ".meta.json" 结尾，_find_task_path 的
+    "*_{slug}.json" glob 不会误命中（结尾是 "." 不是 "_"）。
+    """
+    return path.with_name(path.name + _META_SUFFIX)
+
+
+def _apply_interrupted_status(status, error):
+    """盘上停在 pending/running 只可能是服务中断，列表统一改写为 error。"""
+    if status in {"pending", "running"}:
+        return "error", error or "服务中断，已保留中断前完成的评估结果"
+    return status, error
+
+
+def _snapshot_meta_row(data: dict, path: Path) -> dict:
+    """从完整快照 dict 计算历史列表行（摘要字段），存原始 status/error。"""
+    task_id = data.get("task_id") or path.stem
+    created_at = data.get("created_at")
+    session_name = data.get("session_name") or (
+        path.stem
+        if path.stem != _safe_name(str(task_id))
+        else make_session_name(float(created_at or 0), data.get("mode") or "unknown", str(task_id))
+    )
+    return {
+        "task_id": task_id,
+        "session_name": session_name,
+        "dataset_name": data.get("dataset_name") or "",
+        "note": data.get("note") or "",
+        "mode": data.get("mode"),
+        "status": data.get("status"),
+        "total": len(data.get("items") or []),
+        "done": len([r for r in (data.get("results") or []) if "error" not in r]),
+        "created_at": created_at,
+        "updated_at": data.get("updated_at") or data.get("created_at"),
+        "error": data.get("error"),
+        "preview": _preview(data),
+        "meta_version": 1,
+    }
+
+
+def _write_meta(snapshot_path: Path, row: dict) -> None:
+    """原子写摘要侧车；best-effort，失败仅告警不影响主快照。"""
+    meta_path = _meta_path(snapshot_path)
+    tmp = meta_path.with_name(f".{meta_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(tmp, meta_path)
+    except OSError as exc:
+        logger.warning(
+            "历史摘要侧车写入失败: %s error=%s", meta_path.name, exc
+        )
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _load_meta_row(path: Path) -> dict | None:
+    """读单个快照的列表行：优先侧车；miss/损坏则全量读主快照一次并补写
+    侧车（legacy 自愈）；两者都不可读返回 None（跳过该条）。"""
+    row: dict | None = None
+    meta_path = _meta_path(path)
+    if meta_path.exists():
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                row = data
+        except Exception:
+            row = None
+    if row is None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        row = _snapshot_meta_row(data, path)
+        _write_meta(path, row)
+    row.pop("meta_version", None)  # 版本号只落侧车，响应形状与旧实现一致
+    status, error = _apply_interrupted_status(row.get("status"), row.get("error"))
+    row["status"] = status
+    row["error"] = error
+    return row
 
 
 def list_snapshots(limit: int = 50) -> list[dict]:
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
     for path in HISTORY_DIR.glob("*.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        if path.name.endswith(_META_SUFFIX):
             continue
-        status = data.get("status")
-        error = data.get("error")
-        if status in {"pending", "running"}:
-            status = "error"
-            error = error or "服务中断，已保留中断前完成的评估结果"
-        task_id = data.get("task_id") or path.stem
-        created_at = data.get("created_at")
-        session_name = data.get("session_name") or (
-            path.stem
-            if path.stem != _safe_name(str(task_id))
-            else make_session_name(float(created_at or 0), data.get("mode") or "unknown", str(task_id))
-        )
-        rows.append({
-            "task_id": task_id,
-            "session_name": session_name,
-            "dataset_name": data.get("dataset_name") or "",
-            "note": data.get("note") or "",
-            "mode": data.get("mode"),
-            "status": status,
-            "total": len(data.get("items") or []),
-            "done": len([r for r in (data.get("results") or []) if "error" not in r]),
-            "created_at": created_at,
-            "updated_at": data.get("updated_at") or data.get("created_at"),
-            "error": error,
-            "preview": _preview(data),
-        })
+        row = _load_meta_row(path)
+        if row is not None:
+            rows.append(row)
     rows.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
     return rows[:limit]
 
@@ -195,49 +306,37 @@ def snapshot_payload(data: dict) -> dict:
     }
 
 
-def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]:
+def export_rows(snapshot: dict) -> dict[str, list[dict]]:
     """把一次评测拆成多个 Sheet 的行数据。
 
     ``数据集明细`` 与 ``逐题结果`` 都以原始 items 为主表，严格按输入顺序
     一一对齐。并发评测导致的完成顺序变化不会影响导出；失败或待评估条目
     仍占据原行，只将评分字段留空。
 
-    逐题结果按维度展开成独立列（维度_X / 理由_X），CSV 与 XLSX 概览
-    sheet 均走此格式；非 compare 模式下仍按垂域分 sheet，便于筛选分析。
-    传入 cfg 时，会按 skill 配置保留完整的维度列，N/A 的维度也会导出并在单元格填"N/A"。
+    rich_content 与 compare 均按对外定名列导出（同时供单条结果查询复用）；
+    其余（已删模式的旧历史快照）按维度展开成独立列（维度_X / 理由_X）兜底。
     """
     results = _results_with_identity(snapshot)
     aligned_results = _aligned_results(snapshot, results)
     summary = snapshot.get("summary") or {}
-    by_skill = summary.get("by_skill") if isinstance(summary.get("by_skill"), dict) else {}
-    overview = by_skill.get("overview") or []
-    sections = by_skill.get("sections") or []
     mode = snapshot.get("mode")
 
+    if mode == "rich_content":
+        result_rows = _rich_content_export_rows(aligned_results)
+    elif mode == "compare":
+        result_rows = _visual_compare_export_rows(aligned_results)
+    else:
+        result_rows = _result_rows(aligned_results)
     rows: dict[str, list[dict]] = {
         "数据集明细": _dataset_rows(snapshot),
-        "逐题结果": _result_rows_compact(
-            aligned_results,
-            _all_dim_names(results, cfg),
-        ),
+        "逐题结果": result_rows,
     }
-    if mode == "rich_content":
-        # 垂域视觉评测：使用中文列名并按固定顺序导出
-        rows["逐题结果"] = _rich_content_export_rows(aligned_results)
     frame_rows = _frame_manifest_rows(snapshot)
     if frame_rows:
         rows["抽帧清单"] = frame_rows
     rows["运行信息"] = [_run_info(snapshot)]
-    if mode == "compare":
-        rows["逐题结果"] = _visual_compare_export_rows(aligned_results)
-    else:
-        for name, skill_rows, dim_names in _per_skill_sheets(results, cfg):
-            rows[name] = _result_rows(skill_rows, dim_names)
-    rows["垂域总览"] = overview
-    rows["维度问题占比"] = _dim_problem_rows(sections)
-    rows["图表数据"] = _chart_rows(summary)
     if summary:
-        rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_skill"})]
+        rows["汇总指标"] = [_flatten_dict(summary, skip_keys={"by_category"})]
     return rows
 
 
@@ -322,33 +421,31 @@ _RUNTIME_ITEM_FIELDS = {
     "source_data",
 }
 
-# 垂域视觉评测（rich_content）Excel/CSV 导出列：与前端展示一致，按此顺序输出
+# 垂域视觉评测（rich_content）Excel/CSV 导出列：按此顺序输出。
+# query_id / 垂域分类 / 卡片存在情况 / correctness / error_type 为外部对接定名；
+# Superlink 合适度、回答覆盖、耗时不再导出。
 _RICH_CONTENT_EXPORT_COLUMNS: list[tuple[str, str]] = [
-    ("item_id", "题号"),
+    ("item_id", "query_id"),
     ("query", "Query"),
     ("context", "context"),
-    ("category_display", "垂域"),
+    ("category_display", "垂域分类"),
     ("answer_text", "answer_text"),
-    ("card_presence_label", "是否有卡片"),
+    ("card_presence_label", "卡片存在情况"),
     ("card_count", "卡片数量"),
     ("card_types", "卡片种类"),
     ("card_contents", "卡片内容"),
-    ("superlink_presence_label", "Superlink是否存在"),
+    ("superlink_presence_label", "Superlink存在情况"),
     ("superlink_count", "Superlink数量"),
     ("superlink_texts", "Superlink文字"),
     ("card_suitability", "卡片是否合适"),
     ("card_suitability_reason", "卡片不合适原因"),
-    ("superlink_suitability", "Superlink是否合适"),
-    ("superlink_suitability_reason", "Superlink不合适原因"),
-    ("answer_coverage", "回答覆盖"),
     ("needs_review_label", "识别是否需要人工复查"),
     ("review_reason", "需要复核的原因"),
-    ("problem_solved", "评价是否解决了用户问题"),
+    ("problem_solved", "correctness"),
     ("problem_solved_reason", "评价的原因"),
-    ("answer_issues", "回答的内容有什么问题"),
+    ("answer_issues", "error_type"),
     ("rationale", "识别结论"),
     ("analysis", "评价分析过程"),
-    ("latency_s", "耗时"),
 ]
 
 # 列表类字段取值后需要拼接为字符串
@@ -356,15 +453,13 @@ _RICH_CONTENT_LIST_FIELDS = {"card_types", "card_contents", "superlink_texts"}
 
 # 枚举值 → 展示值映射
 _RICH_CONTENT_DISPLAY_MAP: dict[str, dict[str, str]] = {
-    "answer_coverage": {"complete": "完整", "partial": "部分", "unclear": "不确定"},
     "card_suitability": {"ok": "OK", "nok": "NOK"},
-    "superlink_suitability": {"ok": "OK", "nok": "NOK"},
     "problem_solved": {"ok": "OK", "nok": "NOK", "need_review": "需复查"},
 }
 
 
 def _rich_content_export_rows(results: list[dict]) -> list[dict]:
-    """将 rich_content 结果行按导出列顺序重排并转换为中文列名，列与前端展示一致。"""
+    """将 rich_content 结果行按导出列顺序重排并转换为对外定名（见列定义注释）。"""
     export: list[dict] = []
     for row in results:
         export_row: dict[str, Any] = {}
@@ -513,28 +608,6 @@ def _frame_manifest_rows(snapshot: dict) -> list[dict]:
     return rows
 
 
-def _skill_dim_names(skill_name: str, cfg: Any | None) -> list[str] | None:
-    """根据垂域 skill 名返回该 skill 配置的一级维度名；cfg 未传时返回 None。"""
-    if cfg is None:
-        return None
-    skill = cfg.domain_skills.get(skill_name) if getattr(cfg, "domain_skills", None) else None
-    if skill and getattr(skill, "rubrics", None):
-        return [d.name for d in skill.rubrics]
-    if getattr(cfg, "rubrics", None):
-        return [d.name for d in cfg.rubrics]
-    return None
-
-
-def _all_dim_names(results: list[dict], cfg: Any | None) -> list[str] | None:
-    """取所有结果涉及 skill 的维度名并集；cfg 未传时返回 None。"""
-    if cfg is None or not results:
-        return None
-    names = set()
-    for r in results:
-        names.update(_skill_dim_names(r.get("category") or "default", cfg) or [])
-    return sorted(names) if names else None
-
-
 def _run_info(snapshot: dict) -> dict:
     created = snapshot.get("created_at")
     updated = snapshot.get("updated_at")
@@ -561,7 +634,7 @@ def _format_ts(value) -> str:
 def _visual_compare_export_rows(results: list[dict]) -> list[dict]:
     """垂域视觉对比导出：维度对比结论 + 内容冲突。"""
     _COMPARE_COLUMNS: list[tuple[str, str]] = [
-        ("item_id", "题号"),
+        ("item_id", "query_id"),
         ("query", "题目"),
         ("context", "背景"),
         ("context1", "产品1背景"),
@@ -575,7 +648,6 @@ def _visual_compare_export_rows(results: list[dict]) -> list[dict]:
         ("personalization", "个性化一致性"),
         ("has_conflict", "内容冲突"),
         ("rationale", "理由"),
-        ("latency_s", "耗时"),
     ]
     _DISPLAY_MAP = {
         "relevance": {"answer1": "产品1更优", "answer2": "产品2更优", "tie": "平手"},
@@ -594,115 +666,45 @@ def _visual_compare_export_rows(results: list[dict]) -> list[dict]:
                 row[label] = "N/A"
             elif key in _DISPLAY_MAP and v in _DISPLAY_MAP[key]:
                 row[label] = _DISPLAY_MAP[key][v]
-            elif key == "latency_s" and v is not None:
-                row[label] = f"{v}秒"
             else:
                 row[label] = v if v != "" else ""
         rows.append(row)
     return rows
 
 
-def _result_rows(results: list[dict], dim_names: list[str] | None = None) -> list[dict]:
-    """把维度展开成列；dim_names 为 None 时按每行实际 rubric 生成列。
+def result_export_row(mode: str, result: dict, index: int, items: list[dict]) -> dict:
+    """单条 result → 与 xlsx/CSV「逐题结果」同名列、同转换的行。
 
-    dim_names 传入后，所有行都会保留这些维度列（便于 Excel 统一表头）。
-    维度若在该行 na_dimensions 中则填 "N/A"，否则没有分数的填空字符串。
-    每个维度同时输出 分(维度_X) 和 打分理由(理由_X) 两列。
+    供 GET /api/eval/item/result 使用：键名与导出列完全一致，
+    多余字段不返回；失败结果额外附加 error。item_id/query 缺失时
+    按 index 从 items 回填，与导出的对齐逻辑保持一致。
     """
+    row = dict(result)
+    item = items[index] if 0 <= index < len(items) else {}
+    if not row.get("item_id"):
+        row["item_id"] = item.get("id") or f"q{index}"
+    if not row.get("query"):
+        row["query"] = item.get("query") or item.get("question") or ""
+    export = (
+        _visual_compare_export_rows([row])
+        if mode == "compare"
+        else _rich_content_export_rows([row])
+    )[0]
+    if result.get("error"):
+        export["error"] = result["error"]
+    return export
+
+
+def _result_rows(results: list[dict]) -> list[dict]:
+    """旧模式快照兜底：把维度展开成 分(维度_X) / 理由(理由_X) 两列。"""
     rows = []
     for r in results:
         row = dict(r)
         rubric = row.pop("rubric", {}) or {}
         reasons = row.pop("rubric_reasons", {}) or {}
-        na_dims = set(r.get("na_dimensions") or [])
-        if dim_names is None:
-            for dim, score in rubric.items():
-                row[f"维度_{dim}"] = score
-                row[f"理由_{dim}"] = reasons.get(dim, "")
-        else:
-            for dim in dim_names:
-                if dim in na_dims:
-                    row[f"维度_{dim}"] = "N/A"
-                    row[f"理由_{dim}"] = ""
-                else:
-                    row[f"维度_{dim}"] = rubric.get(dim, "")
-                    row[f"理由_{dim}"] = reasons.get(dim, "")
-        rows.append(row)
-    return rows
-
-
-def _result_rows_compact(results: list[dict], dim_names: list[str] | None = None) -> list[dict]:
-    """逐题概览：维度同样展开成独立列，便于 Excel/CSV 中按维度筛选、统计。"""
-    return _result_rows(results, dim_names)
-
-
-def _per_skill_sheets(results: list[dict], cfg: Any | None = None) -> list[tuple[str, list[dict], list[str] | None]]:
-    """按垂域分组返回 [(sheet名, 行数据, 该 sheet 的维度列表)]；
-    同垂域维度一致可展开列，评估失败的题单独成 sheet 并使用所有失败题涉及维度的并集。
-    """
-    groups: dict[str, dict] = {}
-    failed: list[dict] = []
-    for r in results:
-        if "error" in r:
-            failed.append(r)
-            continue
-        cat = r.get("category") or "default"
-        disp = r.get("category_display") or cat
-        groups.setdefault(cat, {"display": disp, "rows": []})["rows"].append(r)
-    out = []
-    for cat, g in sorted(groups.items(), key=lambda kv: -len(kv[1]["rows"])):
-        dim_names = _skill_dim_names(cat, cfg)
-        out.append((_sheet_name(f"逐题-{g['display']}"), g["rows"], dim_names))
-    if failed:
-        out.append(("评估失败", failed, _all_dim_names(failed, cfg)))
-    return out
-
-
-def _dim_problem_rows(sections: list[dict]) -> list[dict]:
-    rows: list[dict] = []
-    for section in sections:
-        for dim, info in (section.get("dim_problem_dist") or {}).items():
-            rows.append({
-                "skill": section.get("skill"),
-                "垂域": section.get("display"),
-                "维度": dim,
-                "问题题数": info.get("count", len(info.get("item_ids") or [])),
-                "占比": info.get("rate"),
-                "样例题号": ", ".join(map(str, info.get("item_ids") or [])),
-                "样本量": section.get("n_items"),
-            })
-    return rows
-
-
-def _chart_rows(summary: dict) -> list[dict]:
-    """Excel 图表专用数据源。
-
-    采用宽表而不是“图表/名称/值”长表，方便 OOXML chart 直接引用连续区域。
-    """
-    by_skill = summary.get("by_skill") if isinstance(summary.get("by_skill"), dict) else {}
-    pie_rows = [
-        {"垂域": row.get("display"), "样本量": row.get("n_items")}
-        for row in (by_skill.get("overview") or [])
-        if row.get("n_items", 0) > 0
-    ]
-    bar_rows = []
-    for section in by_skill.get("sections") or []:
-        for dim, info in (section.get("dim_problem_dist") or {}).items():
-            if (info.get("rate") or 0) <= 0:
-                continue
-            bar_rows.append({
-                "维度问题": f"{section.get('display')} - {dim}",
-                "占比": info.get("rate"),
-                "问题题数": info.get("count"),
-            })
-
-    rows = []
-    for i in range(max(len(pie_rows), len(bar_rows))):
-        row = {}
-        if i < len(pie_rows):
-            row.update(pie_rows[i])
-        if i < len(bar_rows):
-            row.update(bar_rows[i])
+        for dim, score in rubric.items():
+            row[f"维度_{dim}"] = score
+            row[f"理由_{dim}"] = reasons.get(dim, "")
         rows.append(row)
     return rows
 
@@ -925,13 +927,13 @@ def load_item_judge_calls(
     }
 
 
-def build_xlsx(snapshot: dict, cfg: Any | None = None) -> bytes:
+def build_xlsx(snapshot: dict) -> bytes:
     """生成 xlsx（纯数据 sheet，不含图表）。
 
-    手写 OOXML chart 易被 Excel 判"需修复"且样式差，故不再导出图表——
-    图表请看 web 端 ECharts；如需在 Excel 画图，用"图表数据"sheet 自行插入。
+    手写 OOXML chart 易被 Excel 判"需修复"且样式差，故只导出数据；
+    如需图表，用导出的汇总数据在 Excel 中自行插入。
     """
-    sheets = {name: rows for name, rows in export_rows(snapshot, cfg).items() if rows}
+    sheets = {name: rows for name, rows in export_rows(snapshot).items() if rows}
     if not sheets:
         sheets = {"逐题结果": []}
 
@@ -1074,118 +1076,6 @@ def _sheet_xml(rows: list[dict]) -> str:
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         f"<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>"
         "</worksheet>"
-    )
-
-
-
-def _sheet_drawing_rels() -> str:
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" '
-        'Target="../drawings/drawing1.xml"/>'
-        '</Relationships>'
-    )
-
-
-def _drawing_rels() -> str:
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>'
-        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart2.xml"/>'
-        '</Relationships>'
-    )
-
-
-def _drawing_xml() -> str:
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
-        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-        f'{_chart_anchor("rId1", 0, 1, 9, 19, "垂域样本分布")}'
-        f'{_chart_anchor("rId2", 10, 1, 23, 19, "维度问题占比")}'
-        '</xdr:wsDr>'
-    )
-
-
-def _chart_anchor(rid: str, col1: int, row1: int, col2: int, row2: int, name: str) -> str:
-    return (
-        '<xdr:twoCellAnchor>'
-        f'<xdr:from><xdr:col>{col1}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{row1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
-        f'<xdr:to><xdr:col>{col2}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{row2}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
-        '<xdr:graphicFrame macro="">'
-        '<xdr:nvGraphicFramePr>'
-        f'<xdr:cNvPr id="{1 if rid == "rId1" else 2}" name="{escape(name)}"/>'
-        '<xdr:cNvGraphicFramePr/>'
-        '</xdr:nvGraphicFramePr>'
-        '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>'
-        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
-        f'<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
-        f'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{rid}"/>'
-        '</a:graphicData></a:graphic>'
-        '</xdr:graphicFrame>'
-        '<xdr:clientData/>'
-        '</xdr:twoCellAnchor>'
-    )
-
-
-def _quoted_sheet(name: str) -> str:
-    return "'" + name.replace("'", "''") + "'"
-
-
-def _doughnut_chart_xml(data_sheet: str, title: str) -> str:
-    sh = _quoted_sheet(data_sheet)
-    cats = f"{sh}!$A$2:$A$500"
-    vals = f"{sh}!$B$2:$B$500"
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
-        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
-        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        '<c:chart>'
-        f'{_chart_title(title)}'
-        '<c:plotArea><c:layout/><c:doughnutChart><c:varyColors val="1"/>'
-        '<c:ser><c:idx val="0"/><c:order val="0"/>'
-        f'<c:cat><c:strRef><c:f>{escape(cats)}</c:f></c:strRef></c:cat>'
-        f'<c:val><c:numRef><c:f>{escape(vals)}</c:f></c:numRef></c:val>'
-        '</c:ser><c:firstSliceAng val="270"/><c:holeSize val="55"/></c:doughnutChart></c:plotArea>'
-        '<c:legend><c:legendPos val="r"/><c:layout/></c:legend><c:plotVisOnly val="1"/>'
-        '</c:chart></c:chartSpace>'
-    )
-
-
-def _bar_chart_xml(data_sheet: str, title: str) -> str:
-    sh = _quoted_sheet(data_sheet)
-    cats = f"{sh}!$C$2:$C$500"
-    vals = f"{sh}!$D$2:$D$500"
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
-        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
-        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        '<c:chart>'
-        f'{_chart_title(title)}'
-        '<c:plotArea><c:layout/><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/>'
-        '<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>问题占比</c:v></c:tx>'
-        f'<c:cat><c:strRef><c:f>{escape(cats)}</c:f></c:strRef></c:cat>'
-        f'<c:val><c:numRef><c:f>{escape(vals)}</c:f></c:numRef></c:val>'
-        '</c:ser><c:axId val="123456"/><c:axId val="123457"/></c:barChart>'
-        '<c:catAx><c:axId val="123456"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
-        '<c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="123457"/><c:crosses val="autoZero"/></c:catAx>'
-        '<c:valAx><c:axId val="123457"/><c:scaling><c:orientation val="minMax"/><c:max val="1"/><c:min val="0"/></c:scaling>'
-        '<c:axPos val="l"/><c:numFmt formatCode="0%" sourceLinked="0"/><c:majorGridlines/><c:tickLblPos val="nextTo"/>'
-        '<c:crossAx val="123456"/><c:crosses val="autoZero"/></c:valAx>'
-        '</c:plotArea><c:legend><c:legendPos val="b"/><c:layout/></c:legend><c:plotVisOnly val="1"/>'
-        '</c:chart></c:chartSpace>'
-    )
-
-
-def _chart_title(title: str) -> str:
-    return (
-        '<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN"/>'
-        f'<a:t>{escape(title)}</a:t>'
-        '</a:r></a:p></c:rich></c:tx><c:layout/></c:title>'
     )
 
 

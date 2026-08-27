@@ -32,7 +32,7 @@ def test_rich_content_jsonl_parses_video_manifest() -> None:
     content = "\n".join([
         '{"id":"rich_1","query":"北京明天天气","context":"当前地点北京",'
         '"video_path":"data/weather.mp4","category":"weather",'
-        '"answer_text":"北京明天晴","content_start_time":0,"content_end_time":12.5,'
+        '"answer_text":"北京明天晴","task_start_time":0,"task_end_time":12.5,'
         '"expected_visual":{"card_count":1,"superlink_count":2}}',
         '{"id":"rich_2","question":"周杰伦有哪些歌","video_path":"data/music.mp4"}',
     ])
@@ -47,8 +47,8 @@ def test_rich_content_jsonl_parses_video_manifest() -> None:
         "id": "rich_1",
         "video_path": "data/weather.mp4",
         "source_line": 1,
-        "content_start_time": 0.0,
-        "content_end_time": 12.5,
+        "task_start_time": 0.0,
+        "task_end_time": 12.5,
         "category": "weather",
         "answer_text": "北京明天晴",
         "expected_visual": {"card_count": 1, "superlink_count": 2},
@@ -65,7 +65,7 @@ def test_rich_content_jsonl_rejects_invalid_rows() -> None:
     content = "\n".join([
         '{"query":"missing video"}',
         '{"query":"bad answer","video_path":"a.mp4","answer_text":42}',
-        '{"query":"bad times","video_path":"b.mp4","content_start_time":5,"content_end_time":5}',
+        '{"query":"bad times","video_path":"b.mp4","task_start_time":5,"task_end_time":5}',
     ])
 
     items, errors = parse_jsonl(content, "rich_content")
@@ -74,7 +74,40 @@ def test_rich_content_jsonl_rejects_invalid_rows() -> None:
     assert len(errors) == 3
     assert "缺少 video_path" in errors[0]
     assert "answer_text 必须是字符串" in errors[1]
-    assert "content_end_time 必须大于 content_start_time" in errors[2]
+    assert "task_end_time 必须大于 task_start_time" in errors[2]
+
+
+def test_rich_content_jsonl_accepts_legacy_content_time_fields() -> None:
+    """旧字段名 content_start_time/content_end_time 仍可解析，归一为 task_*。"""
+    content = (
+        '{"id":"rich_legacy","query":"旧字段","video_path":"data/weather.mp4",'
+        '"content_start_time":2,"content_end_time":8.5}'
+    )
+    items, errors = parse_jsonl(content, "rich_content")
+
+    assert errors == []
+    items[0].pop("source_data")
+    assert items[0]["task_start_time"] == 2.0
+    assert items[0]["task_end_time"] == 8.5
+    assert "content_start_time" not in items[0]
+    assert "content_end_time" not in items[0]
+
+
+def test_rich_content_jsonl_task_fields_take_precedence_over_legacy() -> None:
+    """task_* 与旧 content_* 同时存在时，以 task_* 为准。"""
+    content = (
+        '{"id":"rich_both","query":"双字段","video_path":"data/weather.mp4",'
+        '"task_start_time":1,"task_end_time":9,'
+        '"content_start_time":2,"content_end_time":8}'
+    )
+    items, errors = parse_jsonl(content, "rich_content")
+
+    assert errors == []
+    items[0].pop("source_data")
+    assert items[0]["task_start_time"] == 1.0
+    assert items[0]["task_end_time"] == 9.0
+    assert "content_start_time" not in items[0]
+    assert "content_end_time" not in items[0]
 
 
 def test_rich_content_text_input_requires_video_flow() -> None:
@@ -180,8 +213,8 @@ def test_prepare_rich_content_item_uses_profile_and_session_directory(
             "id": "rich_001",
             "query": "天气",
             "video_path": "data/answer.mp4",
-            "content_start_time": 1,
-            "content_end_time": 9,
+            "task_start_time": 1,
+            "task_end_time": 9,
         },
         profile=_profile(),
         session_name="20260723_120000_rich_content_abc",

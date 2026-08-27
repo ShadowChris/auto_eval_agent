@@ -1,4 +1,4 @@
-"""任务类（录屏）的混合关键帧抽取与帧编码。
+"""录屏视频的混合关键帧抽取与帧编码。
 
 流程：固定频率采样 + scene 候选 → UI 状态聚类 → 短暂弹窗保护 →
 任务结束点判断 → 强制首帧/任务结束帧/最终帧 → 最终严格去重。
@@ -28,7 +28,7 @@ DEFAULT_TASK_START_TIME = 7.0
 
 @dataclass(frozen=True)
 class KeyframeConfig:
-    """操作录屏关键帧算法配置。"""
+    """录屏关键帧算法配置。"""
 
     task_start_time: float = DEFAULT_TASK_START_TIME
     task_end_time: float | None = None
@@ -151,20 +151,35 @@ def scene_change_times(
         ]
     )
     try:
-        proc = subprocess.run(
+        # 逐行流式消费 stderr：showinfo 每个场景变化一行，长录屏可达数 MB~数十 MB，
+        # capture_output 整读会造成瞬态内存峰值。stdout 走 DEVNULL（-f null - 本无
+        # 输出），只保留 stderr 一条管道，避免双管道写满死锁。
+        proc = subprocess.Popen(
             command,
-            check=False,
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
         )
     except Exception:
         return []
-    return [
-        float(value)
-        for value in re.findall(r"pts_time:([0-9.]+)", proc.stderr or "")
-    ]
+    times: list[float] = []
+    try:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            times.extend(
+                float(value) for value in re.findall(r"pts_time:([0-9.]+)", line)
+            )
+    except Exception:
+        return []
+    finally:
+        try:
+            proc.stderr.close()
+        except Exception:
+            pass
+        proc.wait()
+    return times
 
 
 def _dedup(times: list[float], min_gap_s: float) -> list[float]:
@@ -939,7 +954,7 @@ def extract_scene_keyframes(
     config: KeyframeConfig | None = None,
     algorithm_version: str = KEYFRAME_ALGORITHM_VERSION,
 ) -> list[Path]:
-    """抽取操作录屏关键帧并返回有序图片路径。
+    """抽取录屏关键帧并返回有序图片路径。
 
     旧参数 ``max_frames/min_frames/threshold/min_gap_s/max_edge`` 保持兼容；
     ``min_frames`` 在新算法中不再强制均匀补帧。高级参数可通过

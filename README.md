@@ -1,20 +1,22 @@
-# auto-eval-agent · 自动评估与优化建议 Agent
+# auto-eval-agent · 垂域视觉评测 Web 评估台
 
-> 📖 **完整项目文档（推荐先读）**：[docs/项目文档.md](docs/项目文档.md) —— 详解盲评 agent loop、深度推演、事实核查协议、多裁判集成、成对比较、元评测等，看完即懂项目全貌。
+> 📖 模式详解见 [docs/垂域视觉评测.md](docs/垂域视觉评测.md)；[docs/项目文档.md](docs/项目文档.md) 是早期通用评测框架（盲评/多裁判/元评测）的历史文档，仅作背景参考，其中多数能力已下线。
 
-盲评 + 多裁判 + 元评测的 LLM 评测框架。支持批量批跑待评测 agent 与竞品（如豆包），对**混合评测集**（有/无参考答案）做盲评，并用参考答案在最后**校验评测 agent 本身**的可靠性。
+面向**录屏答题视频**的 LLM 评测工具，只保留两种评测模式、一位裁判：
 
-## 三条核心设计原则
+| 模式 | 说明 | 裁判 |
+| --- | --- | --- |
+| **垂域视觉评测**（`rich_content`） | 识别回答中的挂卡（天气/音乐等垂域卡片）与 Superlink，统计数量、判定适用性，标记需人工复核的条目 | 终端用户（`judge_2`） |
+| **垂域视觉对比评测**（`compare`） | 同一问题的两个回答视频，五维对比（相关性/安全/内容质量/需求闭环/个性化）+ 内容冲突检测 | 终端用户（`judge_2`） |
 
-1. **盲评**：被测模型只拿 `question+context`（绝不传参考答案）；裁判也不接收参考答案，靠 rubric + 多裁判 + 联网检索独立判断。
-2. **参考答案做元评测**：参考答案最后才出场，作为 ground truth 校验"评测 agent 本身准不准"（不是测被测模型）。
-3. **无参考答案题：模拟人工评测 + 补足人工缺点**——像一群不同背景的真人评测员那样评开放题，并用机制克服人工评测的固有问题（主观不一致、疲劳、知识盲区、位置/锚定偏差、规模小、不可复现）。
+裁判「终端用户」为单轮直出的多模态模型：`Qwen/Qwen3.5-397B-A17B`（SiliconFlow），`temperature=0 + seed=42` 保证复跑一致；一次生成 `<analysis>` 思考链 + 结论 JSON，不联网、不调工具。
 
 ## 数据流
 
 ```
-评测集 → [批跑] 被测模型盲答 → [盲评] 多裁判独立评判(可联网)
-       → [元评测] 用参考答案校验评测 agent → [分析] 对比/胜率/弱点 → [报告] A对比 + B可靠性
+JSONL（含 video_path / video1+video2）→ [抽帧] 场景切分 + 关键帧提取
+    → [裁判] 单轮多模态直出逐题评判 → [SSE] 前端实时出结果
+    → [导出] XLSX / 抽帧 zip / 单题 judge_calls JSON
 ```
 
 ---
@@ -22,17 +24,15 @@
 ## 安装
 
 ```powershell
-# 1. 安装依赖（Python 3.10+；web 组提供前端评估台）
+# 1. 安装依赖（Python 3.10+；web 组提供评估台前后端）
 pip install -e ".[dev,web]"
 
-# 2. 配置密钥
-cp .env.example .env                 # 填入 PROXY_API_KEY / TAVILY_API_KEY 等
+# 2. 配置密钥：项目根目录建 .env，至少填入
+#    SILICON_FLOW_API_KEY=...   # 裁判模型
 
-# 3. 编辑配置（按你的模型/裁判）
-#    config/models.yaml    被测模型（my_agent + 竞品）
-#    config/judges.yaml    裁判（model / persona / 启用哪些工具）
-#    config/rubrics.yaml   评测维度与权重
-#    data/dataset.jsonl    你的评测集（示例 schema 见 data/）
+# 3. 按需调整配置
+#    config/judges.yaml               裁判模型（单轮直出，不联网不调工具）
+#    config/visual_modes/rich_content.yaml   抽帧算法参数 + 垂域显示名映射（两种模式共用）
 ```
 
 > ⚠️ **环境注意**：本机若 `python`（hermes venv）与 `pip`（anaconda）不一致，下面所有启动命令请用 `& "D:\ProgramData\anaconda3\python.exe" -m ...`，否则报 `ModuleNotFoundError`。
@@ -43,63 +43,45 @@ cp .env.example .env                 # 填入 PROXY_API_KEY / TAVILY_API_KEY 等
 
 > 本项目**前后端一体**：FastAPI 后端同时托管前端页面（[web/static](src/auto_eval/web/static/)，Vue3 CDN、**无需构建**）。**启动 web 服务 = 前后端都起来了**，浏览器访问即可，没有独立的前端启动步骤。
 
-### 方式 A：Web 评估台（推荐，有界面）
-
 **启动**——在独立 PowerShell 终端运行，**保持窗口开着**：
 
 ```powershell
-cd auto_eval_agent
-$env:PYTHONPATH="D:\workspace\quick_test\auto_eval_agent\src"
-python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502
+cd auto_eval_agent-多轮稳定版
+$env:PYTHONPATH=".\src"
+python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8503
 ```
 
-看到 `Uvicorn running on http://0.0.0.0:8501` 后，浏览器打开 **http://localhost:8501** 。
+看到 `Uvicorn running on http://0.0.0.0:8503` 后，浏览器打开 **http://localhost:8503** 。
 
-界面支持多种模式（Tab 切换），包括垂域问答类、两回答对比、接模型在线评估、过程盲评和任务类（录屏）等；粘贴（`|||` 分隔）或上传 jsonl 批量输入，SSE 实时出结果，可导出 CSV/JSON。
+界面操作：选择评测模式 → 导入 JSONL（多轮会话可导入 CSV，按 `session_group` 串行、`turn_index` 排序）→ 选择裁判与并发数 → 开始评测，SSE 实时出结果，完成后可导出。
 
 **终止**：在该终端按 `Ctrl+C`。
 
-> 端口被占（进程没清干净）时强制清理 8502：
+> 端口被占（进程没清干净）时强制清理 8503：
 > ```powershell
-> Get-NetTCPConnection -LocalPort 8502 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+> Get-NetTCPConnection -LocalPort 8503 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 > ```
 
-### 方式 B：CLI（无界面，命令行一条龙）
+### 输入格式（JSONL，每行一题）
 
-```powershell
-# 小批量先跑通
-& "D:\ProgramData\anaconda3\python.exe" -m auto_eval.cli run -d data/dataset.jsonl --limit 20
-# 全量
-& "D:\ProgramData\anaconda3\python.exe" -m auto_eval.cli run -d data/dataset.jsonl
-```
-
-其他子命令：`eval-only`（复用已有答案只评测）、`list`（列历史运行）。CLI 跑完自动结束，无需单独终止。
-
-产物在 `runs/<run_id>/`：`answers/`（盲答）、`verdicts/`（盲评）、`meta/`（元评测）、`reports/`（A 对比报告 + B 可靠性报告，各含 md/json）。
+- **垂域视觉评测**：`query`（必填）、`video_path`（必填）、可选 `id` / `context`（可信背景条件，可写当前时间地点）/ `category`（垂域）/ `answer_text` / `task_start_time`+`task_end_time`（截取作答区间）。
+- **垂域视觉对比评测**：`query`、`video1`+`video2`（必填）、`answer1`+`answer2`、可选 `context` / `context1` / `context2`。
 
 ### 裁判明细日志（可选）
 
-在 `.env` 设 `AUTO_EVAL_JUDGE_TRACE=auto_eval_agent/runs/judge_calls.jsonl`，每次裁判评判的完整明细（每轮 LLM 响应、工具完整返回、对话历史）会追加到该文件，便于调试/审计。**不设则不记录、零开销**。详见 [项目文档 §9 Q7](docs/项目文档.md)。
+在 `.env` 设 `AUTO_EVAL_JUDGE_TRACE=runs/judge_calls.jsonl`，每次裁判评判的完整明细（LLM 响应、对话历史）会追加到该文件，便于调试/审计；前端也可按题导出 judge_calls。**不设则不记录、零开销**。
 
 ---
 
 ## 目录
 
-核心模块（完整说明见 [docs/项目文档.md](docs/项目文档.md)）：
-
-- `schema.py` 数据模型｜`dataset.py` 数据加载 + reference 隔离
-- `runners/` 可插拔模型适配（openai_compat / http / func / cli）
-- `batch/` 异步批跑 + 限流 + 重试 + 断点续跑
-- `judges/` 盲评引擎（rubric / pairwise / 多裁判集成 / 联网工具 / agent loop）
-- `meta/` 元评测（客观真值 + 裁判校准）
-- `analysis/` 聚合 / 对比 / case 挖掘 / 优化建议
-- `report/` A 对比报告 + B 可靠性报告
-- `cli.py` 命令行入口｜`web/` 前端评估台（FastAPI + Vue3）
+- `schema.py` 数据模型（EvalItem / RichContentObservation / VisualCompareObservation）
+- `judges/` 评测引擎：`base.py`（单轮直出 LLM 客户端 + JSON 定向修复）｜`rich_content_judge.py`｜`visual_compare_judge.py`｜`prompts.py`（两套 SYSTEM/USER 模板）
+- `web/` 评估台：`server.py`（FastAPI 路由）｜`runner.py`（评测编排：抽帧→逐题评判→汇总）｜`parse_input.py`（JSONL/CSV 解析）｜`video_prepare.py` + `media.py`（抽帧）｜`history.py`（快照与导出）｜`static/`（前端）
+- `config/` `judges.yaml`｜`visual_modes/rich_content.yaml`（含 category_display 垂域显示名）
+- `tests/` pytest 单元测试（不访问真实模型/网络）
 
 ## 需要你补充的输入
 
-1. 评测集样本（确认 `EvalItem` 字段对齐）；
-2. 模型接入 key（代理 / 火山 ARK / Moonshot 等，按 `models.yaml` + `judges.yaml` 的 `api_key_env`）；
-3. 自研 agent 的调用方式（HTTP / Python 函数 / 命令行 → 选对应 runner）；
-4. 联网检索服务（Tavily / SerpAPI / Bing 三选一）；
-5. 裁判模型须支持 function calling（glm-5.2 / glm-4.7 / Moonshot kimi 等可用；注意某些代理上的 deepseek-v4 会因 tools 格式报错，详见 [项目文档 §9 Q2](docs/项目文档.md)）。
+1. 录屏视频文件（JSONL 中写相对/绝对路径，上传目录也可通过界面上传）；
+2. `SILICON_FLOW_API_KEY`（裁判模型）。

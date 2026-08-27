@@ -1,73 +1,14 @@
-# 多裁判配置（盲评，全程不接收参考答案）
-# 裁判是「评测智能体」：在 agent loop 中可多轮调用 web_search / fetch_page / calculate 自主查证，
-# 走 意图理解→理想锚定→多角度分析→对比→判定 的深度推演。
+# 裁判配置（单轮直出：不联网、不调工具）
+# 裁判按 SYSTEM/USER 模板一次生成 <analysis> + 结论 JSON；解析失败走定向修复（repair_json）。
 judges:
-  # —— 裁判1：研发人员（严谨学科专家，glm-5.2，联网核查）——
-  - name: judge_1
-    display: 研发人员
-    runner: openai_compat
-    base_url: http://1239mxgn96959.vicp.fun:4009
-    api_key_env: PROXY_API_KEY
-    model: kimi-for-coding-openai
-    persona: strict_expert
-    temperature: 1            # 代理(litellm)强制限定：temperature 只能为 1、top_p 只能为 0.95（探针 probe_sampling.py 实测 2026-08-11）。本端点无法用采样参数降噪，稳定性依赖集成 trim_mean + 可选 eval_options.repeat；切勿在此配 top_p（会被网关 400）
-    enable_web_search: true          # 开启 agent loop 联网查证
-    enable_fetch: true               # 允许抓取网页正文深挖
-    enable_calculate: true           # 允许算术核查
-    enable_python: false             # 代码执行默认关
-    concurrency: 3
-
-  # —— 裁判2：终端用户（普通用户视角，deepseek-v4-pro-openai）——
+  # —— 裁判2：终端用户（普通用户视角，Qwen3.5）——
   - name: judge_2
     display: 终端用户
     runner: openai_compat
     base_url: https://api.siliconflow.cn/v1
     api_key_env: SILICON_FLOW_API_KEY
     model: Qwen/Qwen3.5-397B-A17B
-    temperature: 0            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）；原先误抄成 1
+    temperature: 0            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）
     seed: 42                  # 固定种子 + temperature=0 → 可复现，消除"时好时坏"
-    persona: end_user              # 与 judge_1(strict_expert) 形成视角差异
-    enable_web_search: true
-    enable_fetch: true
-    enable_calculate: true
-    enable_python: false
+    persona: end_user
     concurrency: 3
-
-  # —— 裁判3：产品专家（侧重待评 vs 竞品对比，glm-5-turbo；需竞品结果输入，缺则跳过该题）——
-  - name: judge_3
-    display: 产品专家
-    runner: openai_compat
-    base_url: http://1239mxgn96959.vicp.fun:4009
-    api_key_env: PROXY_API_KEY
-    model: deepseek-v4-pro-openai
-    persona: product_expert
-    temperature: 0            # 探针实测支持低温采样（默认即 0，显式声明）
-    seed: 42                  # 固定种子，可复现
-    enable_web_search: true
-    enable_fetch: true
-    enable_calculate: true
-    enable_python: false
-    concurrency: 3
-
-# 评测选项：补足人工评测缺点
-eval_options:
-  repeat: 1                         # 同裁判重复采样次数（算稳定性）
-  pairwise_bidirectional: true      # A/B 双向比较，抗位置偏差
-  independent_then_compare: true    # 先独立盲评再成对比较，抗锚定
-  pairwise_for_ref: false           # 有参考答案题是否也做成对比较
-  search_provider: [tavily]   # 联网检索：tavily | serpapi | bing | jina
-  search_topk: 3
-  # 轻量垂域分类：每个 case 仅跑一次，独立于裁判
-  classify_model: glm-5.2-openai
-  classify_base_url: http://1239mxgn96959.vicp.fun:4009
-  classify_api_key_env: PROXY_API_KEY
-
-# 多裁判聚合
-ensemble:
-  rubric: trim_mean                 # 去极值均值
-  correctness: majority_vote
-  pairwise: majority_vote
-  bootstrap_ci: true                # 胜率/均分 Bootstrap 置信区间
-  n_bootstrap: 200
-  flag_low_agreement: 0.6           # 一致率/稳定性低于此值 → 标红人工复核
-  dim_problem_threshold: 3.0        # 维度分<=此值算"问题"（按垂域维度问题分布用，满分5；调大→问题题更多）

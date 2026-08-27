@@ -1,25 +1,16 @@
 import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
-import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 
 createApp({
   setup() {
     const modes = [
-      { key: "single", label: "垂域问答类" },
-      { key: "compare", label: "垂域视觉对比" },
-      { key: "online", label: "接模型在线评估" },
-      { key: "process", label: "过程盲评(含轨迹)" },
-      { key: "operation", label: "任务类（录屏）" },
       { key: "rich_content", label: "垂域视觉评测" },
-      { key: "rich_content_quality", label: "垂域视觉综合评测" },
+      { key: "compare", label: "垂域视觉对比" },
     ];
     function modeLabel(key) {
       return modes.find((item) => item.key === key)?.label || key;
     }
-    const mode = ref("single");
-    const isVideoMode = computed(() => ["operation", "rich_content", "rich_content_quality", "compare"].includes(mode.value));
-    const text = ref("");
-    const fileText = ref("");
-    const isJsonl = ref(false);
+    const mode = ref("rich_content");
+    const isVideoMode = computed(() => true);
     const datasetName = ref("");
     const items = ref([]);
     let opItemSequence = 0;
@@ -29,15 +20,8 @@ createApp({
     const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
-    const models = ref([]);
     const selectedJudges = ref([]);
-    const visibleJudges = computed(() => {
-      if (mode.value !== "operation") return judges.value;
-      const judge = terminalUserJudge();
-      return judge ? [judge] : [];
-    });
-    const visualJudge = ref("");  // rich_content_quality 模式：挂卡识别裁判
-    const selectedModel = ref("");
+    const visibleJudges = computed(() => judges.value);
     const concurrency = ref(4);
     const evalTimeout = ref(300);
     const running = ref(false);
@@ -49,19 +33,13 @@ createApp({
     const runError = ref("");
     const itemProgress = ref({});
     const progressEvents = ref({});
-    const pieChart = ref(null);
-    const barChartRefs = ref([]);
     const resultBrowser = ref(null);
     const activeSkill = ref("");
     const resultQuery = ref("");
-    const correctnessFilter = ref("");
-    const problemDimFilter = ref("");
     const resultPage = ref(1);
     const resultPageSize = ref(10);
-    const previewPage = ref(1);
     const progressPage = ref(1);
     const resultJumpPage = ref("");
-    const previewJumpPage = ref("");
     const progressJumpPage = ref("");
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
@@ -78,51 +56,16 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          single: "每行一题：query [||| @context: 背景] ||| answer [||| competitor] [||| reference]   （context 可选且视为可信前提）",
           compare: "逐题导入 JSONL：id(可选)、query、context(可选)、video1、video2、context1/context2(可选)、answer1/answer2(可选)、task_start_time/task_end_time(可选，单位秒)",
-          online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
-          process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
-          operation: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
-          rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域视觉评测相同。",
-        }[mode.value])
-    );
-    const placeholder = computed(
-      () =>
-        ({
-          single: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场 ||| 推荐南京大牌档\n中国最长的河流？ ||| 长江",
-          compare: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场 ||| 回答A ||| 回答B\n推荐一部科幻电影 ||| 星际穿越 ||| 流浪地球",
-          online: "附近有什么餐厅？ ||| @context: 当前时间19:00，地点上海人民广场\n计算 17 × 24 等于多少？",
-          process: "规划回家路线 ||| @context: 当前位于上海人民广场，目的地徐家汇 ||| 最终回答 ||| 推理轨迹\n某函数是否正确？ ||| 正确 ||| def f(n): return 1 if n<=1 else n*f(n-1)",
-          operation: "",
-          rich_content: "",
-          rich_content_quality: "",
         }[mode.value])
     );
 
-    const previewKeys = computed(() => {
-      if (!items.value.length) return [];
-      const keys = ["query", "context"];
-      if (mode.value === "single") keys.push("answer", "reference");
-      else if (mode.value === "compare") keys.push("video1", "video2", "answer1", "answer2");
-      else if (mode.value === "process") keys.push("answer", "trace", "reference");
-      else keys.push("reference");
-      return keys.filter((k) => items.value.some((it) => it[k] != null && it[k] !== ""));
-    });
     const opPageCount = computed(() => Math.max(1, Math.ceil(opItems.value.length / opPageSize)));
     const pagedOpItems = computed(() => {
       const page = Math.min(opPage.value, opPageCount.value);
       const start = (page - 1) * opPageSize;
       return opItems.value.slice(start, start + opPageSize).map((item, offset) => ({
-        item,
-        index: start + offset,
-      }));
-    });
-    const previewPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
-    const pagedPreviewItems = computed(() => {
-      const page = Math.min(previewPage.value, previewPageCount.value);
-      const start = (page - 1) * pageSize;
-      return items.value.slice(start, start + pageSize).map((item, offset) => ({
         item,
         index: start + offset,
       }));
@@ -165,12 +108,11 @@ createApp({
       const start = (page - 1) * pageSize;
       return progressRows.value.slice(start, start + pageSize);
     });
-    const skillOverviewRows = computed(() => summary.value?.by_skill?.overview || []);
 
     function progressStageRank(progressItem) {
       if (progressItem.status === "done") return 4;
       if (progressItem.module === "结果聚合") return 3;
-      if (["模型裁判", "工具调用", "被测模型", "单题评测"].includes(progressItem.module)) return 2;
+      if (["模型裁判", "被测模型", "单题评测"].includes(progressItem.module)) return 2;
       if (progressItem.module === "垂域分类") return 1;
       return 0;
     }
@@ -332,7 +274,7 @@ createApp({
         }
         if (!r.category) return;
         const key = r.category;
-        const displayLabel = key === "operation" ? "任务类" : (r.category_display || key);
+        const displayLabel = r.category_display || key;
         const current = map.get(key) || { key, label: displayLabel, count: 0 };
         current.count += 1;
         map.set(key, current);
@@ -348,20 +290,6 @@ createApp({
       if (mode.value === "compare" || !activeSkill.value) return results.value;
       if (activeSkill.value === "__error__") return results.value.filter((r) => r.error);
       return results.value.filter((r) => !r.error && r.category === activeSkill.value);
-    });
-
-    const rubricDims = computed(() => {
-      const dims = [];
-      skillResults.value.forEach((r) => {
-        Object.keys(r.rubric || {}).forEach((d) => {
-          if (!dims.includes(d)) dims.push(d);
-        });
-        // 也收集 N/A 维度，确保列始终存在（不同 case 可能 N/A 不同维度）
-        (r.na_dimensions || []).forEach((d) => {
-          if (!dims.includes(d)) dims.push(d);
-        });
-      });
-      return dims;
     });
 
     const resultCols = computed(() => {
@@ -382,117 +310,46 @@ createApp({
           { key: "rationale", label: "理由" },
           { key: "latency_s", label: "耗时" },
         ];
-      if (mode.value === "operation")
-        return [
-          { key: "item_id", label: "题号" },
-          { key: "query", label: "操作意图" },
-          ...contextCols,
-          { key: "correctness", label: "完成判定" },
-          { key: "error_type", label: "错误类型" },
-          { key: "is_low_level", label: "是否低级" },
-          { key: "total", label: "总分" },
-          ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
-          { key: "arbitrated", label: "仲裁" },
-          { key: "rationale", label: "步骤与证据" },
-          { key: "latency_s", label: "耗时" },
-        ];
-      if (mode.value === "rich_content")
-        return [
-          { key: "item_id", label: "题号" },
-          { key: "query", label: "Query" },
-          ...contextCols,
-          { key: "category_display", label: "垂域" },
-          { key: "answer_text", label: "answer_text" },
-          { key: "card_presence", label: "是否有卡片" },
-          { key: "card_count", label: "卡片数量" },
-          { key: "card_types", label: "卡片种类" },
-          { key: "card_contents", label: "卡片内容" },
-          { key: "superlink_presence", label: "Superlink是否存在" },
-          { key: "superlink_count", label: "Superlink数量" },
-          { key: "superlink_texts", label: "Superlink文字" },
-          { key: "card_suitability", label: "卡片是否合适" },
-          { key: "card_suitability_reason", label: "卡片不合适原因" },
-          { key: "superlink_suitability", label: "Superlink是否合适" },
-          { key: "superlink_suitability_reason", label: "Superlink不合适原因" },
-          { key: "answer_coverage", label: "回答覆盖" },
-          { key: "needs_review", label: "需人工复核" },
-          { key: "review_reason", label: "复核原因" },
-          { key: "problem_solved", label: "是否解决用户问题" },
-          { key: "problem_solved_reason", label: "评价原因" },
-          { key: "answer_issues", label: "回答内容问题" },
-          { key: "rationale", label: "识别结论" },
-          { key: "latency_s", label: "耗时" },
-        ];
-      if (mode.value === "rich_content_quality")
-        return [
-          { key: "item_id", label: "题号" },
-          { key: "query", label: "Query" },
-          ...contextCols,
-          { key: "category_display", label: "垂域" },
-          { key: "answer", label: "回答" },
-          { key: "card_presence", label: "挂卡" },
-          { key: "card_count", label: "挂卡数" },
-          { key: "card_types", label: "挂卡类型" },
-          { key: "card_contents", label: "挂卡内容" },
-          { key: "card_suitability", label: "挂卡适配性" },
-          { key: "card_suitability_score", label: "适配分" },
-          { key: "superlink_presence", label: "Superlink" },
-          { key: "superlink_count", label: "链接数" },
-          { key: "superlink_texts", label: "链接文字" },
-          { key: "answer_coverage", label: "回答覆盖" },
-          { key: "correctness", label: "判定" },
-          { key: "total", label: "总分" },
-          ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
-          { key: "used_search", label: "联网" },
-          { key: "truncated", label: "截断" },
-          { key: "arbitrated", label: "仲裁" },
-          { key: "top_issue_1_dim", label: "首要问题维度" },
-          { key: "top_issue_2_dim", label: "次要问题维度" },
-          { key: "top_issue_3_dim", label: "第三问题维度" },
-          { key: "top_issues_desc", label: "问题描述" },
-          { key: "needs_review", label: "需人工复核" },
-          { key: "rationale", label: "理由" },
-          { key: "latency_s", label: "耗时" },
-        ];
-      const dims = rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d }));
+      // rich_content（默认）
       return [
         { key: "item_id", label: "题号" },
-        { key: "query", label: "题目" },
+        { key: "query", label: "Query" },
         ...contextCols,
-        { key: mode.value === "online" ? "generated_answer" : "answer", label: mode.value === "online" ? "生成回答" : "回答" },
-        { key: "correctness", label: "判定" },
-        { key: "total", label: "总分" },
-        ...dims,
-        { key: "used_search", label: "联网" },
-        { key: "truncated", label: "截断" },
-        { key: "arbitrated", label: "仲裁" },
-        { key: "agree", label: "与真值" },
-        { key: "top_issue_1_dim", label: "首要问题维度" },
-        { key: "top_issue_2_dim", label: "次要问题维度" },
-        { key: "top_issue_3_dim", label: "第三问题维度" },
-        { key: "top_issues_desc", label: "问题描述" },
-        { key: "rationale", label: "理由" },
+        { key: "category_display", label: "垂域" },
+        { key: "answer_text", label: "answer_text" },
+        { key: "card_presence", label: "是否有卡片" },
+        { key: "card_count", label: "卡片数量" },
+        { key: "card_types", label: "卡片种类" },
+        { key: "card_contents", label: "卡片内容" },
+        { key: "superlink_presence", label: "Superlink是否存在" },
+        { key: "superlink_count", label: "Superlink数量" },
+        { key: "superlink_texts", label: "Superlink文字" },
+        { key: "card_suitability", label: "卡片是否合适" },
+        { key: "card_suitability_reason", label: "卡片不合适原因" },
+        { key: "superlink_suitability", label: "Superlink是否合适" },
+        { key: "superlink_suitability_reason", label: "Superlink不合适原因" },
+        { key: "answer_coverage", label: "回答覆盖" },
+        { key: "needs_review", label: "需人工复核" },
+        { key: "review_reason", label: "复核原因" },
+        { key: "problem_solved", label: "是否解决用户问题" },
+        { key: "problem_solved_reason", label: "评价原因" },
+        { key: "answer_issues", label: "回答内容问题" },
+        { key: "rationale", label: "识别结论" },
         { key: "latency_s", label: "耗时" },
       ];
     });
 
     function columnWidth(c) {
-      const compact = c.rubricDim
-        || [
-          "correctness", "winner", "total", "used_search", "truncated", "arbitrated",
-          "agree", "latency_s", "bidirectional_consistent", "is_low_level",
-          "card_presence", "card_count", "superlink_presence",
-          "superlink_count", "answer_coverage", "needs_review", "problem_solved",
-        ].includes(c.key);
-      const textColumn = ["query", "context", "answer", "answer_text", "generated_answer", "answer_a", "answer_b", "rationale", "top_issues_desc", "answer_issues", "problem_solved_reason"].includes(c.key);
+      const compact = [
+        "latency_s", "card_presence", "card_count", "superlink_presence",
+        "superlink_count", "answer_coverage", "needs_review", "problem_solved",
+      ].includes(c.key);
+      const textColumn = ["query", "context", "answer_text", "rationale", "answer_issues", "problem_solved_reason"].includes(c.key);
       let minWidth = compact ? 80 : textColumn ? 150 : 96;
       let maxWidth = compact ? 120 : c.key === "rationale" ? 380 : textColumn ? 320 : 200;
       if (c.key === "item_id") {
         minWidth = 110;
         maxWidth = 160;
-      } else if (c.key === "query" && mode.value === "operation") {
-        minWidth = 140;
-        maxWidth = 240;
       }
       const visualLength = (value) => Array.from(String(value ?? "")).reduce(
         (sum, char) => sum + (char.charCodeAt(0) > 255 ? 2 : 1),
@@ -512,26 +369,10 @@ createApp({
       () => 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0)
     );
 
-    function isFrozenResultColumn(column) {
-      return mode.value === "operation" && ["item_id", "query"].includes(column.key);
-    }
-
-    function frozenResultColumnStyle(column, columnIndex) {
-      if (!isFrozenResultColumn(column)) return {};
-      const left = 48 + resultCols.value
-        .slice(0, columnIndex)
-        .reduce((sum, previous) => sum + columnWidth(previous), 0);
-      return { left: `${left}px` };
-    }
-
     const filteredResults = computed(() => {
       const q = resultQuery.value.trim().toLowerCase();
-      const threshold = (summary.value && summary.value.by_skill && summary.value.by_skill.threshold) || 2;
       return skillResults.value.filter((r) => {
-        if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
-        if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
-        if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.answer_text || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer_text || ""} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
     });
@@ -543,30 +384,10 @@ createApp({
       return filteredResults.value.slice(start, start + resultPageSize.value);
     });
 
-    const fallbackStat = computed(() => {
-      const bs = summary.value && summary.value.by_skill;
-      if (!bs || !bs.overview) return null;
-      const total = bs.overview.reduce((s, r) => s + (r.n_items || 0), 0);
-      const fbCount = bs.overview.reduce((s, r) => s + (r.fallback_count || 0), 0);
-      return { total, fbCount, rate: total ? fbCount / total : 0 };
-    });
-
     function selectSkill(key) {
       activeSkill.value = key;
-      problemDimFilter.value = "";
       resultPage.value = 1;
       progressPage.value = 1;
-    }
-    function drillDownDimension(skill, dimension) {
-      activeSkill.value = skill;
-      problemDimFilter.value = dimension;
-      correctnessFilter.value = "";
-      resultPage.value = 1;
-      nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
-    }
-    function clearDimensionDrillDown() {
-      problemDimFilter.value = "";
-      resultPage.value = 1;
     }
     function resetResultPage() {
       resultPage.value = 1;
@@ -591,7 +412,6 @@ createApp({
       const configs = {
         result: [resultPage, pageCount, resultJumpPage],
         operation: [opPage, opPageCount, opJumpPage],
-        preview: [previewPage, previewPageCount, previewJumpPage],
         progress: [progressPage, progressPageCount, progressJumpPage],
       };
       const config = configs[kind];
@@ -609,9 +429,6 @@ createApp({
     function changeOpPage(delta) {
       setTablePage("operation", opPage.value + delta);
     }
-    function changePreviewPage(delta) {
-      setTablePage("preview", previewPage.value + delta);
-    }
     function changeProgressPage(delta) {
       setTablePage("progress", progressPage.value + delta);
     }
@@ -619,7 +436,6 @@ createApp({
       const jumpValues = {
         result: resultJumpPage.value,
         operation: opJumpPage.value,
-        preview: previewJumpPage.value,
         progress: progressJumpPage.value,
       };
       setTablePage(kind, jumpValues[kind]);
@@ -631,67 +447,25 @@ createApp({
       resultJumpPage.value = "";
     }
 
-    function trunc(v) {
-      if (v == null) return "";
-      const s = String(v);
-      return s.length > 50 ? s.slice(0, 50) + "…" : s;
-    }
-
-    function defaultJudgeSelection(targetMode) {
-      if (["single", "operation", "rich_content"].includes(targetMode)) {
-        const endUserJudge = terminalUserJudge();
-        if (endUserJudge) return [endUserJudge.name];
-      }
-      if (targetMode === "rich_content_quality") {
-        // 综合评测：挂卡识别默认用第一位裁判，回答评测默认选所有非产品专家
-        visualJudge.value = judges.value.length ? judges.value[0].name : "";
-        const rubricJudges = judges.value
-          .filter((j) => j.persona !== "product_expert")
-          .map((j) => j.name);
-        return rubricJudges.length ? rubricJudges : (judges.value.length ? [judges.value[0].name] : []);
-      }
+    function defaultJudgeSelection() {
       return judges.value.length ? [judges.value[0].name] : [];
-    }
-
-    function terminalUserJudge() {
-      return judges.value.find(
-        (judge) => String(judge.display || "").trim() === "终端用户",
-      ) || judges.value.find((judge) => judge.persona === "end_user");
     }
 
     function switchMode(k) {
       mode.value = k;
-      selectedJudges.value = defaultJudgeSelection(k);
+      selectedJudges.value = defaultJudgeSelection();
       items.value = [];
-      previewPage.value = 1;
       progressPage.value = 1;
       errors.value = [];
-      fileText.value = "";
-      isJsonl.value = false;
       datasetName.value = "";
-      if (["operation", "rich_content", "rich_content_quality", "compare"].includes(k)) {
-        opItems.value = [newOpItem()];
-        opPage.value = 1;
-        opJumpPage.value = "";
-      }
+      opItems.value = [newOpItem()];
+      opPage.value = 1;
+      opJumpPage.value = "";
     }
 
-    function onFile(e) {
-      const f = e.target.files[0];
-      if (!f) return;
-      datasetName.value = f.name || "";
-      const r = new FileReader();
-      r.onload = () => {
-        fileText.value = r.result;
-        text.value = r.result;
-        isJsonl.value = true;
-      };
-      r.readAsText(f, "utf-8");
-    }
-
-    // —— 任务类（录屏）评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
+    // —— 视频评测：逐题卡片（query + 可选 context + 视频上传 + 可选 answer_text）——
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
     }
     function addOpItem() {
       opItems.value.push(newOpItem());
@@ -745,15 +519,19 @@ createApp({
       opJumpPage.value = "";
       try {
         const content = await file.text();
-        console.log("[onOpManifestFile] mode:", mode.value, "file size:", content.length);
+        const isCsv = /\.csv$/i.test(file.name || "");
+        console.log("[onOpManifestFile] mode:", mode.value, "csv:", isCsv, "file size:", content.length);
+        const parseBody = isCsv
+          ? { mode: mode.value, csv: content }
+          : { mode: mode.value, jsonl: content };
         const parseResponse = await fetch("/api/parse", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: mode.value, jsonl: content }),
+          body: JSON.stringify(parseBody),
         });
         const parsed = await parseResponse.json().catch(() => ({}));
         console.log("[onOpManifestFile] response ok:", parseResponse.ok, "items:", (parsed.items || []).length, "errors:", (parsed.errors || []).length);
-        if (!parseResponse.ok) throw new Error(parsed.detail || "JSONL 解析请求失败");
+        if (!parseResponse.ok) throw new Error(parsed.detail || (isCsv ? "CSV 解析请求失败" : "JSONL 解析请求失败"));
         const importErrors = [...(parsed.errors || [])];
         if (!(parsed.items || []).length) {
           errors.value = importErrors.length ? importErrors : ["JSONL 中没有可导入的数据"];
@@ -773,7 +551,7 @@ createApp({
             category: item.category === "default" ? "" : (item.category || ""),
             videoName: String(item.video_path || "").split(/[\\/]/).pop(),
             videoPath: item.video_path || item.video1 || "",
-            answer: (mode.value === "rich_content" || mode.value === "rich_content_quality") ? (item.answer_text || "") : (mode.value === "compare" ? (item.answer1 || "") : (item.answer || "")),
+            answer: mode.value === "compare" ? (item.answer1 || "") : (item.answer_text || ""),
             answer1: item.answer1 || "",
             answer2: item.answer2 || "",
             context1: item.context1 || "",
@@ -784,6 +562,8 @@ createApp({
             taskEndTime: item.task_end_time ?? null,
             sourceLine: item.source_line ?? null,
             sourceData: item.source_data || null,
+            sessionGroup: item.session_group ?? null,
+            turnIndex: item.turn_index ?? null,
           }));
           opPage.value = 1;
           console.log("[onOpManifestFile] opItems mapped:", opItems.value.length, "first videoPath:", opItems.value[0]?.videoPath, "first query:", opItems.value[0]?.query);
@@ -796,98 +576,59 @@ createApp({
       }
     }
 
-    const canSubmit = computed(() => {
-      if (isVideoMode.value) {
-        const ok = !opPreparing.value && opItems.value.some(
-          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
-        );
-        if (mode.value === "compare") {
-          console.log("[canSubmit] compare mode:", "opPreparing:", opPreparing.value, "opItems count:", opItems.value.length, "first item query:", opItems.value[0]?.query, "first item videoPath:", opItems.value[0]?.videoPath, "first item video1Path:", opItems.value[0]?.video1Path, "result:", ok);
-        }
-        return ok;
-      }
-      return !!text.value;
-    });
-
-    async function doParse() {
-      const body = { mode: mode.value };
-      if (isJsonl.value && fileText.value) body.jsonl = fileText.value;
-      else body.text = text.value;
-      const r = await fetch("/api/parse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const d = await r.json();
-      items.value = d.items;
-      errors.value = d.errors;
-      previewPage.value = 1;
-      if (errors.value.length) console.log("解析错误：", errors.value);
-    }
+    const canSubmit = computed(() =>
+      !opPreparing.value && opItems.value.some(
+        (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
+      )
+    );
 
     async function submit() {
       runError.value = "";
-      if (isVideoMode.value) {
-        const valid = opItems.value.filter(
-          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
-        );
-        if (!valid.length) {
-          alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
-          return;
-        }
-        items.value = valid.map((it, idx) => {
-          const prefix = mode.value === "operation" ? "op" : mode.value === "compare" ? "cmp" : "rich";
-          const item = {
-            id: it.id || `${prefix}${idx + 1}`,
-            query: it.query.trim(),
-            context: (it.context || "").trim(),
-          };
-          if (mode.value === "compare") {
-            item.video1 = it.video1Path || it.videoPath || "";
-            item.video2 = it.video2Path || "";
-            item.context1 = (it.context1 || "").trim();
-            item.context2 = (it.context2 || "").trim();
-            item.answer1 = (it.answer1 || it.answer || "").trim();
-            item.answer2 = (it.answer2 || "").trim();
-            item.category = (it.category || "").trim() || "default";
-          } else {
-            item.video_path = it.videoPath;
-            if (mode.value === "operation") {
-              item.category = "operation";
-              item.answer = (it.answer || "").trim();
-            } else {
-              // rich_content / rich_content_quality
-              item.category = (it.category || "").trim() || "default";
-              item.answer_text = (it.answer || "").trim();
-            }
-          }
-          if ((it.frames || []).length) {
-            item.media = [it.videoPath];
-            item.frames = it.frames;
-          }
-          if (Number.isFinite(it.taskStartTime)) item.task_start_time = it.taskStartTime;
-          if (Number.isFinite(it.taskEndTime)) item.task_end_time = it.taskEndTime;
-          if (Number.isFinite(it.sourceLine)) item.source_line = it.sourceLine;
-          if (it.sourceData) item.source_data = it.sourceData;
-          return item;
-        });
-        errors.value = [];
-      } else {
-        // 自动解析最新输入（用户可跳过手动"解析预览"）
-        await doParse();
-        if (!items.value.length) {
-          alert("解析后没有可评估的题。请检查格式：每行『问题 ||| 回答』。");
-          return;
-        }
+      const valid = opItems.value.filter(
+        (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
+      );
+      if (!valid.length) {
+        alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
+        return;
       }
+      items.value = valid.map((it, idx) => {
+        const prefix = mode.value === "compare" ? "cmp" : "rich";
+        const item = {
+          id: it.id || `${prefix}${idx + 1}`,
+          query: it.query.trim(),
+          context: (it.context || "").trim(),
+        };
+        if (mode.value === "compare") {
+          item.video1 = it.video1Path || it.videoPath || "";
+          item.video2 = it.video2Path || "";
+          item.context1 = (it.context1 || "").trim();
+          item.context2 = (it.context2 || "").trim();
+          item.answer1 = (it.answer1 || it.answer || "").trim();
+          item.answer2 = (it.answer2 || "").trim();
+          item.category = (it.category || "").trim() || "default";
+        } else {
+          item.video_path = it.videoPath;
+          item.category = (it.category || "").trim() || "default";
+          item.answer_text = (it.answer || "").trim();
+        }
+        if ((it.frames || []).length) {
+          item.media = [it.videoPath];
+          item.frames = it.frames;
+        }
+        if (Number.isFinite(it.taskStartTime)) item.task_start_time = it.taskStartTime;
+        if (Number.isFinite(it.taskEndTime)) item.task_end_time = it.taskEndTime;
+        if (Number.isFinite(it.sourceLine)) item.source_line = it.sourceLine;
+        if (it.sourceData) item.source_data = it.sourceData;
+        if (it.sessionGroup != null) item.session_group = it.sessionGroup;
+        if (it.turnIndex != null) item.turn_index = it.turnIndex;
+        return item;
+      });
+      errors.value = [];
       results.value = [];
       summary.value = null;
       progressEvents.value = {};
-      barChartRefs.value = [];
       activeSkill.value = "";
       resultQuery.value = "";
-      correctnessFilter.value = "";
-      problemDimFilter.value = "";
       resultPage.value = 1;
       progress.value = 0;
       total.value = items.value.length;
@@ -908,13 +649,9 @@ createApp({
       const body = {
         mode: mode.value,
         items: items.value,
-        dataset_name: datasetName.value || (isVideoMode.value ? "手动录入" : (isJsonl.value ? "未命名数据集.jsonl" : "文本输入")),
+        dataset_name: datasetName.value || "手动录入",
         options: {
-          judges: mode.value === "operation"
-            ? defaultJudgeSelection("operation")
-            : selectedJudges.value,
-          visual_judge: visualJudge.value,
-          model: selectedModel.value,
+          judges: selectedJudges.value,
           concurrency: concurrency.value,
           eval_timeout_s: evalTimeout.value,
         },
@@ -997,9 +734,18 @@ createApp({
       });
       es.addEventListener("result", (e) => {
         const d = JSON.parse(e.data);
-        results.value.push(d.result);
+        const result = d.result;
+        const index = result && result.index;
+        if (index == null) {
+          results.value.push(result);
+        } else {
+          // 断线重连时服务端会整段回放 results：按 index 替换去重，
+          // 防止重连一次就全量翻倍（重复行 + 内存线性增长）
+          const pos = results.value.findIndex((x) => x && x.index === index);
+          if (pos >= 0) results.value.splice(pos, 1, result);
+          else results.value.push(result);
+        }
         progress.value = d.progress;
-        const index = d.result.index;
         if (index != null) {
           const previous = itemProgress.value[index] || {};
           itemProgress.value = {
@@ -1021,7 +767,6 @@ createApp({
         resultPage.value = 1;
         running.value = false;
         es.close();
-        renderCharts();
         loadHistory();
       });
       es.addEventListener("error", async (e) => {
@@ -1039,38 +784,10 @@ createApp({
       });
     }
 
-    function isNA(r, dim) {
-      return r.na_dimensions && r.na_dimensions.includes(dim);
-    }
-    function cellTitle(r, c) {
-      // 维度列 hover 显示该维度的打分理由（rubric_reasons）；N/A 维度显示"不适用"
-      if (c.rubricDim && isNA(r, c.rubricDim)) {
-        return "[不适用] " + (r.rubric_reasons && r.rubric_reasons[c.rubricDim]
-          ? r.rubric_reasons[c.rubricDim] : "该维度与本题/本答案无关");
-      }
-      if (c.rubricDim && r.rubric_reasons && r.rubric_reasons[c.rubricDim]) {
-        return r.rubric_reasons[c.rubricDim];
-      }
-      return "";
-    }
     function cell(r, c) {
       const v = r[c.key];
-      if (c.rubricDim) {
-        if (isNA(r, c.rubricDim)) return "N/A";
-        return r.rubric && r.rubric[c.rubricDim] != null ? r.rubric[c.rubricDim] : "";
-      }
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
-      if (c.key === "agree") {
-        if (v === undefined) return "";
-        return v === true ? "✓ 一致" : v === false ? "✗ 不一致" : "?";
-      }
-      if (c.key === "used_search") return v ? "是" : "否";
-      if (c.key === "is_low_level") return v === "yes" ? "是" : "否";
       if (c.key === "latency_s") return v != null ? v + "秒" : "";
-      if (c.key === "truncated") return v ? "⚠️是(强制判定)" : "";
-      if (c.key === "arbitrated") return v ? `⚖️是(${r.arbitrator_confidence ?? "-"})` : "";
-      if (c.key === "bidirectional_consistent") return v ? "是" : "否(位置偏差)";
-      if (c.key === "winner") return v === "a" ? "A" : v === "b" ? "B" : "平";
       // 垂域视觉对比维度渲染
       if (["relevance", "safety", "content_quality", "need_closure", "personalization"].includes(c.key)) {
         if (v === "answer1") return "产品1更优";
@@ -1084,11 +801,6 @@ createApp({
         if (v === "no") return "无冲突";
         if (v === "unclear") return "不清楚";
         return v || "";
-      }
-      if (c.key === "correctness") {
-        if (mode.value === "operation")
-          return ({ right: "✓ 完成", wrong: "✗ 未完成", partial: "◐ 完成但有瑕疵", unclear: "? 无法判断" }[v] || v) || "";
-        return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
       }
       if (["card_types", "card_contents", "superlink_texts"].includes(c.key)) {
         return Array.isArray(v) ? v.join("；") : (v || "");
@@ -1106,9 +818,6 @@ createApp({
       }
       if (c.key === "answer_coverage") {
         return ({ complete: "完整", partial: "部分", unclear: "不确定" }[v] || v) || "";
-      }
-      if (c.key === "superlink_count_type") {
-        return ({ exact: "精确", lower_bound: "至少", unknown: "未知" }[v] || v) || "";
       }
       if (c.key === "needs_review") return v ? "T" : "F";
       if (v == null) return "";
@@ -1146,72 +855,6 @@ createApp({
 
     function hideCellTooltip() {
       cellTooltip.value.visible = false;
-    }
-
-    function setBarRef(el, i) {
-      if (el) barChartRefs.value[i] = el;
-    }
-
-    function renderCharts() {
-      nextTick(() => {
-        const bs = summary.value && summary.value.by_skill;
-        if (!bs || !bs.overview) return;
-        // 饼图：垂域样本量分布
-        const pieData = bs.overview.filter((s) => s.n_items > 0).map((s) => ({ name: s.display, value: s.n_items }));
-        if (pieChart.value && pieData.length) {
-          echarts.init(pieChart.value).setOption({
-            tooltip: { trigger: "item", formatter: "{b}: {c} 题 ({d}%)" },
-            legend: { bottom: 0, type: "scroll" },
-            title: { text: "垂域样本分布", left: "center", textStyle: { fontSize: 13 } },
-            series: [{ type: "pie", radius: ["30%", "60%"], center: ["50%", "48%"], data: pieData }],
-          });
-        }
-        // 各垂域维度问题分布：两列卡片中的竖向柱状图
-        (bs.sections || []).forEach((s, i) => {
-          const el = barChartRefs.value[i];
-          if (!el || !s.n_items) return;
-          const dpd = s.dim_problem_dist || {};
-          const dims = Object.keys(dpd).filter((d) => dpd[d].rate > 0);
-          if (!dims.length) return;
-          const chart = echarts.getInstanceByDom(el) || echarts.init(el);
-          chart.setOption({
-            tooltip: {
-              trigger: "axis",
-              formatter: (ctx) => {
-                const d = dims[ctx[0].dataIndex];
-                const allIds = dpd[d].item_ids || [];
-                const shownIds = allIds.slice(0, 5);
-                const count = dpd[d].count ?? allIds.length;
-                const preview = shownIds.length ? `<br/>示例题号：${shownIds.join(", ")}` : "";
-                return `${d}：${(ctx[0].value * 100).toFixed(0)}%<br/>问题题目：${count} 题${preview}<br/><span style="color:#9ca3af">点击柱子查看完整明细</span>`;
-              },
-            },
-            grid: { left: 48, right: 18, top: 42, bottom: 62 },
-            title: { text: `${s.display} 维度问题占比（N=${s.n_items}）`, left: "center", textStyle: { fontSize: 12 } },
-            xAxis: {
-              type: "category",
-              data: dims,
-              axisLabel: { interval: 0, rotate: dims.length > 3 ? 24 : 0, fontSize: 11 },
-            },
-            yAxis: { type: "value", max: 1, axisLabel: { formatter: (v) => v * 100 + "%" } },
-            series: [
-              {
-                type: "bar",
-                data: dims.map((d) => dpd[d].rate),
-                itemStyle: { color: "#e6a23c" },
-                emphasis: { itemStyle: { color: "#d97706" } },
-                cursor: "pointer",
-                label: { show: true, position: "top", formatter: (ctx) => (ctx.value * 100).toFixed(0) + "%" },
-              },
-            ],
-          });
-          chart.off("click");
-          chart.on("click", (params) => {
-            const dimension = dims[params.dataIndex];
-            if (dimension) drillDownDimension(s.skill, dimension);
-          });
-        });
-      });
     }
 
     function formatTime(ts) {
@@ -1267,7 +910,11 @@ createApp({
       if (!confirm("确认删除这条历史记录？删除后不可恢复。")) return;
       const r = await fetch(`/api/history/${id}`, { method: "DELETE" });
       if (!r.ok) {
-        alert("删除失败");
+        let detail = "";
+        try {
+          detail = (await r.json()).detail || "";
+        } catch (e) {}
+        alert(detail ? `删除失败：${detail}` : "删除失败");
         return;
       }
       if (taskId.value === id) {
@@ -1285,8 +932,12 @@ createApp({
         return;
       }
       const d = await r.json();
+      if (!modes.some((m) => m.key === d.mode)) {
+        alert("该历史记录使用已下线的评测模式，无法加载。");
+        return;
+      }
       taskId.value = d.task_id || id;
-      mode.value = d.mode || mode.value;
+      mode.value = d.mode;
       datasetName.value = d.dataset_name || "";
       items.value = d.items || [];
       results.value = d.results || [];
@@ -1298,13 +949,9 @@ createApp({
       running.value = false;
       activeSkill.value = "";
       resultQuery.value = "";
-      correctnessFilter.value = "";
-      problemDimFilter.value = "";
       resultPage.value = 1;
       progressPage.value = 1;
-      barChartRefs.value = [];
       if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
-      renderCharts();
       nextTick(() => resultBrowser.value && resultBrowser.value.scrollIntoView({ behavior: "smooth", block: "start" }));
     }
 
@@ -1332,10 +979,8 @@ createApp({
       }, 1000);
       const r = await fetch("/api/config");
       const d = await r.json();
-      judges.value = d.judges;
-      models.value = d.models;
-      selectedJudges.value = defaultJudgeSelection(mode.value);
-      selectedModel.value = d.models[0] || "";
+      judges.value = d.judges || [];
+      selectedJudges.value = defaultJudgeSelection();
       loadHistory();
     });
 
@@ -1344,22 +989,21 @@ createApp({
     });
 
     return {
-      modes, mode, modeLabel, isVideoMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
+      modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       opPage, opPageSize, opPageCount, opJumpPage,
-      previewPage, previewPageCount, previewJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
-      pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
-      activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize,
-      skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
-      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      resultBrowser,
+      activeSkill, resultQuery, resultPage, resultPageSize,
+      skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
+      formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
+      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
-      selectSkill, drillDownDimension, clearDimensionDrillDown, resetResultPage, changePage,
-      changePreviewPage, changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
+      selectSkill, resetResultPage, changePage,
+      changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,

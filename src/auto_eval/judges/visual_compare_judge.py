@@ -23,9 +23,6 @@ def visual_compare_result_fields(
 ) -> dict[str, Any]:
     """把强类型对比结果转换为 Web/导出友好的扁平字段。"""
     return {
-        "visual_description": observation.visual_description,
-        "answer_coverage_1": observation.answer_coverage_1,
-        "answer_coverage_2": observation.answer_coverage_2,
         "relevance": observation.relevance,
         "relevance_reason": observation.relevance_reason,
         "safety": observation.safety,
@@ -112,7 +109,7 @@ class VisualCompareJudge:
             user_image_refs.extend(frames2)
 
         started = time.perf_counter()
-        reply = await self.client.complete(
+        raw_output = await self.client.complete(
             system,
             user,
             stream_callback=stream_callback,
@@ -120,19 +117,19 @@ class VisualCompareJudge:
             user_image_refs=user_image_refs or None,
         )
 
-        data = parse_json_loose(reply.content)
+        data = parse_json_loose(raw_output)
         repaired = ""
         if data is None:
             repaired = await self.client.repair_json(
-                reply.content,
+                raw_output,
                 label="垂域视觉对比评测输出",
-                round_no=reply.rounds + 1,
+                round_no=2,
             )
             data = parse_json_loose(repaired)
         if data is None:
             raise JudgeOutputParseError(
                 "垂域视觉对比评测输出无法解析为 JSON",
-                raw_output=reply.content,
+                raw_output=raw_output,
                 repair_output=repaired,
                 judge=self.client.cfg.name,
                 model=self.client.model,
@@ -147,7 +144,7 @@ class VisualCompareJudge:
         except ValidationError as exc:
             raise JudgeOutputParseError(
                 f"垂域视觉对比评测字段不合法：{exc}",
-                raw_output=reply.content,
+                raw_output=raw_output,
                 repair_output=repaired,
                 judge=self.client.cfg.name,
                 model=self.client.model,
@@ -157,9 +154,6 @@ class VisualCompareJudge:
         result.update({
             "judge": self.client.cfg.name,
             "judge_model": self.client.model,
-            "used_search": reply.used_search,
-            "tool_trace": reply.tool_trace,
-            "truncated": reply.truncated,
             "judge_latency_ms": int((time.perf_counter() - started) * 1000),
         })
         return result

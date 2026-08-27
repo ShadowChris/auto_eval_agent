@@ -13,12 +13,22 @@ card_types:
   other: 其他
   unclear: 无法判断
 
-suitability_anchors:
-  5: 挂卡与 query 的垂域、实体及时间地点等关键条件完全匹配，且与正文一致
-  4: 挂卡整体合适，只有不影响使用的轻微信息或呈现不足
-  3: 挂卡与 query 有明显关系，但只满足部分意图、类型不够贴切或存在可接受偏差
-  2: 挂卡关系较弱，关键实体或条件存在明显偏差，帮助有限
-  1: 挂卡与 query 无关、误导，或与正文和关键条件明显冲突
+category_display:
+  automotive: 汽车
+  chinese: 语文
+  digital_3c: 电子数码
+  document: 文档
+  film_tv: 影视
+  lbs_travel: LBS
+  math_solving: 数学解题
+  meta_service: 元服务
+  music: 音乐
+  news: 新闻
+  phone_tips: 玩机技巧
+  professional_tech: 专业技术
+  search: 搜索
+  sports: 体育
+  weather: 天气
 
 extraction:
   algorithm_version: rich-content-v1.1.0

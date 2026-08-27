@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Application code is in `src/auto_eval/`. Keep domain models in `schema.py`, configuration and path helpers in `config.py` and `paths.py`, and place feature logic in its existing area: `runners/` for model adapters, `judges/` for evaluation, `batch/` for orchestration, `analysis/` and `report/` for outputs, and `web/` for the FastAPI UI. Tests live in `tests/` and mirror the behavior they cover. Runtime configuration belongs in `config/*.yaml` (including `config/skills/`); documentation and diagrams are in `docs/` and `assets/`. Local datasets and generated run results belong in ignored `data/` and `runs/` directories.
+Application code is in `src/auto_eval/`. Keep domain models in `schema.py` and configuration in `config.py`/`config/*.yaml`; the project supports two evaluation modes only (`rich_content` 垂域视觉评测, `compare` 垂域视觉对比评测) with a single judge (终端用户, `judge_2`, single-shot — no tools, no web search). Evaluation logic lives in `judges/` (single-shot judge client, the two mode judges, prompts); the FastAPI UI, evaluation orchestration, input parsing, video keyframe extraction, and history/export live in `web/`. Tests live in `tests/` and mirror the behavior they cover. Runtime configuration belongs in `config/judges.yaml` and `config/visual_modes/`; documentation is in `docs/`. Local datasets and generated run results belong in ignored `data/` and `runs/` directories.
 
 ## Build, Test, and Development Commands
 
@@ -11,10 +11,10 @@ Use Python 3.10 or later. Install the editable package and development/web depen
 ```bash
 python -m pip install -e ".[dev,web]"
 python -m pytest -q
-python -m uvicorn auto_eval.web.server:app --host 127.0.0.1 --port 8502
+python -m uvicorn auto_eval.web.server:app --host 127.0.0.1 --port 8503
 ```
 
-The test command runs the suite with asyncio support enabled. The Uvicorn command serves both the API and static UI. For a CLI smoke run, after configuring `.env` and YAML files, use `python -m auto_eval.cli run -d data/dataset.jsonl --limit 20`.
+The test command runs the suite with asyncio support enabled. The Uvicorn command serves both the API and static UI; there is no CLI entry point — all evaluation goes through the web UI or `auto_eval.web.runner`.
 
 ## Coding Style & Naming Conventions
 
@@ -22,7 +22,7 @@ Follow existing Python conventions: four-space indentation, `snake_case` for fun
 
 ## Testing Guidelines
 
-Write pytest tests as `tests/test_<feature>.py`, with test functions named `test_<behavior>`. Reuse fakes and fixtures from `tests/conftest.py` so ordinary tests do not call real LLMs or networks. Mark tests that need external services with `@pytest.mark.integration`; run focused checks, for example `python -m pytest -q tests/test_context.py`, before the full suite.
+Write pytest tests as `tests/test_<feature>.py`, with test functions named `test_<behavior>`. Tests fake the judge client / eval call via `monkeypatch` so they do not call real LLMs or networks. Mark tests that need external services with `@pytest.mark.integration`; run focused checks, for example `python -m pytest -q tests/test_context.py`, before the full suite.
 
 ## Commit & Pull Request Guidelines
 

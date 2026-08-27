@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import queue
+import sys
 import threading
 import traceback
 from contextlib import contextmanager
@@ -186,6 +187,42 @@ def _format_details(details: dict[str, Any]) -> str:
     )
 
 
+class _DropOldestQueueHandler(QueueHandler):
+    """有界日志队列：满时丢最旧记录保最新（错误记录更可能落在近期），避免磁盘
+    IO 变慢时无界堆积。丢弃计数走 stderr 而非本 logger，防止自反馈。"""
+
+    dropped = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # R7：enqueue 钩子是 Python 3.12 才接入 emit 调用链的；3.10/3.11 的
+        # QueueHandler.emit 直接 put_nowait，满后每条记录抛 queue.Full 刷
+        # stderr、丢最旧不生效。覆写 emit 才能全版本走同一丢最旧路径。
+        try:
+            self.enqueue(self.prepare(record))
+        except Exception:
+            self.handleError(record)
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.queue.put_nowait(record)
+            except queue.Full:
+                pass
+            _DropOldestQueueHandler.dropped += 1
+            if _DropOldestQueueHandler.dropped % 1000 == 1:
+                print(
+                    f"[auto_eval] 链路日志队列溢出，已丢弃 "
+                    f"{_DropOldestQueueHandler.dropped} 条最旧记录",
+                    file=sys.stderr,
+                )
+
+
 def _ensure_logger() -> logging.Logger:
     global _logger, _listener
     if _logger is not None:
@@ -212,8 +249,12 @@ def _ensure_logger() -> logging.Logger:
             )
             handler = _DailySizeHandler(log_dir, max_bytes)
             handler.setFormatter(_ChineseFormatter())
-            q: queue.SimpleQueue = queue.SimpleQueue()
-            logger.addHandler(QueueHandler(q))
+            # SimpleQueue 无界且 put 永不阻塞，磁盘写入慢于生产时会在内存中
+            # 无限堆积；改有界 Queue + 丢最旧策略提供背压。
+            q: queue.Queue = queue.Queue(
+                maxsize=int(os.environ.get("AUTO_EVAL_CHAIN_QUEUE_MAX", "10000"))
+            )
+            logger.addHandler(_DropOldestQueueHandler(q))
             _listener = QueueListener(q, handler, respect_handler_level=True)
             _listener.start()
         else:
