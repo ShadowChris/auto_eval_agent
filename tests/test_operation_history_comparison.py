@@ -276,7 +276,15 @@ def test_history_comparison_ui_links_to_comparison_workspace() -> None:
     assert "OK→其他" in html
     assert "筛选 Issue Type" in html
     assert "实验组频次" in html
+    assert "只看劣化" in html
+    assert "问题减少（优化）" in html
+    assert "问题增加（劣化）" in html
+    assert "频次差值（实验组-对照组）" in html
     assert "comparisonIssueRows" in js
+    assert 'pair._issue_sort_by = "count_delta"' in js
+    assert 'pair._issue_sort_direction = "asc"' in js
+    assert "comparisonIssueDeltaStyle" in js
+    assert "comparisonIssueDeltaText" in js
     assert 'item?.mode === "operation"' in js
     assert 'item?.operation_layout !== "multi_group"' in js
     assert 'item?.status === "done"' in js

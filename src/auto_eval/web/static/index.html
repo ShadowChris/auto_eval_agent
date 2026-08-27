@@ -956,15 +956,22 @@
         <div class="comparison-issue-controls">
           <input v-model="pair._issue_query" type="search" placeholder="筛选 Issue Type">
           <label><input v-model="pair._issue_changed_only" type="checkbox"> 只看有变化</label>
+          <label><input v-model="pair._issue_worsened_only" type="checkbox"> 只看劣化</label>
           <label>排序<select v-model="pair._issue_sort_by"><option value="target_count">实验组频次</option><option value="baseline_count">对照组频次</option><option value="target_rate">实验组占比</option><option value="baseline_rate">对照组占比</option><option value="count_delta">频次差值</option><option value="abs_count_delta">频次差值绝对值</option><option value="rate_delta">占比差值</option><option value="abs_rate_delta">占比差值绝对值</option><option value="issue_type">Issue Type</option></select></label>
           <select v-model="pair._issue_sort_direction" aria-label="排序方向"><option value="desc">降序</option><option value="asc">升序</option></select>
           <span class="hint">显示 {{ comparisonIssueRows(pair).length }}/{{ pair.issue_type_rows.length }} 项</span>
         </div>
-        <div class="table-scroll"><table class="grid auto-table comparison-issue-table"><thead><tr><th>Issue Type</th><th>对照组频次</th><th>对照组占比</th><th>实验组频次</th><th>实验组占比</th><th>频次差值</th><th>占比差值</th></tr></thead><tbody>
-          <tr v-for="row in comparisonIssueRows(pair)" :key="pair.target_task_id+'-'+row.issue_type"><td>{{ row.issue_type }}</td><td>{{ row.baseline_count }}</td><td>{{ row.baseline_rate!=null ? (row.baseline_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ row.target_count }}</td><td>{{ row.target_rate!=null ? (row.target_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ row.count_delta>0?'+':'' }}{{ row.count_delta }}</td><td>{{ row.rate_delta!=null ? (row.rate_delta>0?'+':'')+(row.rate_delta*100).toFixed(2)+'pp' : '—' }}</td></tr>
+        <div class="comparison-delta-legend" aria-label="Issue Type 变化图例">
+          <span class="comparison-delta-legend-label">问题减少（优化）</span><span class="comparison-delta-gradient comparison-delta-gradient-improved"></span>
+          <span class="comparison-delta-neutral-mark">持平</span>
+          <span class="comparison-delta-gradient comparison-delta-gradient-worsened"></span><span class="comparison-delta-legend-label">问题增加（劣化）</span>
+          <span class="hint">颜色越深表示当前对比中变化程度越大</span>
+        </div>
+        <div class="table-scroll"><table class="grid auto-table comparison-issue-table"><thead><tr><th>Issue Type</th><th>对照组频次</th><th>对照组占比</th><th>实验组频次</th><th>实验组占比</th><th>频次差值（实验组-对照组）</th><th>占比差值（实验组-对照组）</th></tr></thead><tbody>
+          <tr v-for="row in comparisonIssueRows(pair)" :key="pair.target_task_id+'-'+row.issue_type"><td>{{ row.issue_type }}</td><td>{{ row.baseline_count }}</td><td>{{ row.baseline_rate!=null ? (row.baseline_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ row.target_count }}</td><td>{{ row.target_rate!=null ? (row.target_rate*100).toFixed(2)+'%' : '—' }}</td><td class="comparison-delta-cell" :class="comparisonIssueDeltaClass(row.count_delta)" :style="comparisonIssueDeltaStyle(pair,row.count_delta,'count_delta')">{{ comparisonIssueDeltaText(row.count_delta) }}</td><td class="comparison-delta-cell" :class="comparisonIssueDeltaClass(row.rate_delta)" :style="comparisonIssueDeltaStyle(pair,row.rate_delta,'rate_delta')">{{ comparisonIssueDeltaText(row.rate_delta,'rate') }}</td></tr>
           <tr v-if="!comparisonIssueRows(pair).length"><td colspan="7" class="hint">没有符合筛选条件的 Issue Type</td></tr>
         </tbody></table></div>
-        <p class="hint">占比分母为该实验组与对照组共同且均评估有效的 Case；同一 Case 可包含多个 Issue Type。</p>
+        <p class="hint">差值=实验组-对照组；负值表示问题减少（优化），正值表示问题增加（劣化）。占比分母为双方共同且均评估有效的 Case；同一 Case 可包含多个 Issue Type。</p>
       </details>
       <div class="history-comparison-conclusion">
         <p>各组 Correctness 使用所有结果集共有且均有效的 Case；Issue Type 使用对应实验组与对照组的共同有效 Case。</p>

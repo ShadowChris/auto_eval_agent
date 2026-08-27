@@ -2301,8 +2301,9 @@ createApp({
         for (const pair of data.pairwise || []) {
           pair._issue_query = "";
           pair._issue_changed_only = false;
-          pair._issue_sort_by = "target_count";
-          pair._issue_sort_direction = "desc";
+          pair._issue_worsened_only = false;
+          pair._issue_sort_by = "count_delta";
+          pair._issue_sort_direction = "asc";
         }
         historyComparison.value = data;
       } catch (error) {
@@ -2364,7 +2365,10 @@ createApp({
       if (pair?._issue_changed_only) {
         rows = rows.filter((row) => Number(row.count_delta || 0) !== 0);
       }
-      const sortBy = pair?._issue_sort_by || "target_count";
+      if (pair?._issue_worsened_only) {
+        rows = rows.filter((row) => Number(row.count_delta || 0) > 0);
+      }
+      const sortBy = pair?._issue_sort_by || "count_delta";
       const direction = pair?._issue_sort_direction === "asc" ? 1 : -1;
       const valueOf = (row) => {
         if (sortBy === "abs_count_delta") return Math.abs(Number(row.count_delta || 0));
@@ -2384,6 +2388,42 @@ createApp({
         return String(left.issue_type || "").localeCompare(String(right.issue_type || ""), "zh-CN");
       });
       return rows;
+    }
+
+    function comparisonIssueDeltaClass(value) {
+      const numeric = Number(value || 0);
+      if (numeric < 0) return "comparison-delta-improved";
+      if (numeric > 0) return "comparison-delta-worsened";
+      return "comparison-delta-neutral";
+    }
+
+    function comparisonIssueDeltaStyle(pair, value, field) {
+      if (value == null || value === "") return {};
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric === 0) return {};
+      const maxAbs = Math.max(
+        0,
+        ...(pair?.issue_type_rows || []).map((row) => Math.abs(Number(row?.[field] || 0))),
+      );
+      const ratio = maxAbs > 0 ? Math.min(Math.abs(numeric) / maxAbs, 1) : 0;
+      const alpha = 0.10 + ratio * 0.30;
+      return {
+        backgroundColor: numeric < 0
+          ? `rgba(22, 163, 74, ${alpha.toFixed(3)})`
+          : `rgba(220, 38, 38, ${alpha.toFixed(3)})`,
+      };
+    }
+
+    function comparisonIssueDeltaText(value, kind = "count") {
+      if (value == null || value === "") return "—";
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return "—";
+      const formatted = kind === "rate"
+        ? `${numeric > 0 ? "+" : ""}${(numeric * 100).toFixed(2)}pp`
+        : `${numeric > 0 ? "+" : ""}${numeric}`;
+      if (numeric < 0) return `${formatted} ↓ 优化`;
+      if (numeric > 0) return `${formatted} ↑ 劣化`;
+      return `${formatted} 持平`;
     }
 
     function isActiveHistoryStatus(status) {
@@ -2869,6 +2909,7 @@ createApp({
       cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,
       generateHistoryComparison, exportHistoryComparison,
       comparisonCorrectnessCount, comparisonIssueRows,
+      comparisonIssueDeltaClass, comparisonIssueDeltaStyle, comparisonIssueDeltaText,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,
       isRerunSelected, setRerunSelected, togglePagedRerunSelection,

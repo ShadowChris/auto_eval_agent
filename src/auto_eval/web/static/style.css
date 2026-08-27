@@ -206,6 +206,16 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
 .comparison-issue-controls .hint { margin: 0 0 0 auto; }
 .comparison-issue-table th:first-child, .comparison-issue-table td:first-child { position: sticky; left: 0; z-index: 1; background: #fff; min-width: 220px; }
 .comparison-issue-table thead th:first-child { z-index: 2; background: #f8fafc; }
+.comparison-issue-table .comparison-delta-cell { min-width: 190px; font-weight: 650; text-align: center; transition: background-color .15s ease; }
+.comparison-delta-improved { color: #166534; }
+.comparison-delta-worsened { color: #991b1b; }
+.comparison-delta-neutral { color: #64748b; }
+.comparison-delta-legend { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin: 2px 0 8px; color: #475569; font-size: 12px; }
+.comparison-delta-legend .hint { margin: 0 0 0 6px; }
+.comparison-delta-gradient { width: 90px; height: 10px; border-radius: 999px; border: 1px solid rgba(148,163,184,.35); }
+.comparison-delta-gradient-improved { background: linear-gradient(90deg, rgba(22,163,74,.4), rgba(22,163,74,.1)); }
+.comparison-delta-gradient-worsened { background: linear-gradient(90deg, rgba(220,38,38,.1), rgba(220,38,38,.4)); }
+.comparison-delta-neutral-mark { padding: 1px 7px; border-radius: 999px; background: #f1f5f9; color: #64748b; }
 .comparison-page { max-width: 1500px; margin: 0 auto; }
 .comparison-page-topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .comparison-page-topbar h2 { margin: 0 0 4px; }
