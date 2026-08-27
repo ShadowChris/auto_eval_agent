@@ -42,29 +42,23 @@
   </div>
 
   <div v-show="workspacePage==='evaluation'">
-
-  <div class="tabs">
-    <button v-for="m in modes" :class="{active: mode===m.key}" @click="switchMode(m.key)">{{ m.label }}</button>
+    <div class="tabs">
+      <button v-for="m in modes" :class="{active: taskModule===m.key}" @click="switchTaskModule(m.key)">{{ m.label }}</button>
+    </div>
   </div>
+
+  <div v-show="workspacePage==='evaluation' && taskModule==='operation'">
 
   <details class="history-section">
     <summary>历史记录（{{ historyTotal }}）<button @click.stop="loadHistory" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
     <p class="hint">批跑由服务端持续执行，刷新页面后可从这里加载实时进度；服务进程重启或手动中断时会保留已完成的题目。</p>
     <div class="history-comparison-toolbar">
       <span>已选 {{ comparisonSelectedCount }}/5 个已完成任务类批次</span>
-      <label v-if="comparisonSelectedCount">
-        对照组
-        <select v-model="comparisonBaselineTaskId" @change="historyComparison=null;historyComparisonError=''">
-          <option v-for="item in comparisonSelectedList" :key="'comparison-baseline-'+item.task_id" :value="item.task_id">
-            {{ item.dataset_name || item.task_id }}
-          </option>
-        </select>
-      </label>
-      <button class="primary" @click="generateHistoryComparison" :disabled="comparisonSelectedCount<2 || historyComparisonLoading">
-        {{ historyComparisonLoading ? '生成中…' : '生成对比' }}
+      <button class="primary" @click="openComparisonFromHistory" :disabled="!comparisonSelectedCount">
+        加入对比分析
       </button>
-      <button @click="clearHistoryComparisonSelection" :disabled="!comparisonSelectedCount || historyComparisonLoading">清空选择</button>
-      <span class="hint">仅普通“任务类（录屏）”已完成记录可选；跨页选择会保留。</span>
+      <button @click="clearHistoryComparisonSelection" :disabled="!comparisonSelectedCount">清空选择</button>
+      <span class="hint">仅普通“任务类（录屏）”已完成记录可选；可与上传的评估结果集混合对比。</span>
     </div>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
@@ -151,97 +145,6 @@
       </template>
     </div>
     <p v-else class="hint">暂无历史记录。</p>
-    <p v-if="historyComparisonError" class="run-error">对比失败：{{ historyComparisonError }}</p>
-    <div v-if="historyComparison" class="history-comparison-result">
-      <div class="history-comparison-heading">
-        <h3>历史批次对比结果</h3>
-        <button @click="exportHistoryComparison" :disabled="historyComparisonLoading">导出对比 XLSX</button>
-      </div>
-      <div class="summary">
-        <span>批次数 {{ historyComparison.group_count }}</span>
-        <span>全组共同 Case {{ historyComparison.all_groups_common_matched_count }}</span>
-        <span>全组共同有效 Case {{ historyComparison.all_groups_common_valid_count }}</span>
-      </div>
-      <div class="history-comparison-group-map">
-        <span v-for="group in historyComparison.groups" :key="'comparison-map-'+group.task_id">
-          <strong>{{ group.group_label }}</strong>：{{ group.group_name }}
-        </span>
-      </div>
-      <p class="hint">Correctness 和 Issue Type 均基于所有选中批次共有且评估有效的 Case 统计。</p>
-      <h4>各批次 Correctness 对比</h4>
-      <div class="table-scroll">
-        <table class="grid auto-table">
-          <thead><tr><th>组别</th><th>数据集</th><th>原始数据量</th><th>共有有效数据量</th><th>ok</th><th>nok</th><th>no_support</th><th>others</th><th>OK率</th></tr></thead>
-          <tbody><tr v-for="group in historyComparison.groups" :key="'comparison-group-'+group.task_id">
-            <td><strong>{{ group.group_label }}</strong></td>
-            <td><div>{{ group.group_name }}</div><div class="history-task-id">{{ group.task_id }}</div></td>
-            <td>{{ group.original_count }}</td><td>{{ group.common_valid_count }}</td>
-            <td>{{ comparisonCorrectnessCount(group, 'ok') }}</td><td>{{ comparisonCorrectnessCount(group, 'nok') }}</td><td>{{ comparisonCorrectnessCount(group, 'no_support') }}</td><td>{{ comparisonCorrectnessCount(group, 'others') }}</td>
-            <td>{{ group.statistics.ok_rate!=null ? (group.statistics.ok_rate*100).toFixed(2)+'%' : '—' }}</td>
-          </tr></tbody>
-        </table>
-      </div>
-      <h4>相对对照组的共同 Case 对比</h4>
-      <div class="table-scroll">
-        <table class="grid auto-table">
-          <thead><tr><th>对比关系</th><th>共同 Case</th><th>共同有效 Case</th><th>对照组OK数</th><th>对照组OK率</th><th>实验组OK数</th><th>实验组OK率</th><th>差值</th><th>其他→OK</th><th>OK→其他</th><th>OK净变化</th></tr></thead>
-          <tbody><tr v-for="pair in historyComparison.pairwise" :key="'comparison-pair-'+pair.target_task_id">
-            <td><strong>{{ pair.baseline_label }}</strong> / <strong>{{ pair.target_label }}</strong></td><td>{{ pair.matched_count }}</td><td>{{ pair.valid_pair_count }}</td>
-            <td>{{ pair.baseline_ok_count }}</td><td>{{ pair.baseline_ok_rate!=null ? (pair.baseline_ok_rate*100).toFixed(2)+'%' : '—' }}</td>
-            <td>{{ pair.target_ok_count }}</td><td>{{ pair.target_ok_rate!=null ? (pair.target_ok_rate*100).toFixed(2)+'%' : '—' }}</td>
-            <td>{{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}</td>
-            <td>{{ pair.to_ok_count }}</td><td>{{ pair.from_ok_count }}</td><td>{{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }}</td>
-          </tr></tbody>
-        </table>
-      </div>
-      <p class="hint">“其他”表示 <code>nok</code>、<code>no_support</code> 或 <code>others</code>。</p>
-      <h4>对照组与实验组 Issue Type 详细对比</h4>
-      <details v-for="pair in historyComparison.pairwise" :key="'comparison-issue-detail-'+pair.target_task_id" class="history-comparison-detail">
-        <summary><strong>{{ pair.baseline_label }}</strong> vs <strong>{{ pair.target_label }}</strong>｜共同有效 {{ pair.valid_pair_count }} 条</summary>
-        <div class="comparison-issue-controls">
-          <input v-model="pair._issue_query" type="search" placeholder="筛选 Issue Type">
-          <label><input v-model="pair._issue_changed_only" type="checkbox"> 只看有变化</label>
-          <label>排序
-            <select v-model="pair._issue_sort_by">
-              <option value="target_count">实验组频次</option>
-              <option value="baseline_count">对照组频次</option>
-              <option value="target_rate">实验组占比</option>
-              <option value="baseline_rate">对照组占比</option>
-              <option value="count_delta">频次差值</option>
-              <option value="abs_count_delta">频次差值绝对值</option>
-              <option value="rate_delta">占比差值</option>
-              <option value="abs_rate_delta">占比差值绝对值</option>
-              <option value="issue_type">Issue Type</option>
-            </select>
-          </label>
-          <select v-model="pair._issue_sort_direction" aria-label="排序方向">
-            <option value="desc">降序</option>
-            <option value="asc">升序</option>
-          </select>
-          <span class="hint">显示 {{ comparisonIssueRows(pair).length }}/{{ pair.issue_type_rows.length }} 项</span>
-        </div>
-        <div class="table-scroll">
-          <table class="grid auto-table comparison-issue-table">
-            <thead><tr><th>Issue Type</th><th>对照组频次</th><th>对照组占比</th><th>实验组频次</th><th>实验组占比</th><th>频次差值</th><th>占比差值</th></tr></thead>
-            <tbody>
-              <tr v-for="row in comparisonIssueRows(pair)" :key="pair.target_task_id+'-'+row.issue_type">
-                <td>{{ row.issue_type }}</td><td>{{ row.baseline_count }}</td><td>{{ row.baseline_rate!=null ? (row.baseline_rate*100).toFixed(2)+'%' : '—' }}</td>
-                <td>{{ row.target_count }}</td><td>{{ row.target_rate!=null ? (row.target_rate*100).toFixed(2)+'%' : '—' }}</td>
-                <td>{{ row.count_delta>0?'+':'' }}{{ row.count_delta }}</td><td>{{ row.rate_delta!=null ? (row.rate_delta>0?'+':'')+(row.rate_delta*100).toFixed(2)+'pp' : '—' }}</td>
-              </tr>
-              <tr v-if="!comparisonIssueRows(pair).length"><td colspan="7" class="hint">没有符合筛选条件的 Issue Type</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="hint">占比分母为该实验组与对照组共同且均评估有效的 Case；同一 Case 可包含多个 Issue Type。</p>
-      </details>
-      <div class="history-comparison-conclusion">
-        <p>各组 Correctness 使用所有选中批次共有且均有效的 Case；Issue Type 使用对应实验组与对照组的共同有效 Case。</p>
-        <p v-for="pair in historyComparison.pairwise" :key="'comparison-conclusion-'+pair.target_task_id">
-          <strong>{{ pair.target_label }}</strong> 相对 <strong>{{ pair.baseline_label }}</strong>：共同有效 {{ pair.valid_pair_count }} 条，OK率相差 {{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}；其他→OK {{ pair.to_ok_count }} 条，OK→其他 {{ pair.from_ok_count }} 条，OK净变化 {{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }} 条。
-        </p>
-      </div>
-    </div>
   </details>
   <section>
     <h2>① 批量输入</h2>
@@ -921,6 +824,154 @@
     >{{ cellTooltip.text }}</div>
   </section>
   </div>
+
+  <section v-if="workspacePage==='evaluation' && taskModule==='comparison'" class="comparison-page">
+    <div class="comparison-page-topbar">
+      <div>
+        <h2>任务类对比分析</h2>
+        <p class="hint">选择已完成的任务类历史，或上传包含 correctness 的已评估 JSONL、CSV、Excel；最多 5 组，可混合使用。</p>
+      </div>
+      <div class="comparison-page-actions">
+        <label class="op-upload-btn" :class="{disabled:comparisonSources.length>=5 || comparisonImporting}">
+          <input type="file" accept=".jsonl,.csv,.xlsx,.xls,.xlsm,application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" @change="onComparisonResultFile" :disabled="comparisonSources.length>=5 || comparisonImporting" hidden>
+          {{ comparisonImporting ? '正在解析…' : '上传评估结果集' }}
+        </label>
+        <button @click="clearComparisonSources" :disabled="!comparisonSources.length || historyComparisonLoading">清空结果集</button>
+      </div>
+    </div>
+
+    <details class="comparison-history-picker">
+      <summary>从任务类历史记录选择（已选 {{ comparisonSelectedCount }} 条）</summary>
+      <div class="comparison-history-picker-actions">
+        <button @click="loadHistory" :disabled="loadingHistory">{{ loadingHistory ? '加载中…' : '刷新历史' }}</button>
+        <button class="primary" @click="addSelectedHistoryComparisonSources" :disabled="!comparisonSelectedCount || comparisonSources.length>=5">添加所选历史</button>
+        <button @click="clearHistoryComparisonSelection" :disabled="!comparisonSelectedCount">清空勾选</button>
+      </div>
+      <div class="table-scroll" v-if="historyItems.length">
+        <table class="grid auto-table comparison-history-table">
+          <thead><tr><th>选择</th><th>时间</th><th>数据集</th><th>进度</th><th>耗时</th></tr></thead>
+          <tbody><tr v-for="h in historyItems" :key="'comparison-picker-'+h.task_id">
+            <td><input type="checkbox" :checked="isHistoryComparisonSelected(h.task_id)" :disabled="!canCompareHistoryItem(h)" @change="toggleHistoryComparisonItem(h,$event.target.checked)"></td>
+            <td>{{ formatTime(h.created_at) }}</td><td><div>{{ h.dataset_name || '未命名数据集' }}</div><div class="history-task-id">{{ h.task_id }}</div></td>
+            <td>{{ h.done || 0 }}/{{ h.total || 0 }}</td><td>{{ formatHistoryDuration(h) }}</td>
+          </tr></tbody>
+        </table>
+      </div>
+      <div class="pagination" v-if="historyItems.length && historyPageCount>1">
+        <button @click="changeHistoryPage(-1)" :disabled="historyPage<=1">上一页</button>
+        <span>{{ historyPage }}/{{ historyPageCount }}</span>
+        <button @click="changeHistoryPage(1)" :disabled="historyPage>=historyPageCount">下一页</button>
+      </div>
+    </details>
+
+    <p v-if="comparisonImportError" class="run-error">导入失败：{{ comparisonImportError }}</p>
+    <div v-if="comparisonSources.length" class="comparison-source-list">
+      <article v-for="(source,index) in comparisonSources" :key="source.source_id" class="comparison-source-card" :class="{control:index===0}">
+        <div class="comparison-source-card-head">
+          <strong>{{ comparisonSourceRoleLabel(source) }}</strong>
+          <span class="comparison-source-kind">{{ source.source_type==='history' ? '历史任务' : '上传文件' }}</span>
+          <span class="hint comparison-source-order-hint">{{ index===0 ? '第一组固定为对照组' : '按顺序生成实验组标识' }}</span>
+          <div class="comparison-source-order-actions">
+            <button @click="moveComparisonSource(index,-1)" :disabled="index===0 || historyComparisonLoading" title="上移结果集">↑ 上移</button>
+            <button @click="moveComparisonSource(index,1)" :disabled="index===comparisonSources.length-1 || historyComparisonLoading" title="下移结果集">↓ 下移</button>
+          </div>
+          <button class="btn-danger" @click="removeComparisonSource(source.source_id)">删除</button>
+        </div>
+        <div class="comparison-source-name">
+          <span class="comparison-source-name-label">数据集名称</span>
+          <template v-if="source._editingName">
+            <input v-model="source._comparisonNameDraft" placeholder="数据集名称" @keyup.enter="saveComparisonSourceName(source)" @keyup.escape="cancelComparisonSourceNameEdit(source)">
+            <button class="history-text-link" @click="saveComparisonSourceName(source)">保存</button>
+            <button class="history-text-link" @click="cancelComparisonSourceNameEdit(source)">取消</button>
+          </template>
+          <template v-else>
+            <strong class="comparison-source-name-value">{{ source.group_name || source.dataset_name || source.source_id }}</strong>
+            <button class="history-text-link" @click="beginComparisonSourceNameEdit(source)">编辑</button>
+          </template>
+          <div class="history-task-id comparison-source-task-id">task_id: {{ source.task_id || source.source_id }}</div>
+        </div>
+        <div class="summary comparison-source-summary">
+          <span>原始 {{ source.summary?.raw_count ?? '—' }} 条</span>
+          <span>有效 {{ source.summary?.valid_count ?? '分析时计算' }}</span>
+          <span v-if="source.summary?.invalid_count">无效 {{ source.summary.invalid_count }}</span>
+          <span>{{ source.summary?.format || source.source_type }}</span>
+          <span v-if="source.summary?.sheet">工作表 {{ source.summary.sheet }}</span>
+        </div>
+        <div class="comparison-mapping">
+          <span>case_id：{{ source.mapping?.case_id || '未识别' }}</span>
+          <span>query：{{ source.mapping?.query || '未识别' }}</span>
+          <span>correctness：{{ source.mapping?.correctness || '未识别' }}</span>
+          <span>issue_types：{{ source.mapping?.issue_types || '未识别（可选）' }}</span>
+        </div>
+        <details v-if="source.warnings?.length"><summary>导入警告（{{ source.warnings.length }}）</summary><div class="comparison-warning-list"><div v-for="warning in source.warnings.slice(0,20)" :key="source.source_id+'-'+warning.row+'-'+warning.message">第 {{ warning.row }} 行：{{ warning.message }}</div><div v-if="source.warnings.length>20">另有 {{ source.warnings.length-20 }} 条</div></div></details>
+      </article>
+    </div>
+    <div v-else class="comparison-empty">请从历史记录添加任务，或上传已评估结果集。</div>
+
+    <div class="comparison-generate-bar">
+      <span>已添加 {{ comparisonSources.length }}/5 个结果集</span>
+      <span v-if="comparisonSources.length" class="hint">第一组为对照组，可通过上移/下移调整</span>
+      <button class="primary" @click="generateHistoryComparison" :disabled="!comparisonCanGenerate">{{ historyComparisonLoading ? '分析中…' : '生成对比分析' }}</button>
+    </div>
+    <p v-if="historyComparisonError" class="run-error">对比失败：{{ historyComparisonError }}</p>
+
+    <div v-if="historyComparison" class="history-comparison-result">
+      <div class="history-comparison-heading">
+        <h3>任务类对比分析结果</h3>
+        <button @click="exportHistoryComparison" :disabled="historyComparisonLoading">导出对比 XLSX</button>
+      </div>
+      <div class="summary">
+        <span>批次数 {{ historyComparison.group_count }}</span>
+        <span>全组共同 Case {{ historyComparison.all_groups_common_matched_count }}</span>
+        <span>全组共同有效 Case {{ historyComparison.all_groups_common_valid_count }}</span>
+      </div>
+      <div class="history-comparison-group-map">
+        <span v-for="group in historyComparison.groups" :key="'comparison-map-'+group.task_id"><strong>{{ group.group_label }}</strong>：{{ group.group_name }}</span>
+      </div>
+      <p class="hint">Correctness 使用所有选中结果集共有且均评估有效的 Case。</p>
+      <h4>各批次 Correctness 对比</h4>
+      <div class="table-scroll">
+        <table class="grid auto-table">
+          <thead><tr><th>组别</th><th>数据集</th><th>原始数据量</th><th>共有有效数据量</th><th>ok</th><th>nok</th><th>no_support</th><th>others</th><th>OK率</th></tr></thead>
+          <tbody><tr v-for="group in historyComparison.groups" :key="'comparison-group-'+group.task_id">
+            <td><strong>{{ group.group_label }}</strong></td><td><div>{{ group.group_name }}</div><div class="history-task-id">{{ group.task_id }}</div></td>
+            <td>{{ group.original_count }}</td><td>{{ group.common_valid_count }}</td><td>{{ comparisonCorrectnessCount(group, 'ok') }}</td><td>{{ comparisonCorrectnessCount(group, 'nok') }}</td><td>{{ comparisonCorrectnessCount(group, 'no_support') }}</td><td>{{ comparisonCorrectnessCount(group, 'others') }}</td>
+            <td>{{ group.statistics.ok_rate!=null ? (group.statistics.ok_rate*100).toFixed(2)+'%' : '—' }}</td>
+          </tr></tbody>
+        </table>
+      </div>
+      <h4>相对对照组的共同 Case 对比</h4>
+      <div class="table-scroll">
+        <table class="grid auto-table">
+          <thead><tr><th>对比关系</th><th>共同 Case</th><th>共同有效 Case</th><th>对照组OK数</th><th>对照组OK率</th><th>实验组OK数</th><th>实验组OK率</th><th>差值</th><th>其他→OK</th><th>OK→其他</th><th>OK净变化</th></tr></thead>
+          <tbody><tr v-for="pair in historyComparison.pairwise" :key="'comparison-pair-'+pair.target_task_id">
+            <td><strong>{{ pair.baseline_label }}</strong> / <strong>{{ pair.target_label }}</strong></td><td>{{ pair.matched_count }}</td><td>{{ pair.valid_pair_count }}</td><td>{{ pair.baseline_ok_count }}</td><td>{{ pair.baseline_ok_rate!=null ? (pair.baseline_ok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.target_ok_count }}</td><td>{{ pair.target_ok_rate!=null ? (pair.target_ok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}</td><td>{{ pair.to_ok_count }}</td><td>{{ pair.from_ok_count }}</td><td>{{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }}</td>
+          </tr></tbody>
+        </table>
+      </div>
+      <p class="hint">“其他”表示 <code>nok</code>、<code>no_support</code> 或 <code>others</code>。</p>
+      <h4>对照组与实验组 Issue Type 详细对比</h4>
+      <details v-for="pair in historyComparison.pairwise" :key="'comparison-issue-detail-'+pair.target_task_id" class="history-comparison-detail">
+        <summary><strong>{{ pair.baseline_label }}</strong> vs <strong>{{ pair.target_label }}</strong>｜共同有效 {{ pair.valid_pair_count }} 条</summary>
+        <div class="comparison-issue-controls">
+          <input v-model="pair._issue_query" type="search" placeholder="筛选 Issue Type">
+          <label><input v-model="pair._issue_changed_only" type="checkbox"> 只看有变化</label>
+          <label>排序<select v-model="pair._issue_sort_by"><option value="target_count">实验组频次</option><option value="baseline_count">对照组频次</option><option value="target_rate">实验组占比</option><option value="baseline_rate">对照组占比</option><option value="count_delta">频次差值</option><option value="abs_count_delta">频次差值绝对值</option><option value="rate_delta">占比差值</option><option value="abs_rate_delta">占比差值绝对值</option><option value="issue_type">Issue Type</option></select></label>
+          <select v-model="pair._issue_sort_direction" aria-label="排序方向"><option value="desc">降序</option><option value="asc">升序</option></select>
+          <span class="hint">显示 {{ comparisonIssueRows(pair).length }}/{{ pair.issue_type_rows.length }} 项</span>
+        </div>
+        <div class="table-scroll"><table class="grid auto-table comparison-issue-table"><thead><tr><th>Issue Type</th><th>对照组频次</th><th>对照组占比</th><th>实验组频次</th><th>实验组占比</th><th>频次差值</th><th>占比差值</th></tr></thead><tbody>
+          <tr v-for="row in comparisonIssueRows(pair)" :key="pair.target_task_id+'-'+row.issue_type"><td>{{ row.issue_type }}</td><td>{{ row.baseline_count }}</td><td>{{ row.baseline_rate!=null ? (row.baseline_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ row.target_count }}</td><td>{{ row.target_rate!=null ? (row.target_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ row.count_delta>0?'+':'' }}{{ row.count_delta }}</td><td>{{ row.rate_delta!=null ? (row.rate_delta>0?'+':'')+(row.rate_delta*100).toFixed(2)+'pp' : '—' }}</td></tr>
+          <tr v-if="!comparisonIssueRows(pair).length"><td colspan="7" class="hint">没有符合筛选条件的 Issue Type</td></tr>
+        </tbody></table></div>
+        <p class="hint">占比分母为该实验组与对照组共同且均评估有效的 Case；同一 Case 可包含多个 Issue Type。</p>
+      </details>
+      <div class="history-comparison-conclusion">
+        <p>各组 Correctness 使用所有结果集共有且均有效的 Case；Issue Type 使用对应实验组与对照组的共同有效 Case。</p>
+        <p v-for="pair in historyComparison.pairwise" :key="'comparison-conclusion-'+pair.target_task_id"><strong>{{ pair.target_label }}</strong> 相对 <strong>{{ pair.baseline_label }}</strong>：共同有效 {{ pair.valid_pair_count }} 条，OK率相差 {{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}；其他→OK {{ pair.to_ok_count }} 条，OK→其他 {{ pair.from_ok_count }} 条，OK净变化 {{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }} 条。</p>
+      </div>
+    </div>
+  </section>
 
   <section v-if="workspacePage==='knowledge'" class="knowledge-page">
     <div class="knowledge-topbar">

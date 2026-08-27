@@ -1,10 +1,9 @@
-"""任务类历史批次对比统计。"""
+"""任务类结果集对比统计。"""
 from __future__ import annotations
 
 import re
 import unicodedata
 from collections import Counter, defaultdict
-from pathlib import Path
 from typing import Any
 
 from .operation_statistics import (
@@ -107,8 +106,7 @@ def compare_operation_batches(
 
 def _assign_names(batches: list[dict[str, Any]]) -> None:
     raw_names = [
-        Path(str(batch.get("dataset_name") or "").replace("\\", "/")).stem
-        or str(batch.get("task_id") or "未命名批次")
+        _dataset_display_name(batch)
         for batch in batches
     ]
     name_counts = Counter(raw_names)
@@ -123,8 +121,14 @@ def _assign_names(batches: list[dict[str, Any]]) -> None:
 def _batch_name(batch: dict[str, Any]) -> str:
     if batch.get("comparison_name"):
         return str(batch["comparison_name"])
+    return _dataset_display_name(batch)
+
+
+def _dataset_display_name(batch: dict[str, Any]) -> str:
+    """保留数据集原始文件名，包括版本号中的点和文件扩展名。"""
     dataset_name = str(batch.get("dataset_name") or "").replace("\\", "/")
-    return Path(dataset_name).stem or str(batch.get("task_id") or "未命名批次")
+    name = dataset_name.rsplit("/", 1)[-1].strip()
+    return name or str(batch.get("task_id") or "未命名批次")
 
 
 def _group_statistics(

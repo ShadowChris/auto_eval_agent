@@ -2070,7 +2070,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
     """导出统一交集统计和逐题横向并集。"""
     groups = payload.get("groups") or []
     overview = [
-        ["任务类历史批次对比"],
+        ["任务类结果集对比"],
         [
             "统计口径",
             "Correctness 与 Issue Type 仅统计所有选中批次共有且均有效的 Case；"

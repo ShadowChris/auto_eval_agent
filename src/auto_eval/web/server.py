@@ -27,7 +27,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -66,6 +66,11 @@ from .operation_media import (
     resolve_operation_video_path,
 )
 from .operation_groups import align_operation_groups
+from .operation_comparison_import import (
+    SUPPORTED_SUFFIXES as COMPARISON_IMPORT_SUFFIXES,
+    import_operation_comparison_file,
+    validate_uploaded_comparison_source,
+)
 from .llm_providers import LLMProviderPayload, LLMProviderStore
 from .runner import run_eval, run_rerun, run_single_api_item
 from .tasks import (
@@ -169,6 +174,20 @@ class HistoryNoteReq(BaseModel):
 class OperationHistoryComparisonReq(BaseModel):
     task_ids: list[str]
     baseline_task_id: str
+
+
+class OperationComparisonSourceReq(BaseModel):
+    source_id: str
+    source_type: Literal["history", "upload"]
+    task_id: str = ""
+    dataset_name: str = ""
+    group_name: str = ""
+    rows: list[dict] = Field(default_factory=list)
+
+
+class OperationComparisonAnalyzeReq(BaseModel):
+    sources: list[OperationComparisonSourceReq]
+    control_source_id: str
 
 
 class RerunReq(BaseModel):
@@ -627,6 +646,22 @@ async def api_import_operation_table(file: UploadFile = File(...)):
             "direct_standard_columns": list(result.direct_standard_columns),
         },
     }
+
+
+@app.post("/api/operation/comparison/import")
+async def api_import_operation_comparison(file: UploadFile = File(...)):
+    """导入已评估的任务类结果集，供独立对比分析使用。"""
+    filename = Path(file.filename or "comparison_results").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in COMPARISON_IMPORT_SUFFIXES:
+        raise HTTPException(422, "仅支持 JSONL、CSV、XLSX、XLS、XLSM")
+    content = await file.read(_MAX_TABLE_DATASET_BYTES + 1)
+    if len(content) > _MAX_TABLE_DATASET_BYTES:
+        raise HTTPException(413, "评估结果文件超过 100MB 限制")
+    try:
+        return import_operation_comparison_file(filename, content)
+    except (ImportError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/api/operation/groups/align")
@@ -1218,6 +1253,87 @@ def api_operation_history_comparison_export(
     )
     utf8_name = f"{baseline_name}_history_compare_{timestamp}.xlsx"
     ascii_name = f"operation_history_compare_{timestamp}.xlsx"
+    return Response(
+        content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+            ),
+        },
+    )
+
+
+def _operation_comparison_analysis_payload(
+    request: OperationComparisonAnalyzeReq,
+    *,
+    include_union_rows: bool = False,
+) -> dict:
+    if not 2 <= len(request.sources) <= 5:
+        raise HTTPException(422, "请选择 2～5 个任务类评估结果集")
+    source_ids = [source.source_id.strip() for source in request.sources]
+    if not all(source_ids) or len(set(source_ids)) != len(source_ids):
+        raise HTTPException(422, "结果集 source_id 不能为空且不能重复")
+    if request.control_source_id not in source_ids:
+        raise HTTPException(422, "必须从已选结果集中指定一个对照组")
+
+    batches = []
+    for source in request.sources:
+        if source.source_type == "history":
+            task_id = source.task_id.strip() or source.source_id.strip()
+            live = get_live_task(task_id)
+            data = task_to_snapshot(live) if live else load_snapshot(task_id)
+            if not data:
+                raise HTTPException(404, f"历史任务不存在：{task_id}")
+            if data.get("status") != "done":
+                raise HTTPException(409, f"只能使用已完成任务：{task_id}")
+            try:
+                batch = operation_comparison_batch(data)
+            except ValueError as exc:
+                raise HTTPException(409, f"{task_id}：{exc}") from exc
+            batch["task_id"] = source.source_id.strip()
+        else:
+            try:
+                batch = validate_uploaded_comparison_source(
+                    source.model_dump(mode="python")
+                )
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        if source.group_name.strip():
+            batch["dataset_name"] = source.group_name.strip()
+        batches.append(batch)
+    try:
+        return compare_operation_batches(
+            batches,
+            baseline_task_id=request.control_source_id,
+            include_union_rows=include_union_rows,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/operation/comparison/analyze")
+def api_operation_comparison_analyze(request: OperationComparisonAnalyzeReq):
+    """对历史任务和上传结果集进行混合对比分析。"""
+    return _operation_comparison_analysis_payload(request)
+
+
+@app.post("/api/operation/comparison/export")
+def api_operation_comparison_export(request: OperationComparisonAnalyzeReq):
+    """导出独立任务类对比分析报告。"""
+    payload = _operation_comparison_analysis_payload(
+        request,
+        include_union_rows=True,
+    )
+    content = build_operation_comparison_xlsx(payload)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    control_name = _download_stem(
+        str(payload.get("baseline_name") or "operation"),
+        "operation",
+    )
+    utf8_name = f"{control_name}_comparison_{timestamp}.xlsx"
+    ascii_name = f"operation_comparison_{timestamp}.xlsx"
     return Response(
         content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

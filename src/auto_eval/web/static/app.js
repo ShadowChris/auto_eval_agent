@@ -4,6 +4,7 @@ import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 createApp({
   setup() {
     const workspacePage = ref("evaluation");
+    const taskModule = ref("operation");
     const modeLabels = {
       single: "垂域问答类",
       compare: "两回答对比",
@@ -14,10 +15,10 @@ createApp({
       rich_content: "垂域视觉评测",
       rich_content_quality: "垂域视觉综合评测",
     };
-    // 当前 Web 评估台只开放任务类入口；其他模式仍保留后端和历史兼容能力。
+    // 评估任务内只展示普通任务类与对比分析；多组 Beta 及其他模式仍保留后端和历史兼容能力。
     const modes = [
       { key: "operation", label: "任务类（录屏）" },
-      { key: "operation_multi_group", label: "任务类多组评估（Beta）" },
+      { key: "comparison", label: "任务类对比分析" },
     ];
     function modeLabel(key) {
       return modeLabels[key] || key;
@@ -128,6 +129,10 @@ createApp({
     const historyNoteEditing = ref({});
     const comparisonSelectedItems = ref({});
     const comparisonBaselineTaskId = ref("");
+    const comparisonSources = ref([]);
+    const comparisonControlSourceId = ref("");
+    const comparisonImporting = ref(false);
+    const comparisonImportError = ref("");
     const historyComparison = ref(null);
     const historyComparisonLoading = ref(false);
     const historyComparisonError = ref("");
@@ -137,6 +142,15 @@ createApp({
     const comparisonSelectedCount = computed(
       () => comparisonSelectedList.value.length,
     );
+    const comparisonCanGenerate = computed(() => (
+      comparisonSources.value.length >= 2
+      && comparisonSources.value.length <= 5
+      && comparisonSources.value.some(
+        (source) => source.source_id === comparisonControlSourceId.value,
+      )
+      && !comparisonImporting.value
+      && !historyComparisonLoading.value
+    ));
     const loadingHistory = ref(false);
     const loadingHistoryTaskId = ref("");
     const historyTotal = ref(0);
@@ -1200,6 +1214,17 @@ createApp({
       }
     }
 
+    function switchTaskModule(key) {
+      workspacePage.value = "evaluation";
+      taskModule.value = key;
+      if (key === "operation" && mode.value !== "operation") {
+        switchMode("operation");
+      }
+      if (key === "comparison" && !historyItems.value.length) {
+        loadHistory();
+      }
+    }
+
     function onFile(e) {
       const f = e.target.files[0];
       if (!f) return;
@@ -2076,6 +2101,9 @@ createApp({
         }
         historyComparison.value = null;
       }
+      if (comparisonSources.value.some((source) => source.source_id === id)) {
+        removeComparisonSource(id);
+      }
       await loadHistory();
     }
 
@@ -2101,6 +2129,8 @@ createApp({
           task_id: item.task_id,
           dataset_name: item.dataset_name || item.task_id,
           created_at: item.created_at,
+          total: item.total,
+          done: item.done,
         };
       } else {
         delete next[item.task_id];
@@ -2110,30 +2140,158 @@ createApp({
       if (!selectedIds.includes(comparisonBaselineTaskId.value)) {
         comparisonBaselineTaskId.value = selectedIds[0] || "";
       }
-      historyComparison.value = null;
-      historyComparisonError.value = "";
     }
 
     function clearHistoryComparisonSelection() {
       comparisonSelectedItems.value = {};
       comparisonBaselineTaskId.value = "";
+    }
+
+    function addSelectedHistoryComparisonSources() {
+      const existing = new Set(comparisonSources.value.map((source) => source.source_id));
+      const additions = comparisonSelectedList.value.filter((item) => !existing.has(item.task_id));
+      const available = Math.max(0, 5 - comparisonSources.value.length);
+      if (additions.length > available) {
+        alert(`第一版最多添加 5 个结果集，本次仅添加前 ${available} 个`);
+      }
+      for (const item of additions.slice(0, available)) {
+        comparisonSources.value.push({
+          source_id: item.task_id,
+          source_type: "history",
+          task_id: item.task_id,
+          dataset_name: item.dataset_name || item.task_id,
+          group_name: item.dataset_name || item.task_id,
+          rows: [],
+          mapping: { case_id: "历史快照", query: "历史快照", correctness: "历史结果", issue_types: "历史结果" },
+          warnings: [],
+          summary: {
+            format: "历史任务",
+            raw_count: Number(item.total || item.done || 0),
+            valid_count: Number(item.done || item.total || 0),
+            invalid_count: 0,
+            warning_count: 0,
+          },
+        });
+      }
+      syncComparisonControl();
       historyComparison.value = null;
       historyComparisonError.value = "";
     }
 
+    async function openComparisonPage() {
+      workspacePage.value = "evaluation";
+      taskModule.value = "comparison";
+      if (!historyItems.value.length) await loadHistory();
+    }
+
+    async function openComparisonFromHistory() {
+      addSelectedHistoryComparisonSources();
+      await openComparisonPage();
+    }
+
+    async function onComparisonResultFile(event) {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file || comparisonSources.value.length >= 5) return;
+      comparisonImporting.value = true;
+      comparisonImportError.value = "";
+      try {
+        const body = new FormData();
+        body.append("file", file);
+        const response = await fetch("/api/operation/comparison/import", {
+          method: "POST",
+          body,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        comparisonSources.value.push(data);
+        syncComparisonControl();
+        historyComparison.value = null;
+      } catch (error) {
+        comparisonImportError.value = error?.message || "评估结果集导入失败";
+      } finally {
+        comparisonImporting.value = false;
+      }
+    }
+
+    function removeComparisonSource(sourceId) {
+      comparisonSources.value = comparisonSources.value.filter(
+        (source) => source.source_id !== sourceId,
+      );
+      syncComparisonControl();
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function syncComparisonControl() {
+      comparisonControlSourceId.value = comparisonSources.value[0]?.source_id || "";
+    }
+
+    function moveComparisonSource(index, delta) {
+      const target = index + delta;
+      if (target < 0 || target >= comparisonSources.value.length) return;
+      const reordered = [...comparisonSources.value];
+      [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+      comparisonSources.value = reordered;
+      syncComparisonControl();
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function beginComparisonSourceNameEdit(source) {
+      source._comparisonNameDraft = source.group_name || source.dataset_name || source.source_id;
+      source._editingName = true;
+    }
+
+    function saveComparisonSourceName(source) {
+      source.group_name = String(source._comparisonNameDraft || "").trim()
+        || source.dataset_name
+        || source.source_id;
+      source._editingName = false;
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function cancelComparisonSourceNameEdit(source) {
+      source._comparisonNameDraft = source.group_name || source.dataset_name || source.source_id;
+      source._editingName = false;
+    }
+
+    function clearComparisonSources() {
+      comparisonSources.value = [];
+      comparisonControlSourceId.value = "";
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+      comparisonImportError.value = "";
+    }
+
+    function comparisonSourceRoleLabel(source) {
+      const index = Math.max(0, comparisonSources.value.findIndex(
+        (item) => item.source_id === source?.source_id,
+      ));
+      return index === 0 ? "对照组" : `实验组${String.fromCharCode(64 + index)}`;
+    }
+
     function historyComparisonRequestBody() {
       return {
-        task_ids: comparisonSelectedList.value.map((item) => item.task_id),
-        baseline_task_id: comparisonBaselineTaskId.value,
+        sources: comparisonSources.value.map((source) => ({
+          source_id: source.source_id,
+          source_type: source.source_type,
+          task_id: source.task_id || "",
+          dataset_name: source.dataset_name || "",
+          group_name: source.group_name || "",
+          rows: source.source_type === "upload" ? (source.rows || []) : [],
+        })),
+        control_source_id: comparisonSources.value[0]?.source_id || "",
       };
     }
 
     async function generateHistoryComparison() {
-      if (comparisonSelectedCount.value < 2 || !comparisonBaselineTaskId.value) return;
+      if (!comparisonCanGenerate.value) return;
       historyComparisonLoading.value = true;
       historyComparisonError.value = "";
       try {
-        const response = await fetch("/api/operation/history-comparison", {
+        const response = await fetch("/api/operation/comparison/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(historyComparisonRequestBody()),
@@ -2160,7 +2318,7 @@ createApp({
       historyComparisonLoading.value = true;
       historyComparisonError.value = "";
       try {
-        const response = await fetch("/api/operation/history-comparison/export", {
+        const response = await fetch("/api/operation/comparison/export", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(historyComparisonRequestBody()),
@@ -2174,7 +2332,7 @@ createApp({
         const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
         const filename = utf8Match
           ? decodeURIComponent(utf8Match[1])
-          : "operation_history_compare.xlsx";
+          : "operation_comparison.xlsx";
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
@@ -2673,8 +2831,8 @@ createApp({
     });
 
     return {
-      workspacePage,
-      modes, mode, modeLabel, historyModeLabel, isVideoMode, isMultiGroupMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
+      workspacePage, taskModule,
+      modes, mode, modeLabel, historyModeLabel, switchTaskModule, isVideoMode, isMultiGroupMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       llmProviders, selectedProviderId, selectedProviderModel, selectedProvider,
       defaultJudgeBaseUrl, defaultJudgeModel,
       selectedProviderModels, providerModelOptions, providerManagerOpen, providerForm, providerBusy,
@@ -2688,7 +2846,9 @@ createApp({
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, loadingHistoryTaskId, historyTotal, pageSize,
       comparisonSelectedItems, comparisonSelectedList, comparisonSelectedCount,
-      comparisonBaselineTaskId, historyComparison, historyComparisonLoading, historyComparisonError,
+      comparisonBaselineTaskId, comparisonSources, comparisonControlSourceId,
+      comparisonImporting, comparisonImportError, comparisonCanGenerate,
+      historyComparison, historyComparisonLoading, historyComparisonError,
       historyPage, historyPageSize, historyPageCount, historyJumpPage,
       opPage, opPageSize, opPageCount, opJumpPage,
       previewPage, previewPageCount, previewJumpPage,
@@ -2702,7 +2862,12 @@ createApp({
       trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       canCompareHistoryItem, isHistoryComparisonSelected, toggleHistoryComparisonItem,
-      clearHistoryComparisonSelection, generateHistoryComparison, exportHistoryComparison,
+      clearHistoryComparisonSelection, addSelectedHistoryComparisonSources,
+      openComparisonPage, openComparisonFromHistory, onComparisonResultFile,
+      removeComparisonSource, moveComparisonSource, clearComparisonSources,
+      beginComparisonSourceNameEdit, saveComparisonSourceName,
+      cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,
+      generateHistoryComparison, exportHistoryComparison,
       comparisonCorrectnessCount, comparisonIssueRows,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,

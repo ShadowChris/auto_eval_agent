@@ -120,6 +120,25 @@ def test_history_comparison_uses_one_baseline_for_multiple_batches() -> None:
     assert baseline_counts == {"ok": 1, "nok": 1, "no_support": 0, "others": 0}
 
 
+def test_history_comparison_preserves_dataset_name_with_version_dot() -> None:
+    baseline = _batch("a", "rom7.0_众测980_对照组", [
+        _row(0, "q1", "ok", case_id="1"),
+    ])
+    target = _batch("b", "rom7.0_众测980_实验组", [
+        _row(0, "q1", "ok", case_id="1"),
+    ])
+
+    payload = compare_operation_batches(
+        [baseline, target],
+        baseline_task_id="a",
+    )
+
+    assert [group["group_name"] for group in payload["groups"]] == [
+        "rom7.0_众测980_对照组.jsonl",
+        "rom7.0_众测980_实验组.jsonl",
+    ]
+
+
 def test_history_comparison_uses_all_group_valid_intersection_and_union_export() -> None:
     baseline = _batch("a", "A", [
         _row(0, "q1", "ok", case_id="1"),
@@ -246,7 +265,7 @@ def test_history_comparison_api_rejects_unfinished_or_multi_group(monkeypatch) -
     assert "只能对比已完成任务" in str(raised.value.detail)
 
 
-def test_history_comparison_ui_is_in_operation_history() -> None:
+def test_history_comparison_ui_links_to_comparison_workspace() -> None:
     html = (server.STATIC_DIR / "index.html").read_text(encoding="utf-8")
     js = (server.STATIC_DIR / "app.js").read_text(encoding="utf-8")
 
@@ -261,4 +280,13 @@ def test_history_comparison_ui_is_in_operation_history() -> None:
     assert 'item?.mode === "operation"' in js
     assert 'item?.operation_layout !== "multi_group"' in js
     assert 'item?.status === "done"' in js
-    assert 'fetch("/api/operation/history-comparison"' in js
+    assert "加入对比分析" in html
+    assert "taskModule==='comparison'" in html
+    assert "第一组为对照组" in html
+    assert "moveComparisonSource(index,-1)" in html
+    assert "moveComparisonSource(index,1)" in html
+    assert "function moveComparisonSource" in js
+    assert "beginComparisonSourceNameEdit" in js
+    assert "saveComparisonSourceName" in js
+    assert "task_id: {{ source.task_id || source.source_id }}" in html
+    assert 'fetch("/api/operation/comparison/analyze"' in js
