@@ -81,7 +81,7 @@ createApp({
     const providerMessage = ref("");
     const providerError = ref(false);
     const providerForm = ref(emptyProviderForm());
-    const concurrency = ref(4);
+    const concurrency = ref(8);
     const evalTimeout = ref(300);
     const running = ref(false);
     const progress = ref(0);

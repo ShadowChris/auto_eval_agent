@@ -316,6 +316,15 @@ def _terminal_user_judge_name(app_cfg) -> str:
     return judge.name
 
 
+def _with_operation_eval_persona(app_cfg, mode: Mode, options: dict) -> dict:
+    """任务类固定终端用户视角；模型服务由 judge_backend 独立选择。"""
+    normalized = dict(options or {})
+    if mode == "operation":
+        normalized["judges"] = [_terminal_user_judge_name(app_cfg)]
+        normalized.setdefault("concurrency", 8)
+    return normalized
+
+
 def _normalize_single_operation_item(raw_item: dict) -> dict:
     """复用任务类 JSONL 解析规则，校验单题并保留所有原始字段。"""
     item_id = raw_item.get("id")
@@ -664,9 +673,20 @@ async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
-    _validate_eval_request(req, app_cfg)
+    requested_options = _with_operation_eval_persona(
+        app_cfg,
+        req.mode,
+        req.options,
+    )
+    _validate_eval_request(
+        req.model_copy(update={"options": requested_options}),
+        app_cfg,
+    )
     try:
-        task_options, runtime_cfg = _normalize_eval_options(app_cfg, req.options)
+        task_options, runtime_cfg = _normalize_eval_options(
+            app_cfg,
+            requested_options,
+        )
     except KeyError as exc:
         raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
     except ValueError as exc:
