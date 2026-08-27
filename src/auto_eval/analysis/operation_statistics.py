@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from typing import Any, Iterable
 
 
@@ -60,7 +60,6 @@ def summarize_operation_results(
     ]
 
     issue_case_counts: Counter[str] = Counter()
-    issue_correctness: dict[str, set[str]] = defaultdict(set)
     issue_case_count = 0
     for row in valid:
         raw_issues = _issue_types(row.get("issue_types"))
@@ -69,20 +68,12 @@ def summarize_operation_results(
             issue_case_count += 1
         for issue in unique_issues:
             issue_case_counts[issue] += 1
-            issue_correctness[issue].add(str(row["correctness"]))
 
-    correctness_order = {
-        correctness: index for index, correctness in enumerate(OPERATION_CORRECTNESS)
-    }
     issue_type_rows = [
         {
             "issue_type": issue,
             "case_count": count,
             "rate": round(count / valid_count, 4) if valid_count else None,
-            "correctness": sorted(
-                issue_correctness[issue],
-                key=lambda value: correctness_order.get(value, len(correctness_order)),
-            ),
         }
         for issue, count in sorted(
             issue_case_counts.items(),

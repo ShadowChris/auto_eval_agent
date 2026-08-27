@@ -180,24 +180,26 @@ tr.trace td { background: #eff6ff !important; color: #1e40af; font-size: 12px; }
 .operation-statistics { margin: 10px 0 16px; padding: 12px 14px; border: 1px solid #dbe3f0; border-radius: 10px; background: #fbfdff; }
 .operation-statistics > summary { cursor: pointer; font-weight: 700; color: #26354a; }
 .operation-statistics-overview { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 12px 0 4px; color: #475569; font-size: 13px; }
-.operation-statistics-grid { display: grid; grid-template-columns: minmax(280px, .75fr) minmax(480px, 1.5fr); gap: 18px; align-items: start; }
+.operation-statistics-grid { display: grid; grid-template-columns: minmax(280px, 360px) minmax(380px, 620px); gap: 18px; align-items: start; justify-content: start; }
 .operation-statistics-grid h3 { margin: 12px 0 4px; font-size: 14px; color: #334155; }
-.operation-statistics-table { min-width: 100%; table-layout: fixed; }
+.operation-statistics-table { width: 100%; min-width: 0; table-layout: fixed; }
 .operation-statistics-table th, .operation-statistics-table td { white-space: nowrap; }
 .correctness-statistics-table th:nth-child(1) { width: 34%; }
 .correctness-statistics-table th:nth-child(2) { width: 22%; }
 .correctness-statistics-table th:nth-child(3) { width: 44%; }
-.issue-statistics-table { min-width: 620px; }
-.issue-statistics-table th:nth-child(1) { width: 42%; }
-.issue-statistics-table th:nth-child(2) { width: 18%; }
-.issue-statistics-table th:nth-child(3) { width: 18%; }
-.issue-statistics-table th:nth-child(4) { width: 22%; }
-.issue-statistics-table td:first-child,
-.issue-statistics-table td:last-child { white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
+.issue-statistics-table { min-width: 380px; max-width: 620px; }
+.issue-statistics-table th:nth-child(1) { width: 52%; }
+.issue-statistics-table th:nth-child(2) { width: 24%; }
+.issue-statistics-table th:nth-child(3) { width: 24%; }
+.issue-statistics-table td:first-child { white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
 .operation-statistics-more { display: inline-block; margin-top: 8px; }
+.operation-statistics-detail-note { margin: 8px 0 0; }
 .operation-statistics-conclusion { margin: 14px 0 4px; padding: 10px 12px; border-left: 3px solid #6366f1; background: #f5f7ff; color: #334155; line-height: 1.65; }
 .operation-statistics-note { margin: 6px 0 0; }
-@media (max-width: 900px) { .operation-statistics-grid { grid-template-columns: 1fr; } }
+@media (max-width: 900px) {
+  .operation-statistics-grid { grid-template-columns: minmax(0, 620px); }
+  .issue-statistics-table { min-width: 0; }
+}
 select, input[type=number] { padding: 6px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; }
 .provider-model-label { width: auto; min-width: auto; }
 .provider-model-select { min-width: 240px; max-width: 420px; }

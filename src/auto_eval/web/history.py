@@ -1533,7 +1533,6 @@ def _operation_statistics_export_rows(snapshot: dict) -> list[dict]:
             "类别": row["correctness"],
             "频次": row["count"],
             "占有效评估比例": row["rate"],
-            "关联判定": "",
         })
     for row in statistics["issue_type_rows"]:
         rows.append({
@@ -1541,7 +1540,6 @@ def _operation_statistics_export_rows(snapshot: dict) -> list[dict]:
             "类别": row["issue_type"],
             "频次": row["case_count"],
             "占有效评估比例": row["rate"],
-            "关联判定": "；".join(row["correctness"]),
         })
     if not rows:
         rows.append({
@@ -1549,7 +1547,6 @@ def _operation_statistics_export_rows(snapshot: dict) -> list[dict]:
             "类别": statistics["conclusion"],
             "频次": "",
             "占有效评估比例": "",
-            "关联判定": "",
         })
     return rows
 
@@ -1589,7 +1586,7 @@ def _operation_statistics_sheet(payload: dict) -> tuple[list[list[Any]], set[int
     matrix.extend([
         [],
         ["Issue Type 分布"],
-        ["问题类型", "涉及 Case 数", "占有效 Case 比例", "关联判定"],
+        ["问题类型", "涉及 Case 数", "占有效 Case 比例"],
     ])
     if statistics["issue_type_rows"]:
         for row in statistics["issue_type_rows"]:
@@ -1597,10 +1594,9 @@ def _operation_statistics_sheet(payload: dict) -> tuple[list[list[Any]], set[int
                 row["issue_type"],
                 row["case_count"],
                 _display_percent(row["rate"]),
-                "；".join(row["correctness"]),
             ])
     else:
-        matrix.append(["暂无问题类型", 0, "0.00%", ""])
+        matrix.append(["暂无问题类型", 0, "0.00%"])
     matrix.extend([
         [],
         ["统计结论"],
@@ -1611,7 +1607,7 @@ def _operation_statistics_sheet(payload: dict) -> tuple[list[list[Any]], set[int
     ])
     # 行号从 1 开始，与 OOXML 一致。
     bold_rows = {1, 11, 12, 17, 18, len(matrix) - 4, len(matrix) - 1}
-    return matrix, bold_rows, [38, 16, 20, 22]
+    return matrix, bold_rows, [30, 14, 18]
 
 
 def _format_ts(value) -> str:

@@ -42,19 +42,16 @@ def test_operation_statistics_deduplicates_and_sorts_issue_types() -> None:
             "issue_type": "未展示可验证结果",
             "case_count": 2,
             "rate": 0.6667,
-            "correctness": ["nok"],
         },
         {
             "issue_type": "路径冗余",
             "case_count": 2,
             "rate": 0.6667,
-            "correctness": ["ok", "nok"],
         },
         {
             "issue_type": "文字回复严重异常",
             "case_count": 1,
             "rate": 0.3333,
-            "correctness": ["nok"],
         },
     ]
     assert "OK 率 33.33%" in statistics["conclusion"]

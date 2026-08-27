@@ -203,7 +203,6 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
         "类别": "ok",
         "频次": 1,
         "占有效评估比例": 1.0,
-        "关联判定": "",
     }
 
 
@@ -222,8 +221,8 @@ def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
         for row in sheet.iter_rows()
     ]
     assert values[0][0] == "任务类评估统计"
-    assert ["Correctness 分布", None, None, None] in values
-    assert ["Issue Type 分布", None, None, None] in values
+    assert ["Correctness 分布", None, None] in values
+    assert ["Issue Type 分布", None, None] in values
     assert any(row[0] == "统计结论" for row in values)
     assert any(
         row[0] == "OK 率（有效评估口径）" and row[1] == "100.00%"
