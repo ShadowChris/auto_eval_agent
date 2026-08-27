@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from ..analysis.operation_statistics import summarize_operation_results
 from ..paths import RUNS_DIR
 from ..config import AppConfig
 from ..dataset import to_prompt
@@ -55,6 +56,36 @@ from .tasks import Task, prune_task_cache
 logger = logging.getLogger(__name__)
 MAX_PROGRESS_EVENTS_PER_ITEM = 100
 SNAPSHOT_PERSIST_INTERVAL_S = 1.0
+
+
+def _default_task_concurrency(task: Task) -> int:
+    return 8 if task.mode == "operation" else 4
+
+
+def _selected_judge_configs(task: Task, cfg: AppConfig) -> list:
+    """解析评估视角；任务类固定终端用户，模型服务与其独立。"""
+    if task.mode == "operation":
+        terminal = next(
+            (judge for judge in cfg.judges if judge.persona == "end_user"),
+            None,
+        )
+        if terminal is None:
+            terminal = next(
+                (
+                    judge
+                    for judge in cfg.judges
+                    if str(judge.display or "").strip() == "终端用户"
+                ),
+                None,
+            )
+        if terminal is None:
+            raise ValueError("任务类评估缺少终端用户裁判配置")
+        return [terminal]
+    selected = list(task.options.get("judges") or [])
+    matched = [judge for judge in cfg.judges if judge.name in selected]
+    if matched:
+        return matched
+    return cfg.judges[:1]
 
 
 def _persist_task(task: Task, *, force: bool = False) -> bool:
@@ -307,7 +338,10 @@ async def run_single_api_item(
 ) -> None:
     """执行接口提交的一题；不同 item_id 可并行，结果仍原位合并。"""
     if task.single_api_semaphore is None:
-        concurrency = max(1, int(task.options.get("concurrency", 4)))
+        concurrency = max(
+            1,
+            int(task.options.get("concurrency", _default_task_concurrency(task))),
+        )
         task.single_api_semaphore = asyncio.Semaphore(concurrency)
     semaphore = task.single_api_semaphore
     task.mark_started()
@@ -401,8 +435,7 @@ async def _run(
     item_indices: list[int] | None = None,
     rerun: dict | None = None,
 ) -> None:
-    selected = task.options.get("judges") or [cfg.judges[0].name]
-    judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
+    judges_cfg = _selected_judge_configs(task, cfg)
     run_backend = dict(
         ((rerun or {}).get("judge_backend") or {})
         if rerun is not None
@@ -458,7 +491,9 @@ async def _run(
             )
             visual_judge = RichContentJudge(visual_client, rich_profile, prompt_variant="rich_content_quality")
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
-    sem = asyncio.Semaphore(int(task.options.get("concurrency", 4)))
+    sem = asyncio.Semaphore(int(
+        task.options.get("concurrency", _default_task_concurrency(task))
+    ))
     eval_timeout = float(task.options.get("eval_timeout_s") or task.options.get("eval_timeout") or 300.0)
 
     online_runner = None
@@ -1635,6 +1670,10 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
         and cfg.domain_skills["operation"].rubrics
         else 5
     )
+    statistics = summarize_operation_results(
+        results,
+        total_cases=len(task.items),
+    )
     return {
         "total": len(results),
         "done": len(completed),
@@ -1650,6 +1689,7 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
             else None
         ),
         "correctness_dist": dict(collections.Counter(row["correctness"] for row in judged)),
+        "operation_statistics": statistics,
     }
 
 

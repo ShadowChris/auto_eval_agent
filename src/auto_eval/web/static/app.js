@@ -4,6 +4,7 @@ import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 createApp({
   setup() {
     const workspacePage = ref("evaluation");
+    const taskModule = ref("operation");
     const modeLabels = {
       single: "垂域问答类",
       compare: "两回答对比",
@@ -14,10 +15,10 @@ createApp({
       rich_content: "垂域视觉评测",
       rich_content_quality: "垂域视觉综合评测",
     };
-    // 当前 Web 评估台只开放任务类入口；其他模式仍保留后端和历史兼容能力。
+    // 评估任务内只展示普通任务类与对比分析；多组 Beta 及其他模式仍保留后端和历史兼容能力。
     const modes = [
       { key: "operation", label: "任务类（录屏）" },
-      { key: "operation_multi_group", label: "任务类多组评估（Beta）" },
+      { key: "comparison", label: "任务类对比分析" },
     ];
     function modeLabel(key) {
       return modeLabels[key] || key;
@@ -81,13 +82,22 @@ createApp({
     const providerMessage = ref("");
     const providerError = ref(false);
     const providerForm = ref(emptyProviderForm());
-    const concurrency = ref(4);
+    const concurrency = ref(8);
     const evalTimeout = ref(300);
     const running = ref(false);
     const progress = ref(0);
     const total = ref(0);
     const results = ref([]);
     const summary = ref(null);
+    const issueStatsExpanded = ref(false);
+    const operationStatistics = computed(() => {
+      if (isMultiGroupMode.value) return null;
+      return summary.value?.operation_statistics || null;
+    });
+    const visibleOperationIssueStats = computed(() => {
+      const rows = operationStatistics.value?.issue_type_rows || [];
+      return issueStatsExpanded.value ? rows : rows.slice(0, 10);
+    });
     const taskId = ref("");
     const loadedTaskOptions = ref({});
     const runError = ref("");
@@ -117,6 +127,30 @@ createApp({
     const historyItems = ref([]);
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
+    const comparisonSelectedItems = ref({});
+    const comparisonBaselineTaskId = ref("");
+    const comparisonSources = ref([]);
+    const comparisonControlSourceId = ref("");
+    const comparisonImporting = ref(false);
+    const comparisonImportError = ref("");
+    const historyComparison = ref(null);
+    const historyComparisonLoading = ref(false);
+    const historyComparisonError = ref("");
+    const comparisonSelectedList = computed(
+      () => Object.values(comparisonSelectedItems.value),
+    );
+    const comparisonSelectedCount = computed(
+      () => comparisonSelectedList.value.length,
+    );
+    const comparisonCanGenerate = computed(() => (
+      comparisonSources.value.length >= 2
+      && comparisonSources.value.length <= 5
+      && comparisonSources.value.some(
+        (source) => source.source_id === comparisonControlSourceId.value,
+      )
+      && !comparisonImporting.value
+      && !historyComparisonLoading.value
+    ));
     const loadingHistory = ref(false);
     const loadingHistoryTaskId = ref("");
     const historyTotal = ref(0);
@@ -1180,6 +1214,17 @@ createApp({
       }
     }
 
+    function switchTaskModule(key) {
+      workspacePage.value = "evaluation";
+      taskModule.value = key;
+      if (key === "operation" && mode.value !== "operation") {
+        switchMode("operation");
+      }
+      if (key === "comparison" && !historyItems.value.length) {
+        loadHistory();
+      }
+    }
+
     function onFile(e) {
       const f = e.target.files[0];
       if (!f) return;
@@ -2047,7 +2092,338 @@ createApp({
         results.value = [];
         summary.value = null;
       }
+      if (comparisonSelectedItems.value[id]) {
+        const next = { ...comparisonSelectedItems.value };
+        delete next[id];
+        comparisonSelectedItems.value = next;
+        if (comparisonBaselineTaskId.value === id) {
+          comparisonBaselineTaskId.value = Object.keys(next)[0] || "";
+        }
+        historyComparison.value = null;
+      }
+      if (comparisonSources.value.some((source) => source.source_id === id)) {
+        removeComparisonSource(id);
+      }
       await loadHistory();
+    }
+
+    function canCompareHistoryItem(item) {
+      return item?.mode === "operation"
+        && item?.operation_layout !== "multi_group"
+        && item?.status === "done";
+    }
+
+    function isHistoryComparisonSelected(taskId) {
+      return Boolean(comparisonSelectedItems.value[taskId]);
+    }
+
+    function toggleHistoryComparisonItem(item, checked) {
+      const next = { ...comparisonSelectedItems.value };
+      if (checked) {
+        if (!canCompareHistoryItem(item)) return;
+        if (!next[item.task_id] && Object.keys(next).length >= 5) {
+          alert("第一版最多选择 5 个历史批次进行对比");
+          return;
+        }
+        next[item.task_id] = {
+          task_id: item.task_id,
+          dataset_name: item.dataset_name || item.task_id,
+          created_at: item.created_at,
+          total: item.total,
+          done: item.done,
+        };
+      } else {
+        delete next[item.task_id];
+      }
+      comparisonSelectedItems.value = next;
+      const selectedIds = Object.keys(next);
+      if (!selectedIds.includes(comparisonBaselineTaskId.value)) {
+        comparisonBaselineTaskId.value = selectedIds[0] || "";
+      }
+    }
+
+    function clearHistoryComparisonSelection() {
+      comparisonSelectedItems.value = {};
+      comparisonBaselineTaskId.value = "";
+    }
+
+    function addSelectedHistoryComparisonSources() {
+      const existing = new Set(comparisonSources.value.map((source) => source.source_id));
+      const additions = comparisonSelectedList.value.filter((item) => !existing.has(item.task_id));
+      const available = Math.max(0, 5 - comparisonSources.value.length);
+      if (additions.length > available) {
+        alert(`第一版最多添加 5 个结果集，本次仅添加前 ${available} 个`);
+      }
+      for (const item of additions.slice(0, available)) {
+        comparisonSources.value.push({
+          source_id: item.task_id,
+          source_type: "history",
+          task_id: item.task_id,
+          dataset_name: item.dataset_name || item.task_id,
+          group_name: item.dataset_name || item.task_id,
+          rows: [],
+          mapping: { case_id: "历史快照", query: "历史快照", correctness: "历史结果", issue_types: "历史结果" },
+          warnings: [],
+          summary: {
+            format: "历史任务",
+            raw_count: Number(item.total || item.done || 0),
+            valid_count: Number(item.done || item.total || 0),
+            invalid_count: 0,
+            warning_count: 0,
+          },
+        });
+      }
+      syncComparisonControl();
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    async function openComparisonPage() {
+      workspacePage.value = "evaluation";
+      taskModule.value = "comparison";
+      if (!historyItems.value.length) await loadHistory();
+    }
+
+    async function openComparisonFromHistory() {
+      addSelectedHistoryComparisonSources();
+      await openComparisonPage();
+    }
+
+    async function onComparisonResultFile(event) {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file || comparisonSources.value.length >= 5) return;
+      comparisonImporting.value = true;
+      comparisonImportError.value = "";
+      try {
+        const body = new FormData();
+        body.append("file", file);
+        const response = await fetch("/api/operation/comparison/import", {
+          method: "POST",
+          body,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        comparisonSources.value.push(data);
+        syncComparisonControl();
+        historyComparison.value = null;
+      } catch (error) {
+        comparisonImportError.value = error?.message || "评估结果集导入失败";
+      } finally {
+        comparisonImporting.value = false;
+      }
+    }
+
+    function removeComparisonSource(sourceId) {
+      comparisonSources.value = comparisonSources.value.filter(
+        (source) => source.source_id !== sourceId,
+      );
+      syncComparisonControl();
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function syncComparisonControl() {
+      comparisonControlSourceId.value = comparisonSources.value[0]?.source_id || "";
+    }
+
+    function moveComparisonSource(index, delta) {
+      const target = index + delta;
+      if (target < 0 || target >= comparisonSources.value.length) return;
+      const reordered = [...comparisonSources.value];
+      [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+      comparisonSources.value = reordered;
+      syncComparisonControl();
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function beginComparisonSourceNameEdit(source) {
+      source._comparisonNameDraft = source.group_name || source.dataset_name || source.source_id;
+      source._editingName = true;
+    }
+
+    function saveComparisonSourceName(source) {
+      source.group_name = String(source._comparisonNameDraft || "").trim()
+        || source.dataset_name
+        || source.source_id;
+      source._editingName = false;
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function cancelComparisonSourceNameEdit(source) {
+      source._comparisonNameDraft = source.group_name || source.dataset_name || source.source_id;
+      source._editingName = false;
+    }
+
+    function clearComparisonSources() {
+      comparisonSources.value = [];
+      comparisonControlSourceId.value = "";
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+      comparisonImportError.value = "";
+    }
+
+    function comparisonSourceRoleLabel(source) {
+      const index = Math.max(0, comparisonSources.value.findIndex(
+        (item) => item.source_id === source?.source_id,
+      ));
+      return index === 0 ? "对照组" : `实验组${String.fromCharCode(64 + index)}`;
+    }
+
+    function historyComparisonRequestBody() {
+      return {
+        sources: comparisonSources.value.map((source) => ({
+          source_id: source.source_id,
+          source_type: source.source_type,
+          task_id: source.task_id || "",
+          dataset_name: source.dataset_name || "",
+          group_name: source.group_name || "",
+          rows: source.source_type === "upload" ? (source.rows || []) : [],
+        })),
+        control_source_id: comparisonSources.value[0]?.source_id || "",
+      };
+    }
+
+    async function generateHistoryComparison() {
+      if (!comparisonCanGenerate.value) return;
+      historyComparisonLoading.value = true;
+      historyComparisonError.value = "";
+      try {
+        const response = await fetch("/api/operation/comparison/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(historyComparisonRequestBody()),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        for (const pair of data.pairwise || []) {
+          pair._issue_query = "";
+          pair._issue_changed_only = false;
+          pair._issue_worsened_only = false;
+          pair._issue_sort_by = "count_delta";
+          pair._issue_sort_direction = "asc";
+        }
+        historyComparison.value = data;
+      } catch (error) {
+        historyComparison.value = null;
+        historyComparisonError.value = error?.message || "生成对比失败";
+      } finally {
+        historyComparisonLoading.value = false;
+      }
+    }
+
+    async function exportHistoryComparison() {
+      if (!historyComparison.value) return;
+      historyComparisonLoading.value = true;
+      historyComparisonError.value = "";
+      try {
+        const response = await fetch("/api/operation/comparison/export", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(historyComparisonRequestBody()),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get("Content-Disposition") || "";
+        const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        const filename = utf8Match
+          ? decodeURIComponent(utf8Match[1])
+          : "operation_comparison.xlsx";
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        historyComparisonError.value = error?.message || "导出对比报告失败";
+      } finally {
+        historyComparisonLoading.value = false;
+      }
+    }
+
+    function comparisonCorrectnessCount(group, correctness) {
+      const row = (group?.statistics?.correctness_rows || []).find(
+        (item) => item.correctness === correctness,
+      );
+      return row?.count || 0;
+    }
+
+    function comparisonIssueRows(pair) {
+      const keyword = String(pair?._issue_query || "").trim().toLocaleLowerCase();
+      let rows = [...(pair?.issue_type_rows || [])];
+      if (keyword) {
+        rows = rows.filter((row) => String(row.issue_type || "").toLocaleLowerCase().includes(keyword));
+      }
+      if (pair?._issue_changed_only) {
+        rows = rows.filter((row) => Number(row.count_delta || 0) !== 0);
+      }
+      if (pair?._issue_worsened_only) {
+        rows = rows.filter((row) => Number(row.count_delta || 0) > 0);
+      }
+      const sortBy = pair?._issue_sort_by || "count_delta";
+      const direction = pair?._issue_sort_direction === "asc" ? 1 : -1;
+      const valueOf = (row) => {
+        if (sortBy === "abs_count_delta") return Math.abs(Number(row.count_delta || 0));
+        if (sortBy === "abs_rate_delta") return Math.abs(Number(row.rate_delta || 0));
+        if (sortBy === "issue_type") return String(row.issue_type || "");
+        return Number(row?.[sortBy] || 0);
+      };
+      rows.sort((left, right) => {
+        const leftValue = valueOf(left);
+        const rightValue = valueOf(right);
+        if (typeof leftValue === "string" || typeof rightValue === "string") {
+          const compared = String(leftValue).localeCompare(String(rightValue), "zh-CN");
+          if (compared) return compared * direction;
+        } else if (leftValue !== rightValue) {
+          return (leftValue - rightValue) * direction;
+        }
+        return String(left.issue_type || "").localeCompare(String(right.issue_type || ""), "zh-CN");
+      });
+      return rows;
+    }
+
+    function comparisonIssueDeltaClass(value) {
+      const numeric = Number(value || 0);
+      if (numeric < 0) return "comparison-delta-improved";
+      if (numeric > 0) return "comparison-delta-worsened";
+      return "comparison-delta-neutral";
+    }
+
+    function comparisonIssueDeltaStyle(pair, value, field) {
+      if (value == null || value === "") return {};
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric === 0) return {};
+      const maxAbs = Math.max(
+        0,
+        ...(pair?.issue_type_rows || []).map((row) => Math.abs(Number(row?.[field] || 0))),
+      );
+      const ratio = maxAbs > 0 ? Math.min(Math.abs(numeric) / maxAbs, 1) : 0;
+      const alpha = 0.10 + ratio * 0.30;
+      return {
+        backgroundColor: numeric < 0
+          ? `rgba(22, 163, 74, ${alpha.toFixed(3)})`
+          : `rgba(220, 38, 38, ${alpha.toFixed(3)})`,
+      };
+    }
+
+    function comparisonIssueDeltaText(value, kind = "count") {
+      if (value == null || value === "") return "—";
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return "—";
+      const formatted = kind === "rate"
+        ? `${numeric > 0 ? "+" : ""}${(numeric * 100).toFixed(2)}pp`
+        : `${numeric > 0 ? "+" : ""}${numeric}`;
+      if (numeric < 0) return `${formatted} ↓ 优化`;
+      if (numeric > 0) return `${formatted} ↑ 劣化`;
+      return `${formatted} 持平`;
     }
 
     function isActiveHistoryStatus(status) {
@@ -2495,19 +2871,24 @@ createApp({
     });
 
     return {
-      workspacePage,
-      modes, mode, modeLabel, historyModeLabel, isVideoMode, isMultiGroupMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
+      workspacePage, taskModule,
+      modes, mode, modeLabel, historyModeLabel, switchTaskModule, isVideoMode, isMultiGroupMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       llmProviders, selectedProviderId, selectedProviderModel, selectedProvider,
       defaultJudgeBaseUrl, defaultJudgeModel,
       selectedProviderModels, providerModelOptions, providerManagerOpen, providerForm, providerBusy,
       providerMessage, providerError, onProviderChange, loadProviders, newProvider,
       editProvider, saveProvider, deleteProvider, testProvider,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
+      operationStatistics, visibleOperationIssueStats, issueStatsExpanded,
       runKind, rerunProgress, rerunTotal, rerunProgressIndices, progressView,
       hasRerunProgress, visibleProgressRows, selectedRerunIndices,
       selectedRerunCount, allPagedResultsSelected,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, loadingHistoryTaskId, historyTotal, pageSize,
+      comparisonSelectedItems, comparisonSelectedList, comparisonSelectedCount,
+      comparisonBaselineTaskId, comparisonSources, comparisonControlSourceId,
+      comparisonImporting, comparisonImportError, comparisonCanGenerate,
+      historyComparison, historyComparisonLoading, historyComparisonError,
       historyPage, historyPageSize, historyPageCount, historyJumpPage,
       opPage, opPageSize, opPageCount, opJumpPage,
       previewPage, previewPageCount, previewJumpPage,
@@ -2520,6 +2901,15 @@ createApp({
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit,
       trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
+      canCompareHistoryItem, isHistoryComparisonSelected, toggleHistoryComparisonItem,
+      clearHistoryComparisonSelection, addSelectedHistoryComparisonSources,
+      openComparisonPage, openComparisonFromHistory, onComparisonResultFile,
+      removeComparisonSource, moveComparisonSource, clearComparisonSources,
+      beginComparisonSourceNameEdit, saveComparisonSourceName,
+      cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,
+      generateHistoryComparison, exportHistoryComparison,
+      comparisonCorrectnessCount, comparisonIssueRows,
+      comparisonIssueDeltaClass, comparisonIssueDeltaStyle, comparisonIssueDeltaText,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,
       isRerunSelected, setRerunSelected, togglePagedRerunSelection,

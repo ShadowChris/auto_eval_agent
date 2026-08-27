@@ -27,10 +27,11 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
+from ..analysis.operation_comparison import compare_operation_batches
 from ..config import ExpertKnowledgeBase, load_config
 from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
 from ..media import extract_scene_keyframes, probe_duration
@@ -39,6 +40,7 @@ from ..table_dataset import convert_table
 from ..llm_stream import build_openai_client, stream_chat_completion
 from .parse_input import Mode, parse_jsonl, parse_text
 from .history import (
+    build_operation_comparison_xlsx,
     build_xlsx,
     delete_snapshot,
     export_rows,
@@ -48,6 +50,8 @@ from .history import (
     load_item_judge_calls,
     load_snapshot,
     operation_item_result_row,
+    operation_comparison_batch,
+    operation_statistics_payload,
     rows_to_csv,
     rows_to_jsonl,
     save_task,
@@ -62,6 +66,11 @@ from .operation_media import (
     resolve_operation_video_path,
 )
 from .operation_groups import align_operation_groups
+from .operation_comparison_import import (
+    SUPPORTED_SUFFIXES as COMPARISON_IMPORT_SUFFIXES,
+    import_operation_comparison_file,
+    validate_uploaded_comparison_source,
+)
 from .llm_providers import LLMProviderPayload, LLMProviderStore
 from .runner import run_eval, run_rerun, run_single_api_item
 from .tasks import (
@@ -160,6 +169,25 @@ class OperationGroupsAlignReq(BaseModel):
 
 class HistoryNoteReq(BaseModel):
     note: str = ""
+
+
+class OperationHistoryComparisonReq(BaseModel):
+    task_ids: list[str]
+    baseline_task_id: str
+
+
+class OperationComparisonSourceReq(BaseModel):
+    source_id: str
+    source_type: Literal["history", "upload"]
+    task_id: str = ""
+    dataset_name: str = ""
+    group_name: str = ""
+    rows: list[dict] = Field(default_factory=list)
+
+
+class OperationComparisonAnalyzeReq(BaseModel):
+    sources: list[OperationComparisonSourceReq]
+    control_source_id: str
 
 
 class RerunReq(BaseModel):
@@ -305,6 +333,15 @@ def _terminal_user_judge_name(app_cfg) -> str:
     if judge is None:
         raise HTTPException(500, "当前配置缺少终端用户裁判")
     return judge.name
+
+
+def _with_operation_eval_persona(app_cfg, mode: Mode, options: dict) -> dict:
+    """任务类固定终端用户视角；模型服务由 judge_backend 独立选择。"""
+    normalized = dict(options or {})
+    if mode == "operation":
+        normalized["judges"] = [_terminal_user_judge_name(app_cfg)]
+        normalized.setdefault("concurrency", 8)
+    return normalized
 
 
 def _normalize_single_operation_item(raw_item: dict) -> dict:
@@ -611,6 +648,22 @@ async def api_import_operation_table(file: UploadFile = File(...)):
     }
 
 
+@app.post("/api/operation/comparison/import")
+async def api_import_operation_comparison(file: UploadFile = File(...)):
+    """导入已评估的任务类结果集，供独立对比分析使用。"""
+    filename = Path(file.filename or "comparison_results").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in COMPARISON_IMPORT_SUFFIXES:
+        raise HTTPException(422, "仅支持 JSONL、CSV、XLSX、XLS、XLSM")
+    content = await file.read(_MAX_TABLE_DATASET_BYTES + 1)
+    if len(content) > _MAX_TABLE_DATASET_BYTES:
+        raise HTTPException(413, "评估结果文件超过 100MB 限制")
+    try:
+        return import_operation_comparison_file(filename, content)
+    except (ImportError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.post("/api/operation/groups/align")
 def api_align_operation_groups(req: OperationGroupsAlignReq):
     if len(req.groups) < 2:
@@ -655,9 +708,20 @@ async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
-    _validate_eval_request(req, app_cfg)
+    requested_options = _with_operation_eval_persona(
+        app_cfg,
+        req.mode,
+        req.options,
+    )
+    _validate_eval_request(
+        req.model_copy(update={"options": requested_options}),
+        app_cfg,
+    )
     try:
-        task_options, runtime_cfg = _normalize_eval_options(app_cfg, req.options)
+        task_options, runtime_cfg = _normalize_eval_options(
+            app_cfg,
+            requested_options,
+        )
     except KeyError as exc:
         raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
     except ValueError as exc:
@@ -1131,6 +1195,157 @@ def api_history_detail(task_id: str, compact: bool = False):
     return snapshot_payload(data, compact=compact)
 
 
+def _operation_history_comparison_payload(
+    request: OperationHistoryComparisonReq,
+    *,
+    include_union_rows: bool = False,
+) -> dict:
+    task_ids = [str(task_id).strip() for task_id in request.task_ids]
+    if not 2 <= len(task_ids) <= 5:
+        raise HTTPException(422, "请选择 2～5 个已完成的任务类历史批次")
+    if not all(task_ids) or len(set(task_ids)) != len(task_ids):
+        raise HTTPException(422, "历史批次不能为空或重复选择")
+    if request.baseline_task_id not in task_ids:
+        raise HTTPException(422, "对照组必须包含在已选历史批次中")
+
+    batches = []
+    for task_id in task_ids:
+        live = get_live_task(task_id)
+        data = task_to_snapshot(live) if live else load_snapshot(task_id)
+        if not data:
+            raise HTTPException(404, f"历史任务不存在：{task_id}")
+        if data.get("status") != "done":
+            raise HTTPException(409, f"只能对比已完成任务：{task_id}")
+        try:
+            batches.append(operation_comparison_batch(data))
+        except ValueError as exc:
+            raise HTTPException(409, f"{task_id}：{exc}") from exc
+    try:
+        return compare_operation_batches(
+            batches,
+            baseline_task_id=request.baseline_task_id,
+            include_union_rows=include_union_rows,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/operation/history-comparison")
+def api_operation_history_comparison(request: OperationHistoryComparisonReq):
+    """生成历史任务类批次的确定性配对对比 JSON。"""
+    return _operation_history_comparison_payload(request)
+
+
+@app.post("/api/operation/history-comparison/export")
+def api_operation_history_comparison_export(
+    request: OperationHistoryComparisonReq,
+):
+    """导出历史任务类批次对比 XLSX。"""
+    payload = _operation_history_comparison_payload(
+        request,
+        include_union_rows=True,
+    )
+    content = build_operation_comparison_xlsx(payload)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    baseline_name = _download_stem(
+        str(payload.get("baseline_name") or "operation"),
+        "operation",
+    )
+    utf8_name = f"{baseline_name}_history_compare_{timestamp}.xlsx"
+    ascii_name = f"operation_history_compare_{timestamp}.xlsx"
+    return Response(
+        content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+            ),
+        },
+    )
+
+
+def _operation_comparison_analysis_payload(
+    request: OperationComparisonAnalyzeReq,
+    *,
+    include_union_rows: bool = False,
+) -> dict:
+    if not 2 <= len(request.sources) <= 5:
+        raise HTTPException(422, "请选择 2～5 个任务类评估结果集")
+    source_ids = [source.source_id.strip() for source in request.sources]
+    if not all(source_ids) or len(set(source_ids)) != len(source_ids):
+        raise HTTPException(422, "结果集 source_id 不能为空且不能重复")
+    if request.control_source_id not in source_ids:
+        raise HTTPException(422, "必须从已选结果集中指定一个对照组")
+
+    batches = []
+    for source in request.sources:
+        if source.source_type == "history":
+            task_id = source.task_id.strip() or source.source_id.strip()
+            live = get_live_task(task_id)
+            data = task_to_snapshot(live) if live else load_snapshot(task_id)
+            if not data:
+                raise HTTPException(404, f"历史任务不存在：{task_id}")
+            if data.get("status") != "done":
+                raise HTTPException(409, f"只能使用已完成任务：{task_id}")
+            try:
+                batch = operation_comparison_batch(data)
+            except ValueError as exc:
+                raise HTTPException(409, f"{task_id}：{exc}") from exc
+            batch["task_id"] = source.source_id.strip()
+        else:
+            try:
+                batch = validate_uploaded_comparison_source(
+                    source.model_dump(mode="python")
+                )
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        if source.group_name.strip():
+            batch["dataset_name"] = source.group_name.strip()
+        batches.append(batch)
+    try:
+        return compare_operation_batches(
+            batches,
+            baseline_task_id=request.control_source_id,
+            include_union_rows=include_union_rows,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/operation/comparison/analyze")
+def api_operation_comparison_analyze(request: OperationComparisonAnalyzeReq):
+    """对历史任务和上传结果集进行混合对比分析。"""
+    return _operation_comparison_analysis_payload(request)
+
+
+@app.post("/api/operation/comparison/export")
+def api_operation_comparison_export(request: OperationComparisonAnalyzeReq):
+    """导出独立任务类对比分析报告。"""
+    payload = _operation_comparison_analysis_payload(
+        request,
+        include_union_rows=True,
+    )
+    content = build_operation_comparison_xlsx(payload)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    control_name = _download_stem(
+        str(payload.get("baseline_name") or "operation"),
+        "operation",
+    )
+    utf8_name = f"{control_name}_comparison_{timestamp}.xlsx"
+    ascii_name = f"operation_comparison_{timestamp}.xlsx"
+    return Response(
+        content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+            ),
+        },
+    )
+
+
 @app.delete("/api/history/{task_id}")
 def api_history_delete(task_id: str):
     live = get_live_task(task_id)
@@ -1336,6 +1551,36 @@ def _eval_download_names(
     utf8_name = f"{safe_dataset}_{suffix}" if safe_dataset else suffix
     ascii_name = suffix
     return ascii_name, utf8_name
+
+
+@app.get("/api/eval/{task_id}/statistics")
+def api_operation_statistics(task_id: str, download: bool = False):
+    """返回任务类单批统计 JSON；下载的 Excel 统计 Sheet 使用同一结构。"""
+    task = get_live_task(task_id)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "task not found")
+    try:
+        payload = operation_statistics_payload(data)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not download:
+        return JSONResponse(payload)
+
+    dataset_stem = Path(str(payload.get("dataset_name") or "")).stem
+    utf8_name = f"{_download_stem(dataset_stem, 'operation')}_statistics.json"
+    ascii_name = f"operation_statistics_{_download_stem(task_id, 'task')[:8]}.json"
+    content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    return Response(
+        content,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+            ),
+        },
+    )
 
 
 @app.get("/api/eval/{task_id}/export")

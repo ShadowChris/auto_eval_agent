@@ -5,7 +5,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_web_only_exposes_operation_evaluation_modes() -> None:
+def test_web_exposes_operation_and_comparison_modules() -> None:
     app_js = (PROJECT_ROOT / "src/auto_eval/web/static/app.js").read_text(encoding="utf-8")
 
     visible_modes = re.search(
@@ -15,7 +15,8 @@ def test_web_only_exposes_operation_evaluation_modes() -> None:
     )
     assert visible_modes is not None
     assert 'key: "operation"' in visible_modes.group(1)
-    assert 'key: "operation_multi_group"' in visible_modes.group(1)
+    assert 'key: "comparison"' in visible_modes.group(1)
+    assert 'key: "operation_multi_group"' not in visible_modes.group(1)
     assert 'key: "single"' not in visible_modes.group(1)
     assert 'key: "compare"' not in visible_modes.group(1)
     assert 'key: "online"' not in visible_modes.group(1)
