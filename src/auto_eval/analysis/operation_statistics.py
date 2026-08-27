@@ -60,7 +60,6 @@ def summarize_operation_results(
     ]
 
     issue_case_counts: Counter[str] = Counter()
-    primary_issue_counts: Counter[str] = Counter()
     issue_correctness: dict[str, set[str]] = defaultdict(set)
     issue_case_count = 0
     for row in valid:
@@ -68,7 +67,6 @@ def summarize_operation_results(
         unique_issues = list(dict.fromkeys(raw_issues))
         if unique_issues:
             issue_case_count += 1
-            primary_issue_counts[unique_issues[0]] += 1
         for issue in unique_issues:
             issue_case_counts[issue] += 1
             issue_correctness[issue].add(str(row["correctness"]))
@@ -81,7 +79,6 @@ def summarize_operation_results(
             "issue_type": issue,
             "case_count": count,
             "rate": round(count / valid_count, 4) if valid_count else None,
-            "primary_count": primary_issue_counts.get(issue, 0),
             "correctness": sorted(
                 issue_correctness[issue],
                 key=lambda value: correctness_order.get(value, len(correctness_order)),

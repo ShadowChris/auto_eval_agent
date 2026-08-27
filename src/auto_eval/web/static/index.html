@@ -521,7 +521,7 @@
       <div class="operation-statistics-grid">
         <div>
           <h3>Correctness 分布</h3>
-          <table class="grid operation-statistics-table">
+          <table class="grid operation-statistics-table correctness-statistics-table">
             <thead><tr><th>判定</th><th>频次</th><th>占有效评估比例</th></tr></thead>
             <tbody>
               <tr v-for="row in operationStatistics.correctness_rows" :key="'correctness-stat-'+row.correctness">
@@ -535,17 +535,16 @@
         <div>
           <h3>Issue Type 分布</h3>
           <div class="table-scroll">
-            <table class="grid operation-statistics-table">
-              <thead><tr><th>问题类型</th><th>涉及 Case 数</th><th>占比</th><th>主问题数</th><th>关联判定</th></tr></thead>
+            <table class="grid operation-statistics-table issue-statistics-table">
+              <thead><tr><th>问题类型</th><th>涉及 Case 数</th><th>占比</th><th>关联判定</th></tr></thead>
               <tbody>
                 <tr v-for="row in visibleOperationIssueStats" :key="'issue-stat-'+row.issue_type">
                   <td>{{ row.issue_type }}</td>
                   <td>{{ row.case_count }}</td>
                   <td>{{ row.rate!=null ? (row.rate*100).toFixed(2)+'%' : '—' }}</td>
-                  <td>{{ row.primary_count }}</td>
                   <td>{{ (row.correctness || []).join('；') }}</td>
                 </tr>
-                <tr v-if="!operationStatistics.issue_type_rows.length"><td colspan="5" class="hint">暂无问题类型</td></tr>
+                <tr v-if="!operationStatistics.issue_type_rows.length"><td colspan="4" class="hint">暂无问题类型</td></tr>
               </tbody>
             </table>
           </div>

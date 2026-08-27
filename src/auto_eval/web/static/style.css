@@ -182,8 +182,18 @@ tr.trace td { background: #eff6ff !important; color: #1e40af; font-size: 12px; }
 .operation-statistics-overview { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 12px 0 4px; color: #475569; font-size: 13px; }
 .operation-statistics-grid { display: grid; grid-template-columns: minmax(280px, .75fr) minmax(480px, 1.5fr); gap: 18px; align-items: start; }
 .operation-statistics-grid h3 { margin: 12px 0 4px; font-size: 14px; color: #334155; }
-.operation-statistics-table { min-width: 100%; }
+.operation-statistics-table { min-width: 100%; table-layout: fixed; }
 .operation-statistics-table th, .operation-statistics-table td { white-space: nowrap; }
+.correctness-statistics-table th:nth-child(1) { width: 34%; }
+.correctness-statistics-table th:nth-child(2) { width: 22%; }
+.correctness-statistics-table th:nth-child(3) { width: 44%; }
+.issue-statistics-table { min-width: 620px; }
+.issue-statistics-table th:nth-child(1) { width: 42%; }
+.issue-statistics-table th:nth-child(2) { width: 18%; }
+.issue-statistics-table th:nth-child(3) { width: 18%; }
+.issue-statistics-table th:nth-child(4) { width: 22%; }
+.issue-statistics-table td:first-child,
+.issue-statistics-table td:last-child { white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
 .operation-statistics-more { display: inline-block; margin-top: 8px; }
 .operation-statistics-conclusion { margin: 14px 0 4px; padding: 10px 12px; border-left: 3px solid #6366f1; background: #f5f7ff; color: #334155; line-height: 1.65; }
 .operation-statistics-note { margin: 6px 0 0; }
