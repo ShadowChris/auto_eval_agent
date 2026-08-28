@@ -2162,7 +2162,7 @@ createApp({
           dataset_name: item.dataset_name || item.task_id,
           group_name: item.dataset_name || item.task_id,
           rows: [],
-          mapping: { case_id: "历史快照", query: "历史快照", correctness: "历史结果", issue_types: "历史结果" },
+          mapping: { index: "历史快照（如有）", query: "历史快照", correctness: "历史结果", issue_types: "历史结果" },
           warnings: [],
           summary: {
             format: "历史任务",
@@ -2354,6 +2354,46 @@ createApp({
         (item) => item.correctness === correctness,
       );
       return row?.count || 0;
+    }
+
+    function comparisonIsBestOkRate(group) {
+      const current = group?.statistics?.ok_rate;
+      if (current == null) return false;
+      const rates = (historyComparison.value?.groups || [])
+        .map((item) => item?.statistics?.ok_rate)
+        .filter((value) => value != null)
+        .map(Number);
+      if (!rates.length) return false;
+      return Math.abs(Number(current) - Math.max(...rates)) < 1e-12;
+    }
+
+    function comparisonPairChangeState(pair) {
+      if (["improved", "worsened", "close", "unavailable"].includes(pair?.ok_rate_change)) {
+        return pair.ok_rate_change;
+      }
+      if (pair?.ok_rate_delta == null) return "unavailable";
+      const threshold = Number(historyComparison.value?.ok_rate_close_threshold ?? 0.01);
+      const delta = Number(pair.ok_rate_delta);
+      if (delta > threshold) return "improved";
+      if (delta < -threshold) return "worsened";
+      return "close";
+    }
+
+    function comparisonPairChangeClass(pair) {
+      const state = comparisonPairChangeState(pair);
+      if (state === "improved") return "comparison-delta-improved";
+      if (state === "worsened") return "comparison-delta-worsened";
+      return "comparison-delta-neutral";
+    }
+
+    function comparisonPairChangeLabel(pair) {
+      if (pair?.ok_rate_change_label) return pair.ok_rate_change_label;
+      return {
+        improved: "优化",
+        worsened: "劣化",
+        close: "接近",
+        unavailable: "无有效数据",
+      }[comparisonPairChangeState(pair)];
     }
 
     function comparisonIssueRows(pair) {
@@ -2908,7 +2948,8 @@ createApp({
       beginComparisonSourceNameEdit, saveComparisonSourceName,
       cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,
       generateHistoryComparison, exportHistoryComparison,
-      comparisonCorrectnessCount, comparisonIssueRows,
+      comparisonCorrectnessCount, comparisonIsBestOkRate,
+      comparisonPairChangeClass, comparisonPairChangeLabel, comparisonIssueRows,
       comparisonIssueDeltaClass, comparisonIssueDeltaStyle, comparisonIssueDeltaText,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,

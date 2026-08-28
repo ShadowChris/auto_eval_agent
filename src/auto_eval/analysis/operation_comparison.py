@@ -1,6 +1,7 @@
 """任务类结果集对比统计。"""
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -11,6 +12,9 @@ from .operation_statistics import (
     normalize_operation_issue_types,
     summarize_operation_results,
 )
+
+
+OK_RATE_CLOSE_THRESHOLD = 0.01
 
 
 def compare_operation_batches(
@@ -93,6 +97,7 @@ def compare_operation_batches(
         "baseline_name": _batch_name(baseline),
         "selected_task_ids": [batch["task_id"] for batch in ordered],
         "group_count": len(ordered),
+        "ok_rate_close_threshold": OK_RATE_CLOSE_THRESHOLD,
         "groups": groups,
         "all_groups_common_matched_count": len(common_positions),
         "all_groups_common_valid_count": len(valid_common_positions),
@@ -159,10 +164,22 @@ def _normalize_query(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
-def _unique_index(rows: list[dict], key: str) -> dict[str, int]:
+def _normalize_match_index(value: Any) -> str:
+    """规范化数据集 index；数字 1 与表格读取出的 1.0 视为同一值。"""
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return ""
+        if value.is_integer():
+            return str(int(value))
+    return unicodedata.normalize("NFKC", str(value)).strip()
+
+
+def _unique_match_index(rows: list[dict]) -> dict[str, int]:
     positions: dict[str, list[int]] = defaultdict(list)
     for index, row in enumerate(rows):
-        value = str(row.get(key) or "").strip()
+        value = _normalize_match_index(row.get("index"))
         if value:
             positions[value].append(index)
     return {
@@ -199,18 +216,18 @@ def _match_rows(
     used_baseline: set[int] = set()
     used_target: set[int] = set()
 
-    baseline_cases = _unique_index(baseline_rows, "case_id")
-    target_cases = _unique_index(target_rows, "case_id")
-    for case_id in sorted(set(baseline_cases) & set(target_cases)):
-        baseline_index = baseline_cases[case_id]
-        target_index = target_cases[case_id]
+    baseline_indexes = _unique_match_index(baseline_rows)
+    target_indexes = _unique_match_index(target_rows)
+    for match_index in sorted(set(baseline_indexes) & set(target_indexes)):
+        baseline_index = baseline_indexes[match_index]
+        target_index = target_indexes[match_index]
         baseline_query = _normalize_query(baseline_rows[baseline_index].get("query"))
         target_query = _normalize_query(target_rows[target_index].get("query"))
         used_baseline.add(baseline_index)
         used_target.add(target_index)
         if baseline_query and target_query and baseline_query != target_query:
             exclusions.append({
-                "reason": "case_id 相同但 Query 不一致",
+                "reason": "index 相同但 Query 不一致",
                 "baseline_index": baseline_index,
                 "target_index": target_index,
             })
@@ -218,8 +235,8 @@ def _match_rows(
         matches.append({
             "baseline_index": baseline_index,
             "target_index": target_index,
-            "match_method": "case_id",
-            "match_key": case_id,
+            "match_method": "index",
+            "match_key": match_index,
         })
 
     baseline_queries = _unique_query_index(baseline_rows, used_baseline)
@@ -280,7 +297,9 @@ def _paired_issue_rows(
                 else None
             ),
         })
-    rows.sort(key=lambda row: (-row["target_count"], row["issue_type"]))
+    # API、Web 和 Excel 使用同一默认顺序：实验组-对照组的
+    # 频次差值升序，问题减少（优化）在前，问题增加（劣化）在后。
+    rows.sort(key=lambda row: (row["count_delta"], row["issue_type"]))
     return rows
 
 
@@ -310,6 +329,23 @@ def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str,
     target_ok = sum(right.get("correctness") == "ok" for _, right in valid_pairs)
     baseline_ok_rate = baseline_ok / denominator if denominator else None
     target_ok_rate = target_ok / denominator if denominator else None
+    ok_rate_delta = (
+        target_ok_rate - baseline_ok_rate
+        if target_ok_rate is not None and baseline_ok_rate is not None
+        else None
+    )
+    if ok_rate_delta is None:
+        ok_rate_change = "unavailable"
+        ok_rate_change_label = "无有效数据"
+    elif ok_rate_delta > OK_RATE_CLOSE_THRESHOLD:
+        ok_rate_change = "improved"
+        ok_rate_change_label = "优化"
+    elif ok_rate_delta < -OK_RATE_CLOSE_THRESHOLD:
+        ok_rate_change = "worsened"
+        ok_rate_change_label = "劣化"
+    else:
+        ok_rate_change = "close"
+        ok_rate_change_label = "接近"
     to_ok = sum(
         count for (source, destination), count in transitions.items()
         if source != "ok" and destination == "ok"
@@ -323,7 +359,8 @@ def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str,
     if denominator:
         conclusion = (
             f"{target_label} 相对 {baseline_label}：共同有效 {denominator} 条，"
-            f"OK 率相差 {(target_ok_rate - baseline_ok_rate) * 100:+.2f} 个百分点；"
+            f"OK 率相差 {ok_rate_delta * 100:+.2f} 个百分点，"
+            f"结论为{ok_rate_change_label}；"
             f"{to_ok} 条由其他转为 OK，{from_ok} 条由 OK 转为其他，"
             f"OK 净变化 {to_ok - from_ok:+d} 条。"
         )
@@ -342,11 +379,9 @@ def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str,
         "baseline_ok_rate": round(baseline_ok_rate, 4) if baseline_ok_rate is not None else None,
         "target_ok_count": target_ok,
         "target_ok_rate": round(target_ok_rate, 4) if target_ok_rate is not None else None,
-        "ok_rate_delta": (
-            round(target_ok_rate - baseline_ok_rate, 4)
-            if target_ok_rate is not None and baseline_ok_rate is not None
-            else None
-        ),
+        "ok_rate_delta": round(ok_rate_delta, 4) if ok_rate_delta is not None else None,
+        "ok_rate_change": ok_rate_change,
+        "ok_rate_change_label": ok_rate_change_label,
         "to_ok_count": to_ok,
         "from_ok_count": from_ok,
         "net_ok_change": to_ok - from_ok,
@@ -364,6 +399,7 @@ def _row_export(row: dict[str, Any]) -> dict[str, Any]:
         return dict(row["export"])
     result = row.get("result") or {}
     return {
+        "index": row.get("index") if row.get("index") is not None else "",
         "item_id": row.get("item_id") or "",
         "case_id": row.get("case_id") or "",
         "query": row.get("query") or "",
@@ -376,9 +412,9 @@ def _row_export(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _row_union_key(row: dict[str, Any]) -> str:
-    case_id = str(row.get("case_id") or "").strip()
+    match_index = _normalize_match_index(row.get("index"))
     query = str(row.get("query") or "").strip()
-    return case_id or query
+    return match_index or query
 
 
 def _find_nonbaseline_union_entry(
@@ -390,20 +426,20 @@ def _find_nonbaseline_union_entry(
         entry for entry in entries
         if not entry["has_baseline"] and task_id not in entry["group_rows"]
     ]
-    case_id = str(row.get("case_id") or "").strip()
+    match_index = _normalize_match_index(row.get("index"))
     query = _normalize_query(row.get("query"))
-    if case_id:
-        by_case = [
+    if match_index:
+        by_index = [
             entry for entry in candidates
-            if str(entry["representative"].get("case_id") or "").strip() == case_id
+            if _normalize_match_index(entry["representative"].get("index")) == match_index
             and (
                 not query
                 or not _normalize_query(entry["representative"].get("query"))
                 or query == _normalize_query(entry["representative"].get("query"))
             )
         ]
-        if len(by_case) == 1:
-            return by_case[0]
+        if len(by_index) == 1:
+            return by_index[0]
     if query:
         by_query = [
             entry for entry in candidates

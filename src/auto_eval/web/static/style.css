@@ -210,6 +210,8 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
 .comparison-delta-improved { color: #166534; }
 .comparison-delta-worsened { color: #991b1b; }
 .comparison-delta-neutral { color: #64748b; }
+.comparison-best-rate { font-weight: 800; }
+.comparison-rate-change { font-weight: 750; white-space: nowrap; }
 .comparison-delta-legend { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin: 2px 0 8px; color: #475569; font-size: 12px; }
 .comparison-delta-legend .hint { margin: 0 0 0 6px; }
 .comparison-delta-gradient { width: 90px; height: 10px; border-radius: 999px; border: 1px solid rgba(148,163,184,.35); }

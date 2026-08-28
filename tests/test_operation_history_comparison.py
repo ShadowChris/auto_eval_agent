@@ -15,10 +15,12 @@ def _row(
     correctness: str,
     *,
     case_id: str = "",
+    data_index: str | int | None = None,
     issue_types: list[str] | None = None,
 ) -> dict:
     return {
         "position": position,
+        "index": data_index if data_index is not None else case_id,
         "item_id": f"item_{position}",
         "case_id": case_id,
         "query": query,
@@ -38,7 +40,7 @@ def _batch(task_id: str, name: str, rows: list[dict]) -> dict:
     }
 
 
-def test_history_comparison_matches_by_case_id_then_unique_query() -> None:
+def test_history_comparison_matches_by_index_then_unique_query() -> None:
     baseline = _batch("baseline", "对照组", [
         _row(0, "打开蓝牙", "ok", case_id="c1"),
         _row(1, "关闭定位", "nok", case_id="c2", issue_types=["应执行目标未执行"]),
@@ -66,6 +68,8 @@ def test_history_comparison_matches_by_case_id_then_unique_query() -> None:
     assert pair["baseline_ok_rate"] == 0.3333
     assert pair["target_ok_rate"] == 0.6667
     assert pair["ok_rate_delta"] == 0.3333
+    assert pair["ok_rate_change"] == "improved"
+    assert pair["ok_rate_change_label"] == "优化"
     assert pair["to_ok_count"] == 1
     assert pair["from_ok_count"] == 0
     assert pair["net_ok_change"] == 1
@@ -82,6 +86,32 @@ def test_history_comparison_matches_by_case_id_then_unique_query() -> None:
     assert issue["baseline_count"] == 1
     assert issue["target_count"] == 0
     assert issue["count_delta"] == -1
+
+
+def test_history_comparison_uses_index_to_align_duplicate_queries() -> None:
+    baseline = _batch("baseline", "对照组", [
+        _row(0, "打开蓝牙", "ok", data_index="case_1"),
+        _row(1, "打开蓝牙", "nok", data_index="case_2"),
+    ])
+    target = _batch("target", "实验组", [
+        _row(0, "打开蓝牙", "ok", data_index="case_2"),
+        _row(1, "打开蓝牙", "nok", data_index="case_1"),
+    ])
+
+    payload = compare_operation_batches(
+        [baseline, target],
+        baseline_task_id="baseline",
+        include_union_rows=True,
+    )
+
+    pair = payload["pairwise"][0]
+    assert pair["matched_count"] == 2
+    assert pair["to_ok_count"] == 1
+    assert pair["from_ok_count"] == 1
+    assert [row["match_key"] for row in payload["union_rows"]] == [
+        "case_1",
+        "case_2",
+    ]
 
 
 def test_history_comparison_uses_one_baseline_for_multiple_batches() -> None:
@@ -108,6 +138,8 @@ def test_history_comparison_uses_one_baseline_for_multiple_batches() -> None:
     assert [pair["target_task_id"] for pair in payload["pairwise"]] == ["b", "c"]
     assert payload["pairwise"][0]["net_ok_change"] == 1
     assert payload["pairwise"][1]["net_ok_change"] == -1
+    assert payload["pairwise"][0]["ok_rate_change"] == "improved"
+    assert payload["pairwise"][1]["ok_rate_change"] == "worsened"
     assert [group["group_label"] for group in payload["groups"]] == [
         "对照组",
         "实验组A",
@@ -137,6 +169,7 @@ def test_history_comparison_preserves_dataset_name_with_version_dot() -> None:
         "rom7.0_众测980_对照组.jsonl",
         "rom7.0_众测980_实验组.jsonl",
     ]
+    assert payload["pairwise"][0]["ok_rate_change"] == "close"
 
 
 def test_history_comparison_uses_all_group_valid_intersection_and_union_export() -> None:
@@ -193,7 +226,7 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
             {"index": 1, "correctness": "nok", "issue_types": ["应执行目标未执行"]},
         ]),
         "b": _snapshot("b", "实验组", [
-            {"index": 0, "correctness": "ok", "issue_types": []},
+            {"index": 0, "correctness": "ok", "issue_types": ["新增问题"]},
             {"index": 1, "correctness": "ok", "issue_types": []},
         ]),
     }
@@ -207,6 +240,12 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     payload = server.api_operation_history_comparison(request)
     assert payload["pairwise"][0]["valid_pair_count"] == 2
     assert payload["pairwise"][0]["target_ok_rate"] == 1.0
+    assert payload["ok_rate_close_threshold"] == 0.01
+    assert payload["pairwise"][0]["ok_rate_change_label"] == "优化"
+    assert [
+        row["count_delta"]
+        for row in payload["pairwise"][0]["issue_type_rows"]
+    ] == [-1, 1]
 
     response = server.api_operation_history_comparison_export(request)
     assert response.media_type.endswith("spreadsheetml.sheet")
@@ -226,7 +265,26 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
         "共有有效数据量",
     )
     assert overview_values[6][0] == "对照组"
-    issue_headers = [cell.value for cell in workbook["Issue Type对比"][1]]
+    overview_sheet = workbook["对比概览"]
+    assert overview_sheet.freeze_panes == "A7"
+    assert overview_sheet.sheet_view.showGridLines is False
+    assert "A1:L1" in {str(value) for value in overview_sheet.merged_cells.ranges}
+    assert overview_sheet["A6"].border.left.style == "thin"
+    assert [overview_sheet.cell(row=11, column=column).value for column in range(8, 13)] == [
+        "其他→OK",
+        "OK→其他",
+        "OK净变化",
+        "OK率差值",
+        "结论",
+    ]
+    assert overview_sheet["J8"].font.bold is True
+    assert overview_sheet["J12"].fill.fgColor.rgb == "FFDCFCE7"
+    assert overview_sheet["K12"].fill.fgColor.rgb == "FFDCFCE7"
+    assert overview_sheet["L12"].value == "优化"
+    assert overview_sheet["L12"].font.bold is True
+
+    issue_sheet = workbook["Issue Type对比"]
+    issue_headers = [cell.value for cell in issue_sheet[1]]
     assert issue_headers == [
         "对比关系",
         "实验组",
@@ -239,11 +297,32 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
         "频次差值",
         "占比差值",
     ]
-    assert workbook["Issue Type对比"].auto_filter.ref.startswith("A1:J")
-    detail_headers = [cell.value for cell in workbook["逐题横向对比"][1]]
-    assert "对照组_query" in detail_headers
-    assert "实验组A_correctness" in detail_headers
+    assert issue_sheet.auto_filter.ref.startswith("A1:J")
+    assert issue_sheet.freeze_panes == "E2"
+    assert issue_sheet.sheet_view.showGridLines is False
+    assert [issue_sheet.cell(row=row, column=9).value for row in (2, 3)] == [-1, 1]
+    assert issue_sheet["I2"].fill.fgColor.rgb == "FFDCFCE7"
+    assert issue_sheet["I3"].fill.fgColor.rgb == "FFFEE2E2"
+    assert issue_sheet["A2"].border.left.style == "thin"
+    assert "pp" in issue_sheet["J2"].number_format
+
+    detail_sheet = workbook["逐题横向对比"]
+    detail_group_headers = [cell.value for cell in detail_sheet[1]]
+    detail_headers = [cell.value for cell in detail_sheet[2]]
+    assert "对照组：对照组" in detail_group_headers
+    assert "实验组A：实验组" in detail_group_headers
+    assert "query" in detail_headers
+    assert detail_headers.count("index") == 2
+    assert "correctness" in detail_headers
     assert "所有组共有" in detail_headers
+    merged_ranges = {str(value) for value in detail_sheet.merged_cells.ranges}
+    assert "A1:C1" in merged_ranges
+    assert "D1:U1" in merged_ranges
+    assert "V1:AM1" in merged_ranges
+    assert detail_sheet.freeze_panes == "D3"
+    assert detail_sheet.auto_filter.ref.startswith("A2:AM")
+    assert detail_sheet["A3"].border.left.style == "thin"
+    assert detail_sheet["D3"].alignment.wrap_text is False
 
 
 def test_history_comparison_api_rejects_unfinished_or_multi_group(monkeypatch) -> None:
@@ -278,6 +357,11 @@ def test_history_comparison_ui_links_to_comparison_workspace() -> None:
     assert "实验组频次" in html
     assert "只看劣化" in html
     assert "问题减少（优化）" in html
+    assert "comparison-best-rate" in html
+    assert "comparisonPairChangeLabel(pair)" in html
+    assert "OK率差值" in html
+    assert "ok_rate_close_threshold" in js
+    assert "comparisonPairChangeClass" in js
     assert "问题增加（劣化）" in html
     assert "频次差值（实验组-对照组）" in html
     assert "comparisonIssueRows" in js
