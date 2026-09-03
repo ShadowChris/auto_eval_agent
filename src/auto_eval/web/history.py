@@ -317,6 +317,7 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
     if compact:
         item_fields = {
             "id", "query", "question", "context", "category", "source_line",
+            "query_images",
             "case_id", "evaluation_strategy", "alignment_status",
             "alignment_warnings", "group_variants", "image_input",
         }
@@ -533,6 +534,8 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
         row.setdefault("query", item.get("query") or item.get("question") or "")
         if item.get("context") is not None:
             row.setdefault("context", item.get("context"))
+        if item.get("query_images"):
+            row.setdefault("query_images", list(item.get("query_images") or []))
         if item.get("answer") is not None:
             row.setdefault("answer", item.get("answer"))
         if item.get("video_path") is not None:
@@ -839,6 +842,8 @@ _OPERATION_EXPORT_COLUMNS = (
     "query",
     "video_path",
     "分享链接",
+    "query_images",
+    "query_image_count",
     "context",
     "answer",
     "Provider",
@@ -928,6 +933,18 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
             "序号": _jsonl_sequence(source, item, str(item_id)),
             "sessionid": session_id,
             "query": result.get("query") or item.get("query") or item.get("question") or "",
+            "query_images": "\n".join(
+                _project_relative_path(path)
+                for path in (
+                    result.get("query_images")
+                    or item.get("query_images")
+                    or source.get("query_images")
+                    or []
+                )
+            ),
+            "query_image_count": result.get("query_image_count") or len(
+                item.get("query_images") or []
+            ),
             "video_path": source_video_path,
             "分享链接": source.get("分享链接", ""),
             "context": result.get("context") or item.get("context") or "",
@@ -1264,6 +1281,10 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
             if frames else ""
         )
         media_fields = {
+            "用户输入图片项目相对路径": "\n".join(
+                _project_relative_path(path)
+                for path in (item.get("query_images") or [])
+            ),
             "录屏项目相对路径": _project_relative_path(video_runtime_path),
             "抽帧目录项目相对路径": frame_dir,
         }

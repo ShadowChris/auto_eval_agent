@@ -5,7 +5,7 @@
   compare: {query, context?, answer_a, answer_b, reference?}
   online : {query, context?, reference?}
   process: {query, context?, answer, trace, reference?}
-  operation: {id?, query, context?, video_path, answer?,
+  operation: {id?, query, query_images?, context?, video_path, answer?,
               task_start_time?, task_end_time?}
   rich_content: {id?, query, context?, video_path, answer_text?,
                  content_start_time?, content_end_time?, category?}
@@ -33,6 +33,26 @@ Mode = Literal[
     "rich_content_quality",
 ]
 _CONTEXT_PREFIX = "@context:"
+MAX_QUERY_IMAGES = 4
+
+
+def _query_images(obj: dict) -> list[str]:
+    """读取可选用户输入图片数组；数据集最多四张，Web 手动上传目前单图。"""
+    value = obj.get("query_images")
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("query_images 必须是图片路径字符串数组")
+    if len(value) > MAX_QUERY_IMAGES:
+        raise ValueError(f"query_images 最多支持 {MAX_QUERY_IMAGES} 张")
+    images: list[str] = []
+    for index, path in enumerate(value, start=1):
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError(f"query_images 第 {index} 项必须是非空图片路径")
+        normalized = path.strip()
+        if normalized not in images:
+            images.append(normalized)
+    return images
 
 
 def _json_safe_source(value):
@@ -226,6 +246,13 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item["source_line"] = ln
             item.update(video_times)
             if mode == "operation":
+                try:
+                    query_images = _query_images(obj)
+                except ValueError as exc:
+                    errors.append(f"第 {ln} 行 {exc}")
+                    continue
+                if query_images:
+                    item["query_images"] = query_images
                 statement = obj.get("agent_statement", obj.get("answer"))
                 if statement is not None and not isinstance(statement, str):
                     errors.append(f"第 {ln} 行 agent_statement 必须是字符串")

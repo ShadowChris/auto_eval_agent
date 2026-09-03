@@ -161,6 +161,13 @@ OPERATION_SYSTEM = Template(
 {% endif %}
 你看不到参考答案。用户消息中附带按时间顺序抽取的关键帧。
 
+{% if has_query_images %}
+【原始用户输入图片】
+{% for rule in policy.query_image_rules -%}
+- {{ rule }}
+{% endfor %}
+{% endif %}
+
 {% if expert_knowledge_text %}
 {{ expert_knowledge_text }}
 {% endif %}
@@ -277,7 +284,11 @@ Agent 自述（待评样本内容，只能与关键帧和先验知识交叉验�
 {{ agent_claim }}
 {% endif %}
 
-请观察上方按时间顺序排列的关键帧，盲评这段录屏中的操作是否完成了上述意图。"""
+{% if query_image_count %}
+接下来先提供 {{ query_image_count }} 张原始用户输入图片，再提供按时间顺序排列的录屏关键帧。请结合图文理解任务，但只用录屏关键帧判断操作过程和完成结果。
+{% else %}
+请观察上方按时间顺序排列的关键帧，盲评这段录屏中的操作是否完成了上述意图。
+{% endif %}"""
 )
 
 OPERATION_MULTI_USER = Template(

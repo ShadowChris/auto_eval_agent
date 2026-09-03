@@ -57,10 +57,13 @@ CONTEXT_SOURCE_COLUMNS = (
 )
 INTERACTION_LOCATION_LABEL = "交互发生位置"
 VIDEO_PATH_COLUMN = "video_path"
+QUERY_IMAGES_COLUMN = "query_images"
+QUERY_IMAGE_PATH_COLUMN = "query_image_path"
 VIDEO_DIRECTORY_COLUMN = "文件路径"
 VIDEO_FILENAME_COLUMN = "原文件名"
 DEFAULT_VIDEO_PREFIX = "data/"
 DEFAULT_CURRENT_LOCATION = "浙江省杭州市滨江区滨康路101号"
+MAX_QUERY_IMAGES = 4
 
 VIDEO_SUFFIXES = {
     ".mp4",
@@ -121,6 +124,31 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         return ""
     return value
+
+
+def _table_query_images(value: Any) -> list[str]:
+    """表格单元格支持单路径；query_images 也可填写 JSON 字符串数组。"""
+    if _is_empty(value):
+        return []
+    parsed = value
+    if isinstance(value, str) and value.strip().startswith("["):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("query_images 不是合法 JSON 数组") from exc
+    values = parsed if isinstance(parsed, (list, tuple)) else [parsed]
+    if len(values) > MAX_QUERY_IMAGES:
+        raise ValueError(f"query_images 最多支持 {MAX_QUERY_IMAGES} 张")
+    images: list[str] = []
+    for image in values:
+        if _is_empty(image):
+            continue
+        if not isinstance(image, str):
+            raise ValueError("query_images 中的图片路径必须是字符串")
+        normalized = image.strip().replace("\\", "/")
+        if normalized not in images:
+            images.append(normalized)
+    return images
 
 
 def _normalize_identifier(value: Any) -> str:
@@ -472,6 +500,8 @@ def convert_table(
     has_start_time_column = START_TIME_COLUMNS[0] in df.columns
     has_end_time_column = END_TIME_COLUMNS[0] in df.columns
     has_video_path_column = VIDEO_PATH_COLUMN in df.columns
+    has_query_images_column = QUERY_IMAGES_COLUMN in df.columns
+    has_query_image_path_column = QUERY_IMAGE_PATH_COLUMN in df.columns
     direct_standard_columns = tuple(
         column
         for column, present in (
@@ -480,6 +510,7 @@ def convert_table(
             (START_TIME_COLUMNS[0], has_start_time_column),
             (END_TIME_COLUMNS[0], has_end_time_column),
             (VIDEO_PATH_COLUMN, has_video_path_column),
+            (QUERY_IMAGES_COLUMN, has_query_images_column),
         )
         if present
     )
@@ -528,6 +559,21 @@ def convert_table(
             else _build_context(row, current_location=current_location)
         )
         item.update({"query": query, "context": context})
+
+        raw_query_images = (
+            row.get(QUERY_IMAGES_COLUMN)
+            if has_query_images_column
+            else row.get(QUERY_IMAGE_PATH_COLUMN)
+            if has_query_image_path_column
+            else None
+        )
+        try:
+            query_images = _table_query_images(raw_query_images)
+        except ValueError as exc:
+            query_images = []
+            row_warnings.append(f"invalid_query_images:{exc}")
+        if query_images:
+            item[QUERY_IMAGES_COLUMN] = query_images
 
         if has_answer_column:
             item["answer"] = _json_value(row.get("answer"))

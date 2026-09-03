@@ -47,6 +47,7 @@ from ..runners import build_runner
 from ..schema import EvalItem
 from .history import save_task
 from .operation_media import (
+    prepare_operation_query_images,
     prepare_session_operation_item,
     prepare_session_rich_content_item,
 )
@@ -137,6 +138,7 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
         category=item.get("category", "default"),
         trace=item.get("trace"),
         media=item.get("media") or [],
+        query_images=item.get("query_images") or [],
         metadata=meta,
     )
 
@@ -574,7 +576,35 @@ async def _run(
                 )
                 last_error = None
                 res = None
-                if task.mode == "operation" and _is_multi_group_operation(item_dict):
+                if (
+                    task.mode == "operation"
+                    and not _is_multi_group_operation(item_dict)
+                    and item_dict.get("query_images")
+                ):
+                    try:
+                        prepared_images = await asyncio.to_thread(
+                            prepare_operation_query_images,
+                            item_dict,
+                        )
+                        item_dict["query_images"] = prepared_images.get(
+                            "query_images", []
+                        )
+                    except Exception as exc:
+                        last_error = exc
+                        log_event(
+                            "用户图片准备",
+                            "失败",
+                            level=logging.ERROR,
+                            details=error_details(exc),
+                            progress=2,
+                            progress_message="用户输入图片校验失败",
+                            progress_status="error",
+                        )
+                if (
+                    last_error is None
+                    and task.mode == "operation"
+                    and _is_multi_group_operation(item_dict)
+                ):
                     variants = item_dict.get("group_variants") or []
                     total_group_items = max(1, len(task.items) * max(1, len(variants)))
                     image_counts: list[dict] = []
@@ -587,6 +617,34 @@ async def _run(
                                 "status": "missing_input",
                                 "count": 0,
                             })
+                            continue
+                        try:
+                            prepared_images = await asyncio.to_thread(
+                                prepare_operation_query_images,
+                                group_item,
+                            )
+                            group_item["query_images"] = prepared_images.get(
+                                "query_images", []
+                            )
+                        except Exception as exc:
+                            group_item["prepare_error"] = (
+                                f"用户输入图片校验失败：{type(exc).__name__}: {exc}"
+                            )
+                            image_counts.append({
+                                "group_id": variant.get("group_id"),
+                                "group_name": variant.get("group_name"),
+                                "status": "error",
+                                "count": 0,
+                                "error": group_item["prepare_error"],
+                            })
+                            log_event(
+                                "用户图片准备",
+                                f"失败：{variant.get('group_name') or variant.get('group_id')}",
+                                level=logging.ERROR,
+                                details=error_details(exc),
+                                progress=2,
+                                progress_message="部分实验组用户输入图片校验失败",
+                            )
                             continue
                         if _valid_cached_frames(group_item):
                             group_item.pop("prepare_error", None)
@@ -668,7 +726,11 @@ async def _run(
                                 f"多组关键帧准备完成（共 {item_dict['image_input']['total_images']} 张）"
                             ),
                         )
-                elif task.mode in ("operation", "rich_content", "rich_content_quality") and not item_dict.get("frames"):
+                elif (
+                    last_error is None
+                    and task.mode in ("operation", "rich_content", "rich_content_quality")
+                    and not item_dict.get("frames")
+                ):
                     try:
                         log_event(
                             "视频准备",
@@ -803,6 +865,10 @@ async def _run(
                     )
             res["index"] = idx
             res["duration_s"] = round(time.perf_counter() - started, 1)
+            query_images = list(item_dict.get("query_images") or [])
+            if query_images:
+                res["query_images"] = query_images
+                res["query_image_count"] = len(query_images)
             res["judge_provider"] = run_provider_name
             res["judge_provider_id"] = run_provider_id
             res["judge_model"] = run_model
@@ -1032,6 +1098,10 @@ async def _eval_operation_groups(
     requested_strategy = str(item_dict.get("evaluation_strategy") or "")
     use_joint = (
         requested_strategy.startswith("multi_group") and len(evaluable) >= 2
+        and not any(
+            (variant.get("item") or {}).get("query_images")
+            for variant in evaluable
+        )
     )
 
     if use_joint:

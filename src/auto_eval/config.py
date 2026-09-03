@@ -195,6 +195,7 @@ class OperationPolicy(BaseModel):
 
     prior_knowledge: list[str] = Field(default_factory=list)
     scope_rules: list[str] = Field(default_factory=list)
+    query_image_rules: list[str] = Field(default_factory=list)
     evidence_rules: list[str] = Field(default_factory=list)
     correctness: dict[str, str] = Field(default_factory=dict)
     issue_types: dict[str, OperationIssueType] = Field(default_factory=dict)

@@ -46,6 +46,7 @@ class EvalItem(BaseModel):
     tags: list[str] = Field(default_factory=list)
     trace: str | None = None  # 被测 agent 的推理/工具轨迹（仅过程盲评使用）
     media: list[str] = Field(default_factory=list)  # 任务类评测：录屏/图片本地路径（裁判抽帧后以 image_url 多图盲评）
+    query_images: list[str] = Field(default_factory=list)  # 用户随 query 提供的图片；与录屏证据严格隔离
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def categories(self) -> list[str]:

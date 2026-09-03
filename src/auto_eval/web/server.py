@@ -60,9 +60,12 @@ from .history import (
     write_frames_zip,
 )
 from .operation_media import (
+    MAX_QUERY_IMAGE_BYTES,
+    QUERY_IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
     operation_video_roots,
     prepare_cached_operation_item,
+    resolve_operation_query_image_path,
     resolve_operation_video_path,
 )
 from .operation_groups import align_operation_groups
@@ -1000,6 +1003,43 @@ async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation
     }
 
 
+@app.post("/api/upload/query-image")
+async def api_upload_query_image(file: UploadFile = File(...)):
+    """上传一张随 Query 提供的原始用户图片；模型调用时才编码为 data URL。"""
+    suffix = Path(file.filename or "query-image").suffix.lower()
+    if suffix not in QUERY_IMAGE_EXTENSIONS:
+        supported = "、".join(sorted(QUERY_IMAGE_EXTENSIONS))
+        raise HTTPException(422, f"不支持的图片格式；请选择 {supported}")
+    data = await file.read(MAX_QUERY_IMAGE_BYTES + 1)
+    if len(data) > MAX_QUERY_IMAGE_BYTES:
+        raise HTTPException(413, "用户输入图片超过 10MB 限制")
+    if not data:
+        raise HTTPException(422, "用户输入图片为空")
+    image_dir = RUNS_DIR / "uploads" / "query_images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    image_path = image_dir / f"{uuid.uuid4().hex[:16]}{suffix}"
+    image_path.write_bytes(data)
+    try:
+        resolved = resolve_operation_query_image_path(
+            str(image_path),
+            base_dir=BASE_DIR,
+        )
+        from PIL import Image
+
+        with Image.open(resolved) as image:
+            width, height = image.size
+    except ValueError as exc:
+        image_path.unlink(missing_ok=True)
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "query_image_path": str(resolved),
+        "filename": Path(file.filename or resolved.name).name,
+        "width": width,
+        "height": height,
+        "size": len(data),
+    }
+
+
 @app.get("/api/eval/{task_id}/stream")
 async def api_stream(
     task_id: str,
@@ -1654,8 +1694,13 @@ def api_export(task_id: str, format: str = "json"):
 
 
 @app.get("/api/eval/{task_id}/items/{item_index}/export")
-def api_export_item(task_id: str, item_index: int, format: str):
-    """导出单条结果关联的原视频、关键帧或裁判调用 JSON。"""
+def api_export_item(
+    task_id: str,
+    item_index: int,
+    format: str,
+    image_index: int = 0,
+):
+    """导出单条结果关联的原视频、原输入图片、关键帧或裁判调用 JSON。"""
     task = get_live_task(task_id)
     data = task_to_snapshot(task) if task else load_snapshot(task_id)
     if not data:
@@ -1669,6 +1714,28 @@ def api_export_item(task_id: str, item_index: int, format: str):
         f"{item_index + 1:03d}_{raw_id}",
         f"{item_index + 1:03d}_item",
     )
+
+    if format in {"query_image", "query-image"}:
+        raw_images = list(item.get("query_images") or [])
+        if image_index < 0 or image_index >= len(raw_images):
+            raise HTTPException(404, "该条结果没有对应的原输入图片")
+        try:
+            image_path = resolve_operation_query_image_path(
+                str(raw_images[image_index]),
+                base_dir=BASE_DIR,
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        media_types = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }
+        return FileResponse(
+            image_path,
+            media_type=media_types.get(image_path.suffix.lower()),
+        )
 
     if format == "video":
         raw_path = str(item.get("video_path") or "").strip()
@@ -1714,7 +1781,10 @@ def api_export_item(task_id: str, item_index: int, format: str):
             },
         )
 
-    raise HTTPException(400, "format 必须是 video、frames_zip 或 judge_calls")
+    raise HTTPException(
+        400,
+        "format 必须是 query_image、video、frames_zip 或 judge_calls",
+    )
 
 
 @app.get("/")

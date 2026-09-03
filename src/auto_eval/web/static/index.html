@@ -216,6 +216,25 @@
         </div>
         <textarea v-model="entry.item.query" rows="2" :placeholder="mode==='operation' ? '操作意图(query)，如：设一个明天早上7点的闹钟' : '用户问题(query)，如：北京明天天气怎么样'"></textarea>
         <textarea v-model="entry.item.context" rows="2" placeholder="(可选) 可信背景(context)，如：当前时间为晚上10点；设备时区为北京时间"></textarea>
+        <div v-if="mode==='operation'" class="op-upload query-image-upload">
+          <label class="op-upload-btn">
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              :disabled="entry.item.queryImageUploading"
+              @change="onQueryImage($event, entry.index)"
+              hidden
+            >
+            {{ entry.item.queryImages.length ? '更换用户输入图片' : '添加用户输入图片（可选，单图）' }}
+          </label>
+          <span v-if="entry.item.queryImageUploading" class="hint">上传中…</span>
+          <template v-else-if="entry.item.queryImages.length">
+            <img v-if="entry.item.queryImagePreview" :src="entry.item.queryImagePreview" class="query-image-preview" alt="用户输入图片">
+            <span class="ok">🖼️ {{ entry.item.queryImageName }}（{{ entry.item.queryImages.length }} 张）</span>
+            <a href="#" class="row-export-link" @click.prevent="removeQueryImage(entry.index)">移除</a>
+          </template>
+          <span v-if="entry.item.queryImageError" class="err">{{ entry.item.queryImageError }}</span>
+        </div>
         <input v-if="mode==='rich_content' || mode==='rich_content_quality'" v-model="entry.item.category" placeholder="(可选) 垂域 category，如 weather / music / sports" style="width:100%;box-sizing:border-box;margin-bottom:8px">
         <div class="op-upload">
           <label class="op-upload-btn">
@@ -754,7 +773,46 @@
                   @mouseenter="showCellTooltip($event, cellTitle(r, c) || cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
+                  <div v-if="c.key==='query_image_count'" class="query-image-result-cell">
+                    <span>{{ resultQueryImageCount(r) }} 张</span>
+                    <button
+                      type="button"
+                      class="query-image-preview-button"
+                      @click.stop="openQueryImagePreview($event,r)"
+                    >预览</button>
+                    <dialog
+                      class="query-image-preview-dialog"
+                      aria-label="原输入图片预览"
+                      @click.self="$event.currentTarget.close()"
+                      @close="resultQueryImagePreviewItemIndex=null"
+                    >
+                      <div class="query-image-popover-head">
+                        <strong>原输入图片</strong>
+                        <span class="hint">{{ resultQueryImagePreviewIndex+1 }}/{{ resultQueryImageCount(r) }} · {{ resultQueryImageFilename(r) }}</span>
+                      </div>
+                      <div class="query-image-popover-body">
+                        <img v-if="resultQueryImagePreviewItemIndex===Number(r.index)" :src="queryImagePreviewUrl(r,resultQueryImagePreviewIndex)" :alt="resultQueryImageFilename(r)">
+                      </div>
+                      <div class="query-image-popover-foot">
+                        <button
+                          v-if="resultQueryImageCount(r)>1"
+                          type="button"
+                          class="query-image-nav-button"
+                          @click="moveResultQueryImagePreview(r,-1)"
+                        >上一张</button>
+                        <span v-if="resultQueryImageCount(r)>1" class="hint">{{ resultQueryImagePreviewIndex+1 }} / {{ resultQueryImageCount(r) }}</span>
+                        <button
+                          v-if="resultQueryImageCount(r)>1"
+                          type="button"
+                          class="query-image-nav-button"
+                          @click="moveResultQueryImagePreview(r,1)"
+                        >下一张</button>
+                        <button type="button" class="query-image-close-button" @click="closeQueryImagePreview($event)">关闭</button>
+                      </div>
+                    </dialog>
+                  </div>
                   <div
+                    v-else
                     class="cell-clamp"
                     :class="{'cell-full': c.key==='item_id', 'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
                   >{{ cell(r, c) }}</div>
@@ -1048,6 +1106,7 @@
       </aside>
     </div>
   </section>
+
 </div>
 
   <script type="module" src="/static/app.js?v=__STATIC_ASSET_VERSION__"></script>
