@@ -56,6 +56,7 @@ _TRACE_FIELDS = {
     "llm_rounds",
     "tool_results",
     "image_refs",
+    "image_roles",
     "messages",
     "error",
     "error_type",
@@ -158,8 +159,12 @@ def _safe_json(s: str | None):
         return s
 
 
-def _redact_image_urls(messages: list[dict], refs: list[str] | None) -> list[dict]:
-    """把 messages 里 image_url 的 base64 data url 替换成帧路径引用，避免 trace 文件膨胀。
+def _redact_image_urls(
+    messages: list[dict],
+    refs: list[str] | None,
+    roles: list[str] | None = None,
+) -> list[dict]:
+    """把 image_url 的 base64 替换成带语义角色的路径引用，避免 trace 膨胀。
 
     任务类评测每帧 base64 约 30KB，N 帧会让 judge_calls.jsonl 单行膨胀到 MB 级。
     refs 与 complete 的 user_images 一一对应（通常是关键帧本地路径）；
@@ -173,7 +178,11 @@ def _redact_image_urls(messages: list[dict], refs: list[str] | None) -> list[dic
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "image_url":
                     ref = refs[img_idx] if refs and img_idx < len(refs) else "(base64 省略)"
-                    new_content.append({"type": "image_url", "image_url": {"url": f"[frame → {ref}]"}})
+                    role = roles[img_idx] if roles and img_idx < len(roles) else "frame"
+                    new_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"[{role} → {ref}]"},
+                    })
                     img_idx += 1
                 else:
                     new_content.append(part)
@@ -285,11 +294,15 @@ class JudgeClient:
     async def complete(self, system: str, user: str,
                        stream_callback: Callable[[str], None] | None = None,
                        user_images: list[str] | None = None,
-                       user_image_refs: list[str] | None = None) -> JudgeReply:
+                       user_image_refs: list[str] | None = None,
+                       user_image_roles: list[str] | None = None,
+                       user_content_parts: list[dict[str, Any]] | None = None) -> JudgeReply:
         # 多模态：任务类评测传入关键帧 data_url 时，user content 变成 [text, image_url...] 列表。
         # agent-loop 内追加的 assistant/tool/强制判定消息仍为字符串，不受影响。
         user_content: Any = user
-        if user_images:
+        if user_content_parts is not None:
+            user_content = user_content_parts
+        elif user_images:
             user_content = [{"type": "text", "text": user}] + [
                 {"type": "image_url", "image_url": {"url": u}} for u in user_images
             ]
@@ -474,7 +487,12 @@ class JudgeClient:
                 "tool_results": tool_results,
                 # trace 不存 base64（每帧 ~30KB×N 会让 jsonl 膨胀），image_url 换成帧路径引用
                 "image_refs": user_image_refs,
-                "messages": _redact_image_urls(messages, user_image_refs),
+                "image_roles": user_image_roles,
+                "messages": _redact_image_urls(
+                    messages,
+                    user_image_refs,
+                    user_image_roles,
+                ),
             })
 
         return JudgeReply(

@@ -32,10 +32,12 @@ from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
 from ..analysis.operation_comparison import compare_operation_batches
+from ..analysis.operation_report import build_comparison_report, build_single_report
 from ..config import ExpertKnowledgeBase, load_config
 from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
 from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
+from ..report.operation import OPERATION_REPORT_ASSETS, build_operation_report_html
 from ..table_dataset import convert_table
 from ..llm_stream import build_openai_client, stream_chat_completion
 from .parse_input import Mode, parse_jsonl, parse_text
@@ -60,9 +62,12 @@ from .history import (
     write_frames_zip,
 )
 from .operation_media import (
+    MAX_QUERY_IMAGE_BYTES,
+    QUERY_IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
     operation_video_roots,
     prepare_cached_operation_item,
+    resolve_operation_query_image_path,
     resolve_operation_video_path,
 )
 from .operation_groups import align_operation_groups
@@ -93,6 +98,8 @@ def _static_asset_version() -> str:
     digest = hashlib.sha256()
     for name in ("app.js", "style.css"):
         digest.update((STATIC_DIR / name).read_bytes())
+    for name in ("operation_report.js", "operation_report.css"):
+        digest.update((OPERATION_REPORT_ASSETS / name).read_bytes())
     return digest.hexdigest()[:12]
 
 
@@ -1000,6 +1007,43 @@ async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation
     }
 
 
+@app.post("/api/upload/query-image")
+async def api_upload_query_image(file: UploadFile = File(...)):
+    """上传一张随 Query 提供的原始用户图片；模型调用时才编码为 data URL。"""
+    suffix = Path(file.filename or "query-image").suffix.lower()
+    if suffix not in QUERY_IMAGE_EXTENSIONS:
+        supported = "、".join(sorted(QUERY_IMAGE_EXTENSIONS))
+        raise HTTPException(422, f"不支持的图片格式；请选择 {supported}")
+    data = await file.read(MAX_QUERY_IMAGE_BYTES + 1)
+    if len(data) > MAX_QUERY_IMAGE_BYTES:
+        raise HTTPException(413, "用户输入图片超过 10MB 限制")
+    if not data:
+        raise HTTPException(422, "用户输入图片为空")
+    image_dir = RUNS_DIR / "uploads" / "query_images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    image_path = image_dir / f"{uuid.uuid4().hex[:16]}{suffix}"
+    image_path.write_bytes(data)
+    try:
+        resolved = resolve_operation_query_image_path(
+            str(image_path),
+            base_dir=BASE_DIR,
+        )
+        from PIL import Image
+
+        with Image.open(resolved) as image:
+            width, height = image.size
+    except ValueError as exc:
+        image_path.unlink(missing_ok=True)
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "query_image_path": str(resolved),
+        "filename": Path(file.filename or resolved.name).name,
+        "width": width,
+        "height": height,
+        "size": len(data),
+    }
+
+
 @app.get("/api/eval/{task_id}/stream")
 async def api_stream(
     task_id: str,
@@ -1269,6 +1313,7 @@ def _operation_comparison_analysis_payload(
     request: OperationComparisonAnalyzeReq,
     *,
     include_union_rows: bool = False,
+    include_report: bool = False,
 ) -> dict:
     if not 2 <= len(request.sources) <= 5:
         raise HTTPException(422, "请选择 2～5 个任务类评估结果集")
@@ -1304,11 +1349,14 @@ def _operation_comparison_analysis_payload(
             batch["dataset_name"] = source.group_name.strip()
         batches.append(batch)
     try:
-        return compare_operation_batches(
+        payload = compare_operation_batches(
             batches,
             baseline_task_id=request.control_source_id,
             include_union_rows=include_union_rows,
         )
+        if include_report:
+            payload["report"] = build_comparison_report(batches, payload)
+        return payload
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -1316,27 +1364,37 @@ def _operation_comparison_analysis_payload(
 @app.post("/api/operation/comparison/analyze")
 def api_operation_comparison_analyze(request: OperationComparisonAnalyzeReq):
     """对历史任务和上传结果集进行混合对比分析。"""
-    return _operation_comparison_analysis_payload(request)
+    return _operation_comparison_analysis_payload(request, include_report=True)
 
 
 @app.post("/api/operation/comparison/export")
-def api_operation_comparison_export(request: OperationComparisonAnalyzeReq):
+def api_operation_comparison_export(
+    request: OperationComparisonAnalyzeReq,
+    format: Literal["xlsx", "html"] = "xlsx",
+):
     """导出独立任务类对比分析报告。"""
     payload = _operation_comparison_analysis_payload(
         request,
-        include_union_rows=True,
+        include_union_rows=format == "xlsx",
+        include_report=format == "html",
     )
-    content = build_operation_comparison_xlsx(payload)
+    content = (
+        build_operation_report_html(payload["report"])
+        if format == "html" else build_operation_comparison_xlsx(payload)
+    )
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     control_name = _download_stem(
         str(payload.get("baseline_name") or "operation"),
         "operation",
     )
-    utf8_name = f"{control_name}_comparison_{timestamp}.xlsx"
-    ascii_name = f"operation_comparison_{timestamp}.xlsx"
+    utf8_name = f"{control_name}_comparison_{timestamp}.{format}"
+    ascii_name = f"operation_comparison_{timestamp}.{format}"
     return Response(
         content,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        media_type=(
+            "text/html" if format == "html"
+            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
         headers={
             "Content-Disposition": (
                 f'attachment; filename="{ascii_name}"; '
@@ -1583,6 +1641,29 @@ def api_operation_statistics(task_id: str, download: bool = False):
     )
 
 
+def _single_operation_report(data: dict) -> dict:
+    try:
+        statistics = operation_statistics_payload(data)
+        return build_single_report(
+            operation_comparison_batch(data), statistics["statistics"],
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/eval/{task_id}/report")
+def api_operation_report(task_id: str):
+    """最新结果的紧凑报告数据；不缓存，重跑后重新计算。"""
+    task = get_live_task(task_id)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "task not found")
+    return JSONResponse(
+        _single_operation_report(data),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/api/eval/{task_id}/export")
 def api_export(task_id: str, format: str = "json"):
     task = get_live_task(task_id)
@@ -1592,6 +1673,21 @@ def api_export(task_id: str, format: str = "json"):
 
     if format == "json":
         return JSONResponse(snapshot_payload(data))
+
+    if format == "html":
+        content = build_operation_report_html(_single_operation_report(data))
+        ascii_name, utf8_name = _eval_download_names(data, task_id, "html")
+        return Response(
+            content,
+            media_type="text/html",
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+                ),
+            },
+        )
 
     if format == "jsonl":
         try:
@@ -1654,8 +1750,13 @@ def api_export(task_id: str, format: str = "json"):
 
 
 @app.get("/api/eval/{task_id}/items/{item_index}/export")
-def api_export_item(task_id: str, item_index: int, format: str):
-    """导出单条结果关联的原视频、关键帧或裁判调用 JSON。"""
+def api_export_item(
+    task_id: str,
+    item_index: int,
+    format: str,
+    image_index: int = 0,
+):
+    """导出单条结果关联的原视频、原输入图片、关键帧或裁判调用 JSON。"""
     task = get_live_task(task_id)
     data = task_to_snapshot(task) if task else load_snapshot(task_id)
     if not data:
@@ -1669,6 +1770,28 @@ def api_export_item(task_id: str, item_index: int, format: str):
         f"{item_index + 1:03d}_{raw_id}",
         f"{item_index + 1:03d}_item",
     )
+
+    if format in {"query_image", "query-image"}:
+        raw_images = list(item.get("query_images") or [])
+        if image_index < 0 or image_index >= len(raw_images):
+            raise HTTPException(404, "该条结果没有对应的原输入图片")
+        try:
+            image_path = resolve_operation_query_image_path(
+                str(raw_images[image_index]),
+                base_dir=BASE_DIR,
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        media_types = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }
+        return FileResponse(
+            image_path,
+            media_type=media_types.get(image_path.suffix.lower()),
+        )
 
     if format == "video":
         raw_path = str(item.get("video_path") or "").strip()
@@ -1714,7 +1837,10 @@ def api_export_item(task_id: str, item_index: int, format: str):
             },
         )
 
-    raise HTTPException(400, "format 必须是 video、frames_zip 或 judge_calls")
+    raise HTTPException(
+        400,
+        "format 必须是 query_image、video、frames_zip 或 judge_calls",
+    )
 
 
 @app.get("/")
@@ -1729,6 +1855,12 @@ def index():
         },
     )
 
+
+app.mount(
+    "/report-assets",
+    VersionedStaticFiles(directory=str(OPERATION_REPORT_ASSETS)),
+    name="report-assets",
+)
 
 app.mount(
     "/static",

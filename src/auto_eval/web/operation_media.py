@@ -22,6 +22,10 @@ from ..paths import PROJECT_ROOT, RUNS_DIR
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+QUERY_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_QUERY_IMAGES = 4
+MAX_QUERY_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_QUERY_IMAGE_PIXELS = 25_000_000
 _TASK_TIME_FIELDS = ("task_start_time", "task_end_time")
 _CONTENT_TIME_FIELDS = ("content_start_time", "content_end_time")
 
@@ -85,6 +89,78 @@ def resolve_operation_video_path(
         supported = ", ".join(sorted(VIDEO_EXTENSIONS))
         raise ValueError(f"不支持的视频格式 {candidate.suffix or '(无扩展名)'}；支持：{supported}")
     return candidate
+
+
+def resolve_operation_query_image_path(
+    raw_path: str,
+    *,
+    base_dir: Path = PROJECT_ROOT,
+) -> Path:
+    """解析并校验任务类用户输入图片，不允许越过录屏媒体根目录。"""
+    candidate = Path(raw_path).expanduser()
+    roots = operation_video_roots(base_dir)
+    if candidate.is_absolute():
+        candidate = candidate.resolve()
+        if not any(candidate.is_relative_to(root) for root in roots):
+            raise ValueError(
+                "用户输入图片不在允许目录中；外部目录需通过 "
+                "OPERATION_VIDEO_ROOTS 配置"
+            )
+    else:
+        matches = [
+            resolved
+            for root in roots
+            if (resolved := (root / candidate).resolve()).is_relative_to(root)
+            and resolved.is_file()
+        ]
+        if not matches:
+            raise ValueError(f"用户输入图片不存在：{raw_path}")
+        if len(matches) > 1:
+            raise ValueError(f"用户输入图片相对路径存在多个匹配：{raw_path}")
+        candidate = matches[0]
+    if not candidate.is_file():
+        raise ValueError(f"用户输入图片不存在：{raw_path}")
+    if candidate.suffix.lower() not in QUERY_IMAGE_EXTENSIONS:
+        supported = ", ".join(sorted(QUERY_IMAGE_EXTENSIONS))
+        raise ValueError(
+            f"不支持的用户输入图片格式 {candidate.suffix or '(无扩展名)'}；"
+            f"支持：{supported}"
+        )
+    if candidate.stat().st_size > MAX_QUERY_IMAGE_BYTES:
+        raise ValueError("用户输入图片超过 10MB 限制")
+    try:
+        from PIL import Image
+
+        with Image.open(candidate) as image:
+            width, height = image.size
+            if width <= 0 or height <= 0 or width * height > MAX_QUERY_IMAGE_PIXELS:
+                raise ValueError("用户输入图片尺寸无效或像素数超过 2500 万")
+            image.verify()
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"用户输入图片无法解析：{raw_path}") from exc
+    return candidate
+
+
+def prepare_operation_query_images(
+    item: dict,
+    *,
+    base_dir: Path = PROJECT_ROOT,
+) -> dict:
+    """把 query_images 归一为已校验的绝对路径，快照中不保存 base64。"""
+    prepared = dict(item)
+    raw_images = list(item.get("query_images") or [])
+    if len(raw_images) > MAX_QUERY_IMAGES:
+        raise ValueError(f"query_images 最多支持 {MAX_QUERY_IMAGES} 张")
+    if raw_images:
+        prepared["query_images"] = [
+            str(resolve_operation_query_image_path(str(path), base_dir=base_dir))
+            for path in raw_images
+        ]
+    else:
+        prepared.pop("query_images", None)
+    return prepared
 
 
 def _cached_frames(
@@ -294,6 +370,7 @@ def prepare_cached_operation_item(
     extract_fn: Callable = extract_scene_keyframes,
 ) -> dict:
     """兼容旧准备接口：按视频内容状态复用缓存。"""
+    item = prepare_operation_query_images(item, base_dir=base_dir)
     raw_path = str(item.get("video_path") or "").strip()
     if not raw_path:
         raise ValueError("缺少 video_path")
@@ -341,6 +418,7 @@ def prepare_session_operation_item(
     extract_fn: Callable = extract_scene_keyframes,
 ) -> dict:
     """按 Web 历史会话名和题目序号准备关键帧。"""
+    item = prepare_operation_query_images(item, base_dir=base_dir)
     raw_path = str(item.get("video_path") or "").strip()
     if not raw_path:
         media = item.get("media") or []

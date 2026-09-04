@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
   <link rel="stylesheet" href="/static/style.css?v=__STATIC_ASSET_VERSION__">
+  <link rel="stylesheet" href="/report-assets/operation_report.css?v=__STATIC_ASSET_VERSION__">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -197,6 +198,7 @@
         </div>
         <p v-if="mode==='operation'" class="hint">支持 JSONL、CSV、XLSX。表格必需列：<strong>query</strong>，以及 <strong>index / 序号</strong> 二选一。视频优先读取 <strong>video_path</strong>；没有该列时使用<strong>原文件名</strong>拼接，<strong>文件路径</strong>可选。Excel 优先读取“合并数据”工作表。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","content_start_time":0,"content_end_time":18.5}</p>
+        <p v-if="mode==='operation'" class="hint op-optional-fields-help">可选字段：id（题号）、context（背景）、query_images / query_image_path / attachment_path（用户图片）、agent_statement / answer（自述）、task_start_time / task_end_time（任务起止时间，单位秒）。图片字段按上述顺序取首个非空值；每题下方展示 attachment_path 和当前导入的起止时间，视频及图片在开始评估时校验。</p>
         <div v-if="datasetImportSummary" class="summary dataset-import-summary">
           <span>格式 {{ datasetImportSummary.format }}</span>
           <span v-if="datasetImportSummary.sheet != null">工作表 {{ datasetImportSummary.sheet }}</span>
@@ -216,6 +218,25 @@
         </div>
         <textarea v-model="entry.item.query" rows="2" :placeholder="mode==='operation' ? '操作意图(query)，如：设一个明天早上7点的闹钟' : '用户问题(query)，如：北京明天天气怎么样'"></textarea>
         <textarea v-model="entry.item.context" rows="2" placeholder="(可选) 可信背景(context)，如：当前时间为晚上10点；设备时区为北京时间"></textarea>
+        <div v-if="mode==='operation'" class="op-upload query-image-upload">
+          <label class="op-upload-btn">
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              :disabled="entry.item.queryImageUploading"
+              @change="onQueryImage($event, entry.index)"
+              hidden
+            >
+            {{ entry.item.queryImages.length ? '更换用户输入图片' : '添加用户输入图片（可选，单图）' }}
+          </label>
+          <span v-if="entry.item.queryImageUploading" class="hint">上传中…</span>
+          <template v-else-if="entry.item.queryImages.length">
+            <img v-if="entry.item.queryImagePreview" :src="entry.item.queryImagePreview" class="query-image-preview" alt="用户输入图片">
+            <span class="ok">🖼️ {{ entry.item.queryImageName }}（{{ entry.item.queryImages.length }} 张）</span>
+            <a href="#" class="row-export-link" @click.prevent="removeQueryImage(entry.index)">移除</a>
+          </template>
+          <span v-if="entry.item.queryImageError" class="err">{{ entry.item.queryImageError }}</span>
+        </div>
         <input v-if="mode==='rich_content' || mode==='rich_content_quality'" v-model="entry.item.category" placeholder="(可选) 垂域 category，如 weather / music / sports" style="width:100%;box-sizing:border-box;margin-bottom:8px">
         <div class="op-upload">
           <label class="op-upload-btn">
@@ -230,6 +251,11 @@
         <div v-if="entry.item.videoPath" class="op-path">{{ entry.item.videoPath }}</div>
         <textarea v-if="mode==='operation'" v-model="entry.item.answer" rows="1" placeholder="(可选) agent 自述，如「我已设好7点闹钟」—— 用于交叉验证是否只说不做"></textarea>
         <textarea v-else v-model="entry.item.answer" rows="2" placeholder="(可选) answer_text，只辅助理解回答语义，不能证明画面中存在挂卡或蓝色链接"></textarea>
+        <div v-if="mode==='operation'" class="hint op-import-fields" aria-label="任务可选字段">
+          <span class="op-import-path">attachment_path：{{ formatAttachmentPath(entry.item) }}</span>
+          <span>task_start_time：{{ formatOptionalTaskTime(entry.item.taskStartTime, '开始') }}</span>
+          <span>task_end_time：{{ formatOptionalTaskTime(entry.item.taskEndTime, '结束') }}</span>
+        </div>
       </div>
       <div class="pagination" v-if="opPageCount>1">
         <span class="page-size page-size-fixed">每页 {{ opPageSize }} 条</span>
@@ -499,6 +525,7 @@
       <button @click="exportJson" :disabled="!taskId">导出任务快照 JSON</button>
       <button @click="exportJsonl" :disabled="!taskId">导出逐题 JSONL</button>
       <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
+      <button v-if="mode==='operation' && !isMultiGroupMode" @click="exportHtml" :disabled="!taskId">导出 HTML 报告</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId">导出抽帧 ZIP</button>
     </h2>
     <div class="summary" v-if="summary">
@@ -530,6 +557,9 @@
       open
     >
       <summary>📊 任务类统计分布</summary>
+      <operation-report :task-id="taskId" :revision="summary"></operation-report>
+      <details class="operation-statistics-legacy">
+      <summary>查看原始统计表</summary>
       <div class="operation-statistics-overview">
         <span>有效评估 {{ operationStatistics.valid_count }}/{{ operationStatistics.total_cases }}</span>
         <span>评估覆盖率 {{ operationStatistics.coverage_rate!=null ? (operationStatistics.coverage_rate*100).toFixed(2)+'%' : '—' }}</span>
@@ -572,11 +602,12 @@
             class="history-text-link operation-statistics-more"
             @click.prevent="issueStatsExpanded=!issueStatsExpanded"
           >{{ issueStatsExpanded ? '收起' : `展开全部（${operationStatistics.issue_type_rows.length} 类）` }}</a>
-          <p class="hint operation-statistics-detail-note">如需查看问题对应的具体 Case、判定和理由，请导出完整 XLSX，在“逐题结果”中查看。</p>
+          <p class="hint operation-statistics-detail-note">上方图表支持点击问题类型查看对应 Case；完整数据也可导出 XLSX 或 HTML。</p>
         </div>
       </div>
       <p class="operation-statistics-conclusion"><strong>结论：</strong>{{ operationStatistics.conclusion }}</p>
       <p class="hint operation-statistics-note">口径：OK 率、Correctness 和问题类型占比均以全部有效评估 Case 为分母。同一 Case 的同一问题类型只计一次，因此问题类型占比之和可能超过 100%。</p>
+      </details>
     </details>
     <details class="skill-breakdown" v-if="summary && summary.by_skill && summary.by_skill.overview && summary.by_skill.overview.length" open>
       <summary>📊 按垂域分析（{{ summary.by_skill.overview.length }} 个垂域 · 维度问题阈值 ≤ {{ summary.by_skill.threshold }}）</summary>
@@ -754,7 +785,46 @@
                   @mouseenter="showCellTooltip($event, cellTitle(r, c) || cell(r, c))"
                   @mouseleave="scheduleHideCellTooltip"
                 >
+                  <div v-if="c.key==='query_image_count'" class="query-image-result-cell">
+                    <span>{{ resultQueryImageCount(r) }} 张</span>
+                    <button
+                      type="button"
+                      class="query-image-preview-button"
+                      @click.stop="openQueryImagePreview($event,r)"
+                    >预览</button>
+                    <dialog
+                      class="query-image-preview-dialog"
+                      aria-label="原输入图片预览"
+                      @click.self="$event.currentTarget.close()"
+                      @close="resultQueryImagePreviewItemIndex=null"
+                    >
+                      <div class="query-image-popover-head">
+                        <strong>原输入图片</strong>
+                        <span class="hint">{{ resultQueryImagePreviewIndex+1 }}/{{ resultQueryImageCount(r) }} · {{ resultQueryImageFilename(r) }}</span>
+                      </div>
+                      <div class="query-image-popover-body">
+                        <img v-if="resultQueryImagePreviewItemIndex===Number(r.index)" :src="queryImagePreviewUrl(r,resultQueryImagePreviewIndex)" :alt="resultQueryImageFilename(r)">
+                      </div>
+                      <div class="query-image-popover-foot">
+                        <button
+                          v-if="resultQueryImageCount(r)>1"
+                          type="button"
+                          class="query-image-nav-button"
+                          @click="moveResultQueryImagePreview(r,-1)"
+                        >上一张</button>
+                        <span v-if="resultQueryImageCount(r)>1" class="hint">{{ resultQueryImagePreviewIndex+1 }} / {{ resultQueryImageCount(r) }}</span>
+                        <button
+                          v-if="resultQueryImageCount(r)>1"
+                          type="button"
+                          class="query-image-nav-button"
+                          @click="moveResultQueryImagePreview(r,1)"
+                        >下一张</button>
+                        <button type="button" class="query-image-close-button" @click="closeQueryImagePreview($event)">关闭</button>
+                      </div>
+                    </dialog>
+                  </div>
                   <div
+                    v-else
                     class="cell-clamp"
                     :class="{'cell-full': c.key==='item_id', 'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
                   >{{ cell(r, c) }}</div>
@@ -898,7 +968,7 @@
           <span v-if="source.summary?.sheet">工作表 {{ source.summary.sheet }}</span>
         </div>
         <div class="comparison-mapping">
-          <span>case_id：{{ source.mapping?.case_id || '未识别' }}</span>
+          <span>index：{{ source.mapping?.index || '未识别' }}</span>
           <span>query：{{ source.mapping?.query || '未识别' }}</span>
           <span>correctness：{{ source.mapping?.correctness || '未识别' }}</span>
           <span>issue_types：{{ source.mapping?.issue_types || '未识别（可选）' }}</span>
@@ -918,8 +988,14 @@
     <div v-if="historyComparison" class="history-comparison-result">
       <div class="history-comparison-heading">
         <h3>任务类对比分析结果</h3>
-        <button @click="exportHistoryComparison" :disabled="historyComparisonLoading">导出对比 XLSX</button>
+        <div class="row">
+          <button @click="exportHistoryComparison('xlsx')" :disabled="historyComparisonLoading">导出对比 XLSX</button>
+          <button @click="exportHistoryComparison('html')" :disabled="historyComparisonLoading">导出 HTML 报告</button>
+        </div>
       </div>
+      <operation-report v-if="historyComparison.report" :report="historyComparison.report"></operation-report>
+      <details class="operation-statistics-legacy" :open="!historyComparison.report">
+      <summary>完整对比表（含问题类型筛选、排序）</summary>
       <div class="summary">
         <span>批次数 {{ historyComparison.group_count }}</span>
         <span>全组共同 Case {{ historyComparison.all_groups_common_matched_count }}</span>
@@ -936,20 +1012,20 @@
           <tbody><tr v-for="group in historyComparison.groups" :key="'comparison-group-'+group.task_id">
             <td><strong>{{ group.group_label }}</strong></td><td><div>{{ group.group_name }}</div><div class="history-task-id">{{ group.task_id }}</div></td>
             <td>{{ group.original_count }}</td><td>{{ group.common_valid_count }}</td><td>{{ comparisonCorrectnessCount(group, 'ok') }}</td><td>{{ comparisonCorrectnessCount(group, 'nok') }}</td><td>{{ comparisonCorrectnessCount(group, 'no_support') }}</td><td>{{ comparisonCorrectnessCount(group, 'others') }}</td>
-            <td>{{ group.statistics.ok_rate!=null ? (group.statistics.ok_rate*100).toFixed(2)+'%' : '—' }}</td>
+            <td :class="{'comparison-best-rate': comparisonIsBestOkRate(group)}">{{ group.statistics.ok_rate!=null ? (group.statistics.ok_rate*100).toFixed(2)+'%' : '—' }}</td>
           </tr></tbody>
         </table>
       </div>
       <h4>相对对照组的共同 Case 对比</h4>
       <div class="table-scroll">
         <table class="grid auto-table">
-          <thead><tr><th>对比关系</th><th>共同 Case</th><th>共同有效 Case</th><th>对照组OK数</th><th>对照组OK率</th><th>实验组OK数</th><th>实验组OK率</th><th>差值</th><th>其他→OK</th><th>OK→其他</th><th>OK净变化</th></tr></thead>
+          <thead><tr><th>对比关系</th><th>共同 Case</th><th>共同有效 Case</th><th>对照组OK数</th><th>对照组OK率</th><th>实验组OK数</th><th>实验组OK率</th><th>其他→OK</th><th>OK→其他</th><th>OK净变化</th><th>OK率差值</th><th>结论</th></tr></thead>
           <tbody><tr v-for="pair in historyComparison.pairwise" :key="'comparison-pair-'+pair.target_task_id">
-            <td><strong>{{ pair.baseline_label }}</strong> / <strong>{{ pair.target_label }}</strong></td><td>{{ pair.matched_count }}</td><td>{{ pair.valid_pair_count }}</td><td>{{ pair.baseline_ok_count }}</td><td>{{ pair.baseline_ok_rate!=null ? (pair.baseline_ok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.target_ok_count }}</td><td>{{ pair.target_ok_rate!=null ? (pair.target_ok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}</td><td>{{ pair.to_ok_count }}</td><td>{{ pair.from_ok_count }}</td><td>{{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }}</td>
+            <td><strong>{{ pair.baseline_label }}</strong> / <strong>{{ pair.target_label }}</strong></td><td>{{ pair.matched_count }}</td><td>{{ pair.valid_pair_count }}</td><td>{{ pair.baseline_ok_count }}</td><td>{{ pair.baseline_ok_rate!=null ? (pair.baseline_ok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.target_ok_count }}</td><td>{{ pair.target_ok_rate!=null ? (pair.target_ok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.to_ok_count }}</td><td>{{ pair.from_ok_count }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ comparisonPairChangeLabel(pair) }}</td>
           </tr></tbody>
         </table>
       </div>
-      <p class="hint">“其他”表示 <code>nok</code>、<code>no_support</code> 或 <code>others</code>。</p>
+      <p class="hint">“其他”表示 <code>nok</code>、<code>no_support</code> 或 <code>others</code>；OK率差值超过 ±{{ ((historyComparison.ok_rate_close_threshold ?? 0.01)*100).toFixed(2) }}pp 判定为优化或劣化，范围内判定为接近。</p>
       <h4>对照组与实验组 Issue Type 详细对比</h4>
       <details v-for="pair in historyComparison.pairwise" :key="'comparison-issue-detail-'+pair.target_task_id" class="history-comparison-detail">
         <summary><strong>{{ pair.baseline_label }}</strong> vs <strong>{{ pair.target_label }}</strong>｜共同有效 {{ pair.valid_pair_count }} 条</summary>
@@ -975,8 +1051,9 @@
       </details>
       <div class="history-comparison-conclusion">
         <p>各组 Correctness 使用所有结果集共有且均有效的 Case；Issue Type 使用对应实验组与对照组的共同有效 Case。</p>
-        <p v-for="pair in historyComparison.pairwise" :key="'comparison-conclusion-'+pair.target_task_id"><strong>{{ pair.target_label }}</strong> 相对 <strong>{{ pair.baseline_label }}</strong>：共同有效 {{ pair.valid_pair_count }} 条，OK率相差 {{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}；其他→OK {{ pair.to_ok_count }} 条，OK→其他 {{ pair.from_ok_count }} 条，OK净变化 {{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }} 条。</p>
+        <p v-for="pair in historyComparison.pairwise" :key="'comparison-conclusion-'+pair.target_task_id"><strong>{{ pair.target_label }}</strong> 相对 <strong>{{ pair.baseline_label }}</strong>：<strong class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ comparisonPairChangeLabel(pair) }}</strong>，共同有效 {{ pair.valid_pair_count }} 条，OK率相差 {{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}；其他→OK {{ pair.to_ok_count }} 条，OK→其他 {{ pair.from_ok_count }} 条，OK净变化 {{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }} 条。</p>
       </div>
+      </details>
     </div>
   </section>
 
@@ -1048,8 +1125,10 @@
       </aside>
     </div>
   </section>
+
 </div>
 
+  <script src="/report-assets/operation_report.js?v=__STATIC_ASSET_VERSION__"></script>
   <script type="module" src="/static/app.js?v=__STATIC_ASSET_VERSION__"></script>
 </body>
 </html>

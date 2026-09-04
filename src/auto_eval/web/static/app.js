@@ -1,7 +1,50 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
+import { createApp, ref, computed, watch, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
 import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 
 createApp({
+  components: {
+    OperationReport: {
+      props: ["taskId", "revision", "report"],
+      setup(props) {
+        const host = ref(null), loading = ref(false), error = ref("");
+        let viewer = null, controller = null, disposed = false;
+        async function refresh() {
+          controller?.abort();
+          const current = new AbortController();
+          controller = current;
+          error.value = "";
+          viewer?.update(null);
+          if (!props.report && !props.taskId) { loading.value = false; return; }
+          loading.value = true;
+          const timeout = setTimeout(() => current.abort(), 30000);
+          try {
+            let data = props.report;
+            if (!data) {
+              const response = await fetch(`/api/eval/${encodeURIComponent(props.taskId)}/report`, { signal: current.signal });
+              data = await response.json();
+              if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+            }
+            if (disposed || current !== controller || current.signal.aborted) return;
+            if (!globalThis.AutoEvalOperationReport) throw new Error("报告资源未加载，请刷新页面");
+            if (!viewer) viewer = globalThis.AutoEvalOperationReport.mount(host.value, data);
+            else viewer.update(data);
+          } catch (e) {
+            if (!disposed && current === controller) {
+              error.value = current.signal.aborted ? "报告加载超时，请重试" : (e.message || "报告加载失败");
+            }
+          } finally {
+            clearTimeout(timeout);
+            if (current === controller) loading.value = false;
+          }
+        }
+        onMounted(refresh);
+        watch([() => props.taskId, () => props.revision, () => props.report], refresh, { flush: "post" });
+        onUnmounted(() => { disposed = true; controller?.abort(); viewer?.destroy(); viewer = null; });
+        return { host, loading, error, refresh };
+      },
+      template: '<div><p v-if="loading" class="hint">正在加载图表与 Case…</p><p v-if="error" class="run-error">{{ error }} <button @click="refresh">重试</button></p><div ref="host"></div></div>',
+    },
+  },
   setup() {
     const workspacePage = ref("evaluation");
     const taskModule = ref("operation");
@@ -118,6 +161,8 @@ createApp({
     const problemDimFilter = ref("");
     const resultPage = ref(1);
     const resultPageSize = ref(10);
+    const resultQueryImagePreviewIndex = ref(0);
+    const resultQueryImagePreviewItemIndex = ref(null);
     const previewPage = ref(1);
     const progressPage = ref(1);
     const resultJumpPage = ref("");
@@ -240,7 +285,7 @@ createApp({
           compare: "每行一题：query [||| @context: 背景] ||| answerA ||| answerB [||| reference]",
           online: "每行一题：query [||| @context: 背景] [||| reference]   （后端现场调模型生成回答，再盲评）",
           process: "每行一题：query [||| @context: 背景] ||| answer ||| trace [||| reference]",
-          operation: "可逐题上传，也可导入 JSONL、CSV、XLSX：query、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对视频路径以项目根目录为基准。",
+          operation: "可逐题上传，也可导入 JSONL、CSV、XLSX：query、query_images(可选)、context(可选)、video_path、agent_statement(可选)、task_start_time/task_end_time(可选，单位秒)；相对媒体路径以项目根目录为基准。",
           operation_multi_group: "分别导入至少两组任务类 JSONL、CSV 或 XLSX，按 case_id 对齐并校验 query；同一 case 的多组录屏使用同一次模型调用和同一套任务类标准评估。",
           rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/content_start_time/content_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
           rich_content_quality: "综合评测：先视觉识别挂卡/Superlink（需选识别裁判），再将结果注入盲评裁判做回答质量评测（可多选）。格式与垂域视觉评测相同。",
@@ -780,6 +825,9 @@ createApp({
       const contextCols = results.value.some((r) => r.context != null && r.context !== "")
         ? [{ key: "context", label: "背景" }]
         : [];
+      const queryImageCols = results.value.some((r) => Number(r.query_image_count || 0) > 0)
+        ? [{ key: "query_image_count", label: "用户图片" }]
+        : [];
       if (mode.value === "compare")
         return [
           { key: "query", label: "题目" },
@@ -795,6 +843,7 @@ createApp({
         return [
           { key: "item_id", label: "题号（ID）" },
           { key: "query", label: "操作意图" },
+          ...queryImageCols,
           ...contextCols,
           { key: "execution_routes", label: "执行链路" },
           { key: "correctness", label: "完成判定" },
@@ -1204,6 +1253,7 @@ createApp({
       datasetImportWarnings.value = [];
       groupAlignment.value = null;
       if (["operation", "rich_content", "rich_content_quality"].includes(k)) {
+        releaseAllQueryImagePreviews();
         opItems.value = [newOpItem()];
         opPage.value = 1;
         opJumpPage.value = "";
@@ -1239,9 +1289,56 @@ createApp({
       r.readAsText(f, "utf-8");
     }
 
-    // —— 任务类（录屏）评测：逐题卡片（query + 可选 context + 视频上传 + 可选 agent 自述）——
+    // —— 任务类（录屏）评测：逐题卡片（query + 可选用户图片/context + 视频 + 可选 agent 自述）——
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, contentStartTime: null, contentEndTime: null, sourceLine: null, sourceData: null, uploading: false, uploadError: "" };
+      return {
+        _uiKey: ++opItemSequence,
+        id: "",
+        query: "",
+        queryImages: [],
+        queryImageName: "",
+        queryImagePreview: "",
+        queryImageUploading: false,
+        queryImageError: "",
+        attachmentPath: "",
+        context: "",
+        category: "",
+        videoName: "",
+        videoPath: "",
+        frames: [],
+        frameCount: 0,
+        duration: 0,
+        answer: "",
+        taskStartTime: null,
+        taskEndTime: null,
+        contentStartTime: null,
+        contentEndTime: null,
+        sourceLine: null,
+        sourceData: null,
+        uploading: false,
+        uploadError: "",
+      };
+    }
+    function formatOptionalTaskTime(value, boundary) {
+      return Number.isFinite(value)
+        ? `${value} 秒`
+        : `未设置（使用默认${boundary}时间）`;
+    }
+    function formatAttachmentPath(item) {
+      const path = String(item?.attachmentPath || "").trim();
+      if (!path) return "未提供";
+      const normalize = (value) => String(value || "").trim().replaceAll(String.fromCharCode(92), "/");
+      const isUsed = (item?.queryImages || []).some(
+        (imagePath) => normalize(imagePath) === normalize(path),
+      );
+      return `${path}${isUsed ? "（已作为用户图片导入）" : "（未作为当前用户图片使用）"}`;
+    }
+    function releaseQueryImagePreviews(item) {
+      const url = item?.queryImagePreview;
+      if (String(url || "").startsWith("blob:")) URL.revokeObjectURL(url);
+    }
+    function releaseAllQueryImagePreviews() {
+      opItems.value.forEach(releaseQueryImagePreviews);
     }
     function addOpItem() {
       opItems.value.push(newOpItem());
@@ -1250,6 +1347,7 @@ createApp({
     }
     function removeOpItem(i) {
       if (opItems.value.length <= 1) return;
+      releaseQueryImagePreviews(opItems.value[i]);
       opItems.value.splice(i, 1);
       opPage.value = Math.min(opPage.value, Math.max(1, Math.ceil(opItems.value.length / opPageSize)));
       opJumpPage.value = "";
@@ -1276,6 +1374,43 @@ createApp({
       }
     }
     function onOpVideo(e, i) { uploadVideo(i, e.target.files[0]); e.target.value = ""; }
+    async function uploadQueryImage(i, file) {
+      const it = opItems.value[i];
+      if (!file || it.queryImageUploading) return;
+      if (file.size > 10 * 1024 * 1024) {
+        it.queryImageError = "图片超过 10MB 限制";
+        return;
+      }
+      it.queryImageUploading = true;
+      it.queryImageError = "";
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const response = await fetch("/api/upload/query-image", { method: "POST", body: fd });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(providerApiErrorText(data, `上传失败 ${response.status}`));
+        releaseQueryImagePreviews(it);
+        it.queryImages = [data.query_image_path];
+        it.queryImageName = data.filename || file.name;
+        it.queryImagePreview = URL.createObjectURL(file);
+      } catch (error) {
+        it.queryImageError = error?.message || String(error);
+      } finally {
+        it.queryImageUploading = false;
+      }
+    }
+    function onQueryImage(e, i) {
+      uploadQueryImage(i, e.target.files[0]);
+      e.target.value = "";
+    }
+    function removeQueryImage(i) {
+      const it = opItems.value[i];
+      releaseQueryImagePreviews(it);
+      it.queryImages = [];
+      it.queryImageName = "";
+      it.queryImagePreview = "";
+      it.queryImageError = "";
+    }
     function onOpDrop(e, i) {
       e.preventDefault();
       const f = e.dataTransfer.files && e.dataTransfer.files[0];
@@ -1293,6 +1428,7 @@ createApp({
       datasetImportSummary.value = null;
       datasetImportWarnings.value = [];
       items.value = [];
+      releaseAllQueryImagePreviews();
       opItems.value = [newOpItem()];
       opPage.value = 1;
       opJumpPage.value = "";
@@ -1310,22 +1446,28 @@ createApp({
         const imported = parsed.items || [];
         if (imported.length) {
           items.value = imported;
-          opItems.value = imported.map((item) => ({
-            ...newOpItem(),
-            id: item.id || "",
-            query: item.query || "",
-            context: item.context || "",
-            category: item.category === "default" ? "" : (item.category || ""),
-            videoName: String(item.video_path || "").split(/[\\/]/).pop(),
-            videoPath: item.video_path || "",
-            answer: (mode.value === "rich_content" || mode.value === "rich_content_quality") ? (item.answer_text || "") : (item.answer || ""),
-            taskStartTime: item.task_start_time ?? null,
-            taskEndTime: item.task_end_time ?? null,
-            contentStartTime: item.content_start_time ?? null,
-            contentEndTime: item.content_end_time ?? null,
-            sourceLine: item.source_line ?? null,
-            sourceData: item.source_data || null,
-          }));
+          opItems.value = imported.map((item) => {
+            const queryImages = Array.isArray(item.query_images) ? [...item.query_images] : [];
+            return {
+              ...newOpItem(),
+              id: item.id || "",
+              query: item.query || "",
+              queryImages,
+              queryImageName: queryImages.map((path) => String(path || "").split(/[\\/]/).pop()).join("、"),
+              attachmentPath: String(item.attachment_path ?? item.source_data?.attachment_path ?? ""),
+              context: item.context || "",
+              category: item.category === "default" ? "" : (item.category || ""),
+              videoName: String(item.video_path || "").split(/[\\/]/).pop(),
+              videoPath: item.video_path || "",
+              answer: (mode.value === "rich_content" || mode.value === "rich_content_quality") ? (item.answer_text || "") : (item.answer || ""),
+              taskStartTime: item.task_start_time ?? null,
+              taskEndTime: item.task_end_time ?? null,
+              contentStartTime: item.content_start_time ?? null,
+              contentEndTime: item.content_end_time ?? null,
+              sourceLine: item.source_line ?? null,
+              sourceData: item.source_data || null,
+            };
+          });
           opPage.value = 1;
         }
       } catch (error) {
@@ -1523,6 +1665,7 @@ createApp({
           if (mode.value === "operation") {
             item.category = "operation";
             item.answer = (it.answer || "").trim();
+            if ((it.queryImages || []).length) item.query_images = [...it.queryImages];
           } else {
             // rich_content / rich_content_quality
             item.category = (it.category || "").trim() || "default";
@@ -2162,7 +2305,7 @@ createApp({
           dataset_name: item.dataset_name || item.task_id,
           group_name: item.dataset_name || item.task_id,
           rows: [],
-          mapping: { case_id: "历史快照", query: "历史快照", correctness: "历史结果", issue_types: "历史结果" },
+          mapping: { index: "历史快照（如有）", query: "历史快照", correctness: "历史结果", issue_types: "历史结果" },
           warnings: [],
           summary: {
             format: "历史任务",
@@ -2314,12 +2457,13 @@ createApp({
       }
     }
 
-    async function exportHistoryComparison() {
+    async function exportHistoryComparison(format = "xlsx") {
+      if (format !== "html") format = "xlsx";
       if (!historyComparison.value) return;
       historyComparisonLoading.value = true;
       historyComparisonError.value = "";
       try {
-        const response = await fetch("/api/operation/comparison/export", {
+        const response = await fetch(`/api/operation/comparison/export?format=${format}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(historyComparisonRequestBody()),
@@ -2333,7 +2477,7 @@ createApp({
         const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
         const filename = utf8Match
           ? decodeURIComponent(utf8Match[1])
-          : "operation_comparison.xlsx";
+          : `operation_comparison.${format}`;
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
@@ -2354,6 +2498,46 @@ createApp({
         (item) => item.correctness === correctness,
       );
       return row?.count || 0;
+    }
+
+    function comparisonIsBestOkRate(group) {
+      const current = group?.statistics?.ok_rate;
+      if (current == null) return false;
+      const rates = (historyComparison.value?.groups || [])
+        .map((item) => item?.statistics?.ok_rate)
+        .filter((value) => value != null)
+        .map(Number);
+      if (!rates.length) return false;
+      return Math.abs(Number(current) - Math.max(...rates)) < 1e-12;
+    }
+
+    function comparisonPairChangeState(pair) {
+      if (["improved", "worsened", "close", "unavailable"].includes(pair?.ok_rate_change)) {
+        return pair.ok_rate_change;
+      }
+      if (pair?.ok_rate_delta == null) return "unavailable";
+      const threshold = Number(historyComparison.value?.ok_rate_close_threshold ?? 0.01);
+      const delta = Number(pair.ok_rate_delta);
+      if (delta > threshold) return "improved";
+      if (delta < -threshold) return "worsened";
+      return "close";
+    }
+
+    function comparisonPairChangeClass(pair) {
+      const state = comparisonPairChangeState(pair);
+      if (state === "improved") return "comparison-delta-improved";
+      if (state === "worsened") return "comparison-delta-worsened";
+      return "comparison-delta-neutral";
+    }
+
+    function comparisonPairChangeLabel(pair) {
+      if (pair?.ok_rate_change_label) return pair.ok_rate_change_label;
+      return {
+        improved: "优化",
+        worsened: "劣化",
+        close: "接近",
+        unavailable: "无有效数据",
+      }[comparisonPairChangeState(pair)];
     }
 
     function comparisonIssueRows(pair) {
@@ -2555,6 +2739,9 @@ createApp({
     function exportXlsx() {
       window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
     }
+    function exportHtml() {
+      window.open(`/api/eval/${encodeURIComponent(taskId.value)}/export?format=html`, "_blank", "noopener");
+    }
     function exportFrames() {
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
@@ -2570,6 +2757,44 @@ createApp({
       const index = Number(result && result.index);
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
       return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
+    }
+
+    function resultQueryImageCount(result) {
+      const explicit = Number(result?.query_image_count);
+      if (Number.isInteger(explicit) && explicit > 0) return explicit;
+      return Array.isArray(result?.query_images) ? result.query_images.length : 0;
+    }
+
+    function queryImagePreviewUrl(result, imageIndex = 0) {
+      const base = itemArtifactUrl(result, "query_image");
+      return base ? `${base}&image_index=${Math.max(0, Number(imageIndex) || 0)}` : "";
+    }
+
+    function openQueryImagePreview(event, result) {
+      resultQueryImagePreviewItemIndex.value = Number(result.index);
+      resultQueryImagePreviewIndex.value = 0;
+      const dialog = event?.currentTarget?.nextElementSibling;
+      if (dialog && typeof dialog.showModal === "function") dialog.showModal();
+    }
+
+    function moveResultQueryImagePreview(result, offset) {
+      const count = resultQueryImageCount(result);
+      if (!count) return;
+      resultQueryImagePreviewIndex.value = (
+        resultQueryImagePreviewIndex.value + offset + count
+      ) % count;
+    }
+
+    function resultQueryImageFilename(result, imageIndex = resultQueryImagePreviewIndex.value) {
+      const path = Array.isArray(result?.query_images)
+        ? result.query_images[imageIndex]
+        : "";
+      return String(path || "").split(/[\\/]/).pop() || `图片 ${imageIndex + 1}`;
+    }
+
+    function closeQueryImagePreview(event) {
+      const dialog = event?.currentTarget?.closest("dialog");
+      if (dialog && typeof dialog.close === "function") dialog.close();
     }
 
     function isRerunSelected(result) {
@@ -2867,6 +3092,7 @@ createApp({
 
     onUnmounted(() => {
       disconnectSSE();
+      releaseAllQueryImagePreviews();
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
     });
 
@@ -2895,11 +3121,11 @@ createApp({
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
-      activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize,
+      activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize, resultQueryImagePreviewIndex, resultQueryImagePreviewItemIndex,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       operationGroups, groupAlignment, groupAligning, multiGroupColumns, multiGroupResult, displayArray, groupRoleLabel,
-      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit,
-      trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit, formatOptionalTaskTime, formatAttachmentPath,
+      trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, resultQueryImageCount, queryImagePreviewUrl, resultQueryImageFilename, openQueryImagePreview, closeQueryImagePreview, moveResultQueryImagePreview, addOpItem, removeOpItem, onOpVideo, onQueryImage, removeQueryImage, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       canCompareHistoryItem, isHistoryComparisonSelected, toggleHistoryComparisonItem,
       clearHistoryComparisonSelection, addSelectedHistoryComparisonSources,
@@ -2907,8 +3133,9 @@ createApp({
       removeComparisonSource, moveComparisonSource, clearComparisonSources,
       beginComparisonSourceNameEdit, saveComparisonSourceName,
       cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,
-      generateHistoryComparison, exportHistoryComparison,
-      comparisonCorrectnessCount, comparisonIssueRows,
+      generateHistoryComparison, exportHistoryComparison, exportHtml,
+      comparisonCorrectnessCount, comparisonIsBestOkRate,
+      comparisonPairChangeClass, comparisonPairChangeLabel, comparisonIssueRows,
       comparisonIssueDeltaClass, comparisonIssueDeltaStyle, comparisonIssueDeltaText,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,
       isActiveHistoryStatus, historyStatusLabel,

@@ -317,6 +317,7 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
     if compact:
         item_fields = {
             "id", "query", "question", "context", "category", "source_line",
+            "query_images",
             "case_id", "evaluation_strategy", "alignment_status",
             "alignment_warnings", "group_variants", "image_input",
         }
@@ -533,6 +534,8 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
         row.setdefault("query", item.get("query") or item.get("question") or "")
         if item.get("context") is not None:
             row.setdefault("context", item.get("context"))
+        if item.get("query_images"):
+            row.setdefault("query_images", list(item.get("query_images") or []))
         if item.get("answer") is not None:
             row.setdefault("answer", item.get("answer"))
         if item.get("video_path") is not None:
@@ -833,11 +836,14 @@ _RUNTIME_ITEM_FIELDS = {
 _OPERATION_EXPORT_COLUMNS = (
     "数据集序号",
     "item_id",
+    "index",
     "序号",
     "sessionid",
     "query",
     "video_path",
     "分享链接",
+    "query_images",
+    "query_image_count",
     "context",
     "answer",
     "Provider",
@@ -920,9 +926,25 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
         values = {
             "数据集序号": result.get("数据集序号", position + 1),
             "item_id": item_id,
+            "index": (
+                source.get("index")
+                if "index" in source else item.get("index", "")
+            ),
             "序号": _jsonl_sequence(source, item, str(item_id)),
             "sessionid": session_id,
             "query": result.get("query") or item.get("query") or item.get("question") or "",
+            "query_images": "\n".join(
+                _project_relative_path(path)
+                for path in (
+                    result.get("query_images")
+                    or item.get("query_images")
+                    or source.get("query_images")
+                    or []
+                )
+            ),
+            "query_image_count": result.get("query_image_count") or len(
+                item.get("query_images") or []
+            ),
             "video_path": source_video_path,
             "分享链接": source.get("分享链接", ""),
             "context": result.get("context") or item.get("context") or "",
@@ -1259,6 +1281,10 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
             if frames else ""
         )
         media_fields = {
+            "用户输入图片项目相对路径": "\n".join(
+                _project_relative_path(path)
+                for path in (item.get("query_images") or [])
+            ),
             "录屏项目相对路径": _project_relative_path(video_runtime_path),
             "抽帧目录项目相对路径": frame_dir,
         }
@@ -1537,14 +1563,22 @@ def operation_comparison_batch(snapshot: dict) -> dict:
     rows = []
     for position, item in enumerate(items):
         source = _source_data_for_item(item)
+        match_index = (
+            source.get("index")
+            if "index" in source else item.get("index", "")
+        )
         export_row = dict(export_rows[position]) if position < len(export_rows) else {}
+        export_row["index"] = match_index
         export_row["case_id"] = item.get("case_id") or source.get("case_id") or ""
+        for key in ("video_url_domain", "video_url_ip"):
+            export_row[key] = source.get(key) or item.get(key) or ""
         for video_url_key in ("录屏URL", "录屏url", "video_url", "视频链接"):
             if source.get(video_url_key):
                 export_row["录屏URL"] = source[video_url_key]
                 break
         rows.append({
             "position": position,
+            "index": match_index,
             "item_id": item.get("id") or f"q{position}",
             "case_id": item.get("case_id") or source.get("case_id") or "",
             "query": item.get("query") or item.get("question") or "",
@@ -2100,12 +2134,15 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             correctness.get("others", 0),
             _display_percent(statistics.get("ok_rate")),
         ])
-    pair_header_row = len(overview) + 2
-    overview.extend([
-        [],
-        ["相对对照组的共同 Case 对比"],
-        ["对比关系", "共同 Case", "共同有效 Case", "对照组OK数", "对照组OK率", "实验组OK数", "实验组OK率", "OK率差值", "其他→OK", "OK→其他", "OK净变化"],
-    ])
+    group_header_row = 6
+    group_data_start = group_header_row + 1
+    group_data_end = len(overview)
+    overview.append([])
+    pair_section_row = len(overview) + 1
+    overview.append(["相对对照组的共同 Case 对比"])
+    pair_header_row = len(overview) + 1
+    overview.append(["对比关系", "共同 Case", "共同有效 Case", "对照组OK数", "对照组OK率", "实验组OK数", "实验组OK率", "其他→OK", "OK→其他", "OK净变化", "OK率差值", "结论"])
+    pair_data_start = pair_header_row + 1
     for pair in payload.get("pairwise") or []:
         overview.append([
             f"{pair.get('baseline_label') or '对照组'} / {pair.get('target_label') or '实验组'}",
@@ -2115,15 +2152,19 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             _display_percent(pair.get("baseline_ok_rate")),
             pair.get("target_ok_count", 0),
             _display_percent(pair.get("target_ok_rate")),
-            _display_signed_percent(pair.get("ok_rate_delta")),
             pair.get("to_ok_count", 0),
             pair.get("from_ok_count", 0),
             pair.get("net_ok_change", 0),
+            _display_signed_percent(pair.get("ok_rate_delta")),
+            pair.get("ok_rate_change_label") or "无有效数据",
         ])
-    overview.extend([[], ["统计结论"]])
-    overview.extend([
-        [line] for line in str(payload.get("conclusion") or "").splitlines()
-    ])
+    pair_data_end = len(overview)
+    overview.append([])
+    conclusion_header_row = len(overview) + 1
+    overview.append(["统计结论"])
+    conclusion_lines = str(payload.get("conclusion") or "").splitlines()
+    conclusion_start = len(overview) + 1
+    overview.extend([[line] for line in conclusion_lines])
 
     issue_rows = []
     for pair in payload.get("pairwise") or []:
@@ -2134,15 +2175,19 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
                 "共同有效Case": pair.get("valid_pair_count", 0),
                 "Issue Type": row.get("issue_type") or "",
                 "对照组频次": row.get("baseline_count", 0),
-                "对照组占比": _display_percent(row.get("baseline_rate")),
+                "对照组占比": row.get("baseline_rate"),
                 "实验组频次": row.get("target_count", 0),
-                "实验组占比": _display_percent(row.get("target_rate")),
+                "实验组占比": row.get("target_rate"),
                 "频次差值": row.get("count_delta", 0),
-                "占比差值": _display_signed_percent(row.get("rate_delta")),
+                "占比差值": (
+                    float(row["rate_delta"]) * 100
+                    if row.get("rate_delta") is not None else None
+                ),
             })
 
     detail_fields = (
         "item_id",
+        "index",
         "序号",
         "case_id",
         "query",
@@ -2178,16 +2223,190 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
                 output[f"{label}_{field}"] = value
         union_rows.append(output)
 
+    overview_cell_styles: dict[tuple[int, int], int] = {
+        (2, 1): 8,
+        (2, 2): 9,
+        (3, 1): 8,
+        (3, 2): 3,
+        (4, 1): 8,
+        (4, 2): 3,
+    }
+    for row_index in range(group_data_start, group_data_end + 1):
+        for column_index in range(1, 11):
+            overview_cell_styles[(row_index, column_index)] = 3
+    for row_index in range(pair_data_start, pair_data_end + 1):
+        for column_index in range(1, 13):
+            overview_cell_styles[(row_index, column_index)] = 3
+    valid_group_rates = [
+        (group.get("statistics") or {}).get("ok_rate")
+        for group in groups
+        if (group.get("statistics") or {}).get("ok_rate") is not None
+    ]
+    if valid_group_rates:
+        best_rate = max(valid_group_rates)
+        for offset, group in enumerate(groups):
+            rate = (group.get("statistics") or {}).get("ok_rate")
+            if rate is not None and abs(float(rate) - float(best_rate)) < 1e-12:
+                overview_cell_styles[(group_data_start + offset, 10)] = 4
+    for offset, pair in enumerate(payload.get("pairwise") or []):
+        row_index = pair_data_start + offset
+        change = pair.get("ok_rate_change")
+        change_style = 4 if change == "improved" else 5 if change == "worsened" else 6
+        overview_cell_styles[(row_index, 11)] = change_style
+        overview_cell_styles[(row_index, 12)] = change_style
+        net_change = int(pair.get("net_ok_change") or 0)
+        overview_cell_styles[(row_index, 10)] = (
+            4 if net_change > 0 else 5 if net_change < 0 else 6
+        )
+    overview_merges = [
+        "A1:L1",
+        "B2:L2",
+        f"A{pair_section_row}:L{pair_section_row}",
+        f"A{conclusion_header_row}:L{conclusion_header_row}",
+    ]
+    for row_index in range(conclusion_start, conclusion_start + len(conclusion_lines)):
+        overview_cell_styles[(row_index, 1)] = 9
+        overview_merges.append(f"A{row_index}:L{row_index}")
+
     sheets: list[tuple[str, str]] = [
         ("对比概览", _matrix_sheet_xml(
             overview,
-            bold_rows={1, 6, pair_header_row, pair_header_row + 1, len(overview) - len(str(payload.get("conclusion") or "").splitlines())},
-            widths=[22, 46, 22, 14, 16, 12, 12, 14, 12, 14, 14],
+            widths=[22, 46, 22, 14, 16, 12, 12, 12, 14, 14, 14, 12],
+            row_styles={
+                1: 7,
+                group_header_row: 2,
+                pair_section_row: 8,
+                pair_header_row: 2,
+                conclusion_header_row: 8,
+            },
+            cell_styles=overview_cell_styles,
+            merge_refs=overview_merges,
+            row_heights={1: 28, 2: 34, group_header_row: 26, pair_header_row: 30},
+            freeze_rows=group_header_row,
+            hide_gridlines=True,
         )),
-        ("Issue Type对比", _sheet_xml(issue_rows, auto_filter=True)),
-        ("逐题横向对比", _sheet_xml(union_rows)),
+        ("Issue Type对比", _operation_comparison_issue_sheet(issue_rows)),
+        ("逐题横向对比", _operation_comparison_detail_sheet(
+            groups,
+            union_rows,
+            detail_fields,
+        )),
     ]
     return _build_xlsx_xml_sheets(sheets)
+
+
+def _operation_comparison_issue_sheet(rows: list[dict[str, Any]]) -> str:
+    """生成带边框、冻结表头和优化/劣化配色的 Issue Type 表。"""
+    headers = [
+        "对比关系",
+        "实验组",
+        "共同有效Case",
+        "Issue Type",
+        "对照组频次",
+        "对照组占比",
+        "实验组频次",
+        "实验组占比",
+        "频次差值",
+        "占比差值",
+    ]
+    table = [headers] + [[row.get(header) for header in headers] for row in rows]
+    cell_styles: dict[tuple[int, int], int] = {}
+    for row_index, row in enumerate(rows, start=2):
+        for column_index in range(1, len(headers) + 1):
+            cell_styles[(row_index, column_index)] = 3
+        for column_index in (6, 8):
+            cell_styles[(row_index, column_index)] = 10
+        count_delta = float(row.get("频次差值") or 0)
+        rate_delta = float(row.get("占比差值") or 0)
+        cell_styles[(row_index, 9)] = 4 if count_delta < 0 else 5 if count_delta > 0 else 6
+        cell_styles[(row_index, 10)] = 11 if rate_delta < 0 else 12 if rate_delta > 0 else 13
+    return _matrix_sheet_xml(
+        table,
+        widths=[22, 14, 16, 36, 14, 14, 14, 14, 20, 20],
+        row_styles={1: 2},
+        cell_styles=cell_styles,
+        row_heights={1: 32},
+        auto_filter_ref=(f"A1:J{len(table)}" if headers else None),
+        freeze_rows=1,
+        freeze_columns=4,
+        hide_gridlines=True,
+    )
+
+
+def _operation_comparison_detail_sheet(
+    groups: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    detail_fields: tuple[str, ...],
+) -> str:
+    """生成按数据集合并分组的双层表头逐题对比表。"""
+    common_headers = ["匹配键", "存在组数", "所有组共有"]
+    group_header = ["公共字段", "", ""]
+    field_header = list(common_headers)
+    widths = [28, 12, 14]
+    field_widths = {
+        "item_id": 20,
+        "index": 16,
+        "序号": 14,
+        "case_id": 18,
+        "query": 36,
+        "sessionid": 20,
+        "answer": 36,
+        "context": 28,
+        "is_low_level": 14,
+        "correctness": 14,
+        "issue_types": 24,
+        "execution_routes": 28,
+        "链路类型": 18,
+        "rationale": 44,
+        "分享链接": 24,
+        "video_path": 34,
+        "录屏URL": 24,
+        "error": 36,
+    }
+    merge_refs = ["A1:C1"]
+    column_index = len(common_headers) + 1
+    for group in groups:
+        label = group.get("group_label") or "结果组"
+        dataset_name = _comparison_dataset_display_name(
+            group.get("group_name") or group.get("task_id") or "未命名数据集"
+        )
+        group_header.extend([f"{label}：{dataset_name}"] + [""] * (len(detail_fields) - 1))
+        field_header.extend(detail_fields)
+        widths.extend(field_widths.get(field, 18) for field in detail_fields)
+        end_column = column_index + len(detail_fields) - 1
+        merge_refs.append(f"{_col(column_index)}1:{_col(end_column)}1")
+        column_index = end_column + 1
+
+    table = [group_header, field_header]
+    for row in rows:
+        values = [row.get(header, "") for header in common_headers]
+        for group in groups:
+            label = group.get("group_label") or ""
+            values.extend(row.get(f"{label}_{field}", "") for field in detail_fields)
+        table.append(values)
+
+    last_column = _col(len(field_header))
+    return _matrix_sheet_xml(
+        table,
+        widths=widths,
+        row_styles={1: 8, 2: 15},
+        default_style=14,
+        merge_refs=merge_refs,
+        row_heights={1: 28, 2: 28},
+        auto_filter_ref=f"A2:{last_column}{len(table)}",
+        freeze_rows=2,
+        freeze_columns=3,
+        hide_gridlines=True,
+    )
+
+
+def _comparison_dataset_display_name(value: Any) -> str:
+    """移除数据文件后缀，同时保留名称中的版本号等点号。"""
+    name = str(value or "").strip()
+    suffix = Path(name).suffix.lower()
+    if suffix in {".jsonl", ".json", ".csv", ".xlsx", ".xls"}:
+        return name[:-len(suffix)]
+    return name
 
 
 def _display_signed_percent(value: Any) -> str:
@@ -2300,28 +2519,83 @@ def _styles_xml() -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
-        '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
-        '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
-        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        '<numFmts count="2">'
+        '<numFmt numFmtId="164" formatCode="0.00%"/>'
+        '<numFmt numFmtId="165" formatCode="+0.00&quot;pp&quot;;-0.00&quot;pp&quot;;0.00&quot;pp&quot;"/>'
+        '</numFmts>'
+        '<fonts count="7">'
+        '<font><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><color rgb="FFFFFFFF"/><sz val="16"/><name val="Calibri"/></font>'
+        '<font><b/><color rgb="FF166534"/><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><color rgb="FF991B1B"/><sz val="11"/><name val="Calibri"/></font>'
+        '<font><color rgb="FF64748B"/><sz val="11"/><name val="Calibri"/></font>'
+        '</fonts>'
+        '<fills count="10">'
+        '<fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FF2563EB"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFDBEAFE"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFFFFFFF"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFDCFCE7"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFFEE2E2"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFF1F5F9"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FF1E3A8A"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFEFF6FF"/><bgColor indexed="64"/></patternFill></fill>'
+        '</fills>'
+        '<borders count="2">'
+        '<border><left/><right/><top/><bottom/><diagonal/></border>'
+        '<border><left style="thin"><color rgb="FFCBD5E1"/></left><right style="thin"><color rgb="FFCBD5E1"/></right><top style="thin"><color rgb="FFCBD5E1"/></top><bottom style="thin"><color rgb="FFCBD5E1"/></bottom><diagonal/></border>'
+        '</borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
-        '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+        '<cellXfs count="16">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/>'
+        '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'
+        '<xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>'
+        '<xf numFmtId="0" fontId="4" fillId="5" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+        '<xf numFmtId="0" fontId="5" fillId="6" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+        '<xf numFmtId="0" fontId="6" fillId="7" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+        '<xf numFmtId="0" fontId="3" fillId="8" borderId="1" xfId="0" applyAlignment="1"><alignment vertical="center"/></xf>'
+        '<xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyAlignment="1"><alignment vertical="center"/></xf>'
+        '<xf numFmtId="0" fontId="0" fillId="9" borderId="1" xfId="0" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf>'
+        '<xf numFmtId="164" fontId="0" fillId="4" borderId="1" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+        '<xf numFmtId="165" fontId="4" fillId="5" borderId="1" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+        '<xf numFmtId="165" fontId="5" fillId="6" borderId="1" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+        '<xf numFmtId="165" fontId="6" fillId="7" borderId="1" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+        '<xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="0"/></xf>'
+        '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="0"/></xf>'
+        '</cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
         '</styleSheet>'
     )
 
 
-def _sheet_xml(rows: list[dict], *, auto_filter: bool = False) -> str:
+def _sheet_xml(
+    rows: list[dict],
+    *,
+    auto_filter: bool = False,
+    bordered: bool = False,
+    freeze_rows: int = 0,
+    freeze_columns: int = 0,
+    hide_gridlines: bool = False,
+) -> str:
     headers = _headers(rows)
     table = [headers] + [[row.get(h) for h in headers] for row in rows]
     return _matrix_sheet_xml(
         table,
-        bold_rows={1},
+        bold_rows={1} if not bordered else set(),
+        row_styles={1: 2} if bordered else None,
+        default_style=3 if bordered else 0,
         widths=[_width(header) for header in headers],
         auto_filter_ref=(
             f"A1:{_col(len(headers))}{len(table)}"
             if auto_filter and headers else None
         ),
+        freeze_rows=freeze_rows,
+        freeze_columns=freeze_columns,
+        hide_gridlines=hide_gridlines,
     )
 
 
@@ -2331,15 +2605,30 @@ def _matrix_sheet_xml(
     bold_rows: set[int] | None = None,
     widths: list[int] | None = None,
     auto_filter_ref: str | None = None,
+    default_style: int = 0,
+    row_styles: dict[int, int] | None = None,
+    cell_styles: dict[tuple[int, int], int] | None = None,
+    merge_refs: list[str] | None = None,
+    row_heights: dict[int, float] | None = None,
+    freeze_rows: int = 0,
+    freeze_columns: int = 0,
+    hide_gridlines: bool = False,
 ) -> str:
     """生成支持标题、空行及多段表头的简单工作表。"""
     bold_rows = bold_rows or set()
+    row_styles = row_styles or {}
+    cell_styles = cell_styles or {}
+    row_heights = row_heights or {}
     rows_xml = []
     for r_idx, row in enumerate(table, start=1):
         cells = []
         for c_idx, value in enumerate(row, start=1):
             ref = f"{_col(c_idx)}{r_idx}"
-            style = ' s="1"' if r_idx in bold_rows else ""
+            style_id = cell_styles.get(
+                (r_idx, c_idx),
+                row_styles.get(r_idx, 1 if r_idx in bold_rows else default_style),
+            )
+            style = f' s="{style_id}"' if style_id else ""
             if (
                 isinstance(value, (int, float))
                 and not isinstance(value, bool)
@@ -2348,7 +2637,9 @@ def _matrix_sheet_xml(
                 cells.append(f'<c r="{ref}"{style}><v>{value}</v></c>')
             else:
                 cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t>{escape(_cell(value))}</t></is></c>')
-        rows_xml.append(f'<row r="{r_idx}">{"".join(cells)}</row>')
+        height = row_heights.get(r_idx)
+        height_attr = f' ht="{height}" customHeight="1"' if height else ""
+        rows_xml.append(f'<row r="{r_idx}"{height_attr}>{"".join(cells)}</row>')
     max_columns = max((len(row) for row in table), default=0)
     resolved_widths = list(widths or [])
     if len(resolved_widths) < max_columns:
@@ -2361,11 +2652,39 @@ def _matrix_sheet_xml(
         f'<autoFilter ref="{escape(auto_filter_ref)}"/>'
         if auto_filter_ref else ""
     )
+    merge_cells = ""
+    if merge_refs:
+        merge_cells = (
+            f'<mergeCells count="{len(merge_refs)}">'
+            + "".join(f'<mergeCell ref="{escape(ref)}"/>' for ref in merge_refs)
+            + "</mergeCells>"
+        )
+    show_gridlines = ' showGridLines="0"' if hide_gridlines else ""
+    pane = ""
+    if freeze_rows or freeze_columns:
+        top_left = f"{_col(freeze_columns + 1)}{freeze_rows + 1}"
+        active_pane = (
+            "bottomRight" if freeze_rows and freeze_columns
+            else "bottomLeft" if freeze_rows else "topRight"
+        )
+        splits = ""
+        if freeze_columns:
+            splits += f' xSplit="{freeze_columns}"'
+        if freeze_rows:
+            splits += f' ySplit="{freeze_rows}"'
+        pane = (
+            f'<pane{splits} topLeftCell="{top_left}" '
+            f'activePane="{active_pane}" state="frozen"/>'
+        )
+    sheet_views = (
+        f'<sheetViews><sheetView workbookViewId="0"{show_gridlines}>'
+        f'{pane}</sheetView></sheetViews>'
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        f"<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>"
-        f"{auto_filter}"
+        f"{sheet_views}<cols>{cols}</cols><sheetData>{''.join(rows_xml)}</sheetData>"
+        f"{auto_filter}{merge_cells}"
         "</worksheet>"
     )
 

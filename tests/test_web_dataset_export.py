@@ -42,6 +42,7 @@ def _snapshot(project: Path) -> dict:
                 "source_line": 3,
                 "source_data": {
                     "id": "op_1",
+                    "index": "source_001",
                     "序号": "simple_001",
                     "session_id": "session-001",
                     "query": "打开设置",
@@ -146,15 +147,17 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     results = sheets["逐题结果"]
     assert [row["item_id"] for row in results] == ["op_1", "op_2", "op_3"]
     assert list(results[0]) == list(history._OPERATION_EXPORT_COLUMNS)
-    assert list(results[0])[:7] == [
+    assert list(results[0])[:8] == [
         "数据集序号",
         "item_id",
+        "index",
         "序号",
         "sessionid",
         "query",
         "video_path",
         "分享链接",
     ]
+    assert results[0]["index"] == "source_001"
     assert results[0]["序号"] == "simple_001"
     assert results[0]["sessionid"] == "session-001"
     assert results[0]["video_path"] == "data/videos/one.mp4"
@@ -170,7 +173,6 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     assert results[0]["route_rationale"] == "先快系统后 skill。"
     assert results[0]["理由_操作完成度"] == "已打开设置"
     assert results[0]["理由_步骤正确性"] == "路径正确"
-    assert "index" not in results[0]
     assert "has_video" not in results[0]
     assert "tool_trace" not in results[0]
     assert results[1]["评估状态"] == "评估失败"

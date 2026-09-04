@@ -22,6 +22,7 @@ def test_import_comparison_jsonl_reads_nested_evaluation() -> None:
     content = "\n".join([
         json.dumps({
             "id": "case_1",
+            "index": "simple_001",
             "case_id": "c1",
             "query": "打开蓝牙",
             "context": "测试环境",
@@ -33,6 +34,7 @@ def test_import_comparison_jsonl_reads_nested_evaluation() -> None:
         }, ensure_ascii=False),
         json.dumps({
             "id": "case_2",
+            "index": "simple_002",
             "case_id": "c2",
             "query": "关闭定位",
             "evaluation": {
@@ -48,6 +50,8 @@ def test_import_comparison_jsonl_reads_nested_evaluation() -> None:
     assert source["summary"]["valid_count"] == 2
     assert source["task_id"] == source["source_id"]
     assert source["group_name"] == "结果.jsonl"
+    assert source["mapping"]["index"] == "index"
+    assert source["rows"][0]["index"] == "simple_001"
     assert source["mapping"]["correctness"] == "evaluation.correctness"
     assert source["rows"][1]["result"]["issue_types"] == ["应执行目标未执行"]
     assert source["rows"][0]["export"]["context"] == "测试环境"
@@ -63,6 +67,7 @@ def test_import_comparison_excel_prefers_result_sheet() -> None:
         )
         pd.DataFrame([{
             "item_id": "i1",
+            "index": "simple_001",
             "case_id": "c1",
             "query": "打开蓝牙",
             "correctness": "ok",
@@ -78,9 +83,9 @@ def test_import_comparison_excel_prefers_result_sheet() -> None:
 
 def test_import_comparison_csv_maps_chinese_columns_and_warnings() -> None:
     content = (
-        "case_id,操作意图,完成判定,问题类型\n"
-        "c1,打开蓝牙,OK,路径冗余；重复操作\n"
-        "c2,关闭定位,unknown,\n"
+        "index,case_id,操作意图,完成判定,问题类型\n"
+        "simple_001,c1,打开蓝牙,OK,路径冗余；重复操作\n"
+        "simple_002,c2,关闭定位,unknown,\n"
     ).encode("utf-8-sig")
 
     with TestClient(server.app) as client:
@@ -112,7 +117,12 @@ def _history_snapshot() -> dict:
         "mode": "operation",
         "status": "done",
         "options": {},
-        "items": [{"id": "i1", "case_id": "c1", "query": "打开蓝牙"}],
+        "items": [{
+            "id": "i1",
+            "case_id": "c1",
+            "query": "打开蓝牙",
+            "source_data": {"index": "simple_001"},
+        }],
         "results": [{"index": 0, "correctness": "nok", "issue_types": ["应执行目标未执行"]}],
         "summary": {},
     }
@@ -123,6 +133,7 @@ def test_comparison_analysis_mixes_history_and_upload(monkeypatch) -> None:
         "实验.jsonl",
         json.dumps({
             "id": "i1",
+            "index": "simple_001",
             "case_id": "c1",
             "query": "打开蓝牙",
             "evaluation": {"correctness": "ok", "issue_types": []},
@@ -161,6 +172,7 @@ def test_comparison_export_mixes_history_and_upload(monkeypatch) -> None:
         "实验.jsonl",
         json.dumps({
             "id": "i1",
+            "index": "simple_001",
             "case_id": "c1",
             "query": "打开蓝牙",
             "sessionid": "session-a",
@@ -191,8 +203,11 @@ def test_comparison_export_mixes_history_and_upload(monkeypatch) -> None:
 
     assert workbook.sheetnames == ["对比概览", "Issue Type对比", "逐题横向对比"]
     detail = workbook["逐题横向对比"]
-    headers = [cell.value for cell in next(detail.iter_rows())]
-    assert "实验组A_sessionid" in headers
+    header_rows = detail.iter_rows()
+    group_headers = [cell.value for cell in next(header_rows)]
+    field_headers = [cell.value for cell in next(header_rows)]
+    assert "实验组A：实验" in group_headers
+    assert field_headers.count("sessionid") == 2
 
 
 def test_comparison_module_ui_is_parallel_workspace() -> None:
@@ -205,4 +220,4 @@ def test_comparison_module_ui_is_parallel_workspace() -> None:
     assert "加入对比分析" in html
     assert 'fetch("/api/operation/comparison/import"' in js
     assert 'fetch("/api/operation/comparison/analyze"' in js
-    assert 'fetch("/api/operation/comparison/export"' in js
+    assert "/api/operation/comparison/export?format=" in js

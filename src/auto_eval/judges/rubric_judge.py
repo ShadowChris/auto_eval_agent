@@ -355,13 +355,16 @@ class RubricJudge:
         skill_dims, skill_rules, _ = (self.skill_router.match(item) if self.skill_router else (None, "", []))
         is_product_compare = (self.client.cfg.persona == "product_expert") and bool(competitor)
         user_images: list[str] | None = None  # 任务类评测：关键帧 data_url 列表，其余模式为 None
-        user_image_refs: list[str] | None = None  # 关键帧本地路径（仅写入 trace 供回溯，不展示前端）
+        user_image_refs: list[str] | None = None  # 图片本地路径（仅写入 trace 供回溯，不展示前端）
+        user_image_roles: list[str] | None = None
+        user_content_parts: list[dict] | None = None
         if eval_mode == "operation":
             op_skill = self.skill_router.domain.get("operation") if self.skill_router else None
             dims = (op_skill.rubrics if op_skill and op_skill.rubrics else None) or self.dims
             policy = op_skill.operation_policy if op_skill else None
             if policy is None:
                 raise ValueError("任务类评测缺少 config/skills/operation.yaml 的 operation_policy")
+            query_images = list(item.query_images or [])
             system = OPERATION_SYSTEM.render(
                 persona=self.client.persona,
                 dims=dims,
@@ -369,15 +372,40 @@ class RubricJudge:
                 policy=policy,
                 expert_knowledge_text=render_expert_knowledge(self.expert_knowledge),
                 multi_group=False,
+                has_query_images=bool(query_images),
             )
             user = OPERATION_USER.render(
                 question=item.question,
                 context=prompt_context,
                 agent_claim=(answer or "").strip(),
+                query_image_count=len(query_images),
             )
             frames = item.metadata.get("frames") or []
-            user_images = [encode_frame(Path(p)) for p in frames] if frames else None
-            user_image_refs = frames if frames else None
+            if query_images:
+                user_content_parts = [{"type": "text", "text": user}]
+                user_image_refs = []
+                user_image_roles = []
+                for index, path in enumerate(query_images, start=1):
+                    user_content_parts.extend([
+                        {"type": "text", "text": f"原始用户输入图片 {index}"},
+                        {"type": "image_url", "image_url": {"url": encode_frame(Path(path))}},
+                    ])
+                    user_image_refs.append(str(path))
+                    user_image_roles.append("query_image")
+                user_content_parts.append({
+                    "type": "text",
+                    "text": "以下为按时间顺序排列的录屏关键帧；帧序号从 1 开始。",
+                })
+                for index, path in enumerate(frames, start=1):
+                    user_content_parts.extend([
+                        {"type": "text", "text": f"录屏关键帧 {index}"},
+                        {"type": "image_url", "image_url": {"url": encode_frame(Path(path))}},
+                    ])
+                    user_image_refs.append(str(path))
+                    user_image_roles.append("recording_frame")
+            else:
+                user_images = [encode_frame(Path(p)) for p in frames] if frames else None
+                user_image_refs = frames if frames else None
         elif eval_mode == "process" and process_dims and item.trace:
             dims = process_dims  # 过程盲评维度不变（不受垂域 skill 影响）
             system = RUBRIC_PROCESS_SYSTEM.render(
@@ -404,16 +432,25 @@ class RubricJudge:
                 question=item.question, context=prompt_context, model_name=model_name, answer=answer
             )
         t0 = time.perf_counter()
-        if stream_callback is None and user_images is None and user_image_refs is None:
+        if (
+            stream_callback is None
+            and user_images is None
+            and user_image_refs is None
+            and user_content_parts is None
+        ):
             reply = await self.client.complete(system, user)
         else:
-            reply = await self.client.complete(
-                system,
-                user,
-                stream_callback=stream_callback,
-                user_images=user_images,
-                user_image_refs=user_image_refs,
-            )
+            kwargs = {
+                "stream_callback": stream_callback,
+                "user_images": user_images,
+                "user_image_refs": user_image_refs,
+            }
+            if user_content_parts is not None:
+                kwargs.update({
+                    "user_content_parts": user_content_parts,
+                    "user_image_roles": user_image_roles,
+                })
+            reply = await self.client.complete(system, user, **kwargs)
         latency = int((time.perf_counter() - t0) * 1000)
 
         analysis = parse_analysis(reply.content)
