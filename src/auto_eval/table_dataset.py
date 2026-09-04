@@ -59,6 +59,7 @@ INTERACTION_LOCATION_LABEL = "交互发生位置"
 VIDEO_PATH_COLUMN = "video_path"
 QUERY_IMAGES_COLUMN = "query_images"
 QUERY_IMAGE_PATH_COLUMN = "query_image_path"
+ATTACHMENT_PATH_COLUMN = "attachment_path"
 VIDEO_DIRECTORY_COLUMN = "文件路径"
 VIDEO_FILENAME_COLUMN = "原文件名"
 DEFAULT_VIDEO_PREFIX = "data/"
@@ -502,6 +503,7 @@ def convert_table(
     has_video_path_column = VIDEO_PATH_COLUMN in df.columns
     has_query_images_column = QUERY_IMAGES_COLUMN in df.columns
     has_query_image_path_column = QUERY_IMAGE_PATH_COLUMN in df.columns
+    has_attachment_path_column = ATTACHMENT_PATH_COLUMN in df.columns
     direct_standard_columns = tuple(
         column
         for column, present in (
@@ -560,12 +562,17 @@ def convert_table(
         )
         item.update({"query": query, "context": context})
 
-        raw_query_images = (
-            row.get(QUERY_IMAGES_COLUMN)
-            if has_query_images_column
-            else row.get(QUERY_IMAGE_PATH_COLUMN)
-            if has_query_image_path_column
-            else None
+        raw_query_images = _first_nonempty(
+            row,
+            tuple(
+                column
+                for column, present in (
+                    (QUERY_IMAGES_COLUMN, has_query_images_column),
+                    (QUERY_IMAGE_PATH_COLUMN, has_query_image_path_column),
+                    (ATTACHMENT_PATH_COLUMN, has_attachment_path_column),
+                )
+                if present
+            ),
         )
         try:
             query_images = _table_query_images(raw_query_images)

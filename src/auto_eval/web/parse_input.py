@@ -79,7 +79,7 @@ def _operation_times(obj: dict) -> dict[str, float]:
     times: dict[str, float] = {}
     for field in ("task_start_time", "task_end_time"):
         value = obj.get(field)
-        if value is None:
+        if value is None or (isinstance(value, str) and not value.strip()):
             continue
         if isinstance(value, bool) or not isinstance(value, Real):
             raise ValueError(f"{field} 必须是有限数字（单位：秒）")

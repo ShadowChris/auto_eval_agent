@@ -296,6 +296,50 @@ def test_table_import_maps_single_query_image_path(tmp_path: Path) -> None:
     assert result.rows[0]["query_image_path"] == "data/images/address.png"
 
 
+def test_table_import_maps_attachment_path_and_preserves_source_column(tmp_path: Path) -> None:
+    pd = pytest.importorskip("pandas")
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([{
+        "序号": "simple_002",
+        "query": "识别附件里的地址",
+        "attachment_path": "data/images/attachment.png",
+        "video_path": "data/videos/simple_002.mp4",
+    }]).to_csv(source, index=False, encoding="utf-8-sig")
+
+    result = convert_table(source, input_prefix="附件任务", project_root=tmp_path)
+
+    assert result.rows[0]["query_images"] == ["data/images/attachment.png"]
+    assert result.rows[0]["attachment_path"] == "data/images/attachment.png"
+
+
+def test_table_image_columns_use_first_nonempty_value_per_row(tmp_path: Path) -> None:
+    pd = pytest.importorskip("pandas")
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([
+        {
+            "序号": "simple_003",
+            "query": "显式图片优先",
+            "query_images": '["data/images/explicit.png"]',
+            "query_image_path": "data/images/single.png",
+            "attachment_path": "data/images/attachment.png",
+            "video_path": "data/videos/simple_003.mp4",
+        },
+        {
+            "序号": "simple_004",
+            "query": "空列向后回退",
+            "query_images": "",
+            "query_image_path": "",
+            "attachment_path": "data/images/fallback.png",
+            "video_path": "data/videos/simple_004.mp4",
+        },
+    ]).to_csv(source, index=False, encoding="utf-8-sig")
+
+    result = convert_table(source, input_prefix="图片优先级", project_root=tmp_path)
+
+    assert result.rows[0]["query_images"] == ["data/images/explicit.png"]
+    assert result.rows[1]["query_images"] == ["data/images/fallback.png"]
+
+
 def test_operation_exports_preserve_query_image_paths() -> None:
     snapshot = {
         "task_id": "image-task",

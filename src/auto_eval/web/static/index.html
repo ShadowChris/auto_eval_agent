@@ -197,6 +197,7 @@
         </div>
         <p v-if="mode==='operation'" class="hint">支持 JSONL、CSV、XLSX。表格必需列：<strong>query</strong>，以及 <strong>index / 序号</strong> 二选一。视频优先读取 <strong>video_path</strong>；没有该列时使用<strong>原文件名</strong>拼接，<strong>文件路径</strong>可选。Excel 优先读取“合并数据”工作表。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","content_start_time":0,"content_end_time":18.5}</p>
+        <p v-if="mode==='operation'" class="hint op-optional-fields-help">可选字段：id（题号）、context（背景）、query_images / query_image_path / attachment_path（用户图片）、agent_statement / answer（自述）、task_start_time / task_end_time（任务起止时间，单位秒）。图片字段按上述顺序取首个非空值；每题下方展示 attachment_path 和当前导入的起止时间，视频及图片在开始评估时校验。</p>
         <div v-if="datasetImportSummary" class="summary dataset-import-summary">
           <span>格式 {{ datasetImportSummary.format }}</span>
           <span v-if="datasetImportSummary.sheet != null">工作表 {{ datasetImportSummary.sheet }}</span>
@@ -249,6 +250,11 @@
         <div v-if="entry.item.videoPath" class="op-path">{{ entry.item.videoPath }}</div>
         <textarea v-if="mode==='operation'" v-model="entry.item.answer" rows="1" placeholder="(可选) agent 自述，如「我已设好7点闹钟」—— 用于交叉验证是否只说不做"></textarea>
         <textarea v-else v-model="entry.item.answer" rows="2" placeholder="(可选) answer_text，只辅助理解回答语义，不能证明画面中存在挂卡或蓝色链接"></textarea>
+        <div v-if="mode==='operation'" class="hint op-import-fields" aria-label="任务可选字段">
+          <span class="op-import-path">attachment_path：{{ formatAttachmentPath(entry.item) }}</span>
+          <span>task_start_time：{{ formatOptionalTaskTime(entry.item.taskStartTime, '开始') }}</span>
+          <span>task_end_time：{{ formatOptionalTaskTime(entry.item.taskEndTime, '结束') }}</span>
+        </div>
       </div>
       <div class="pagination" v-if="opPageCount>1">
         <span class="page-size page-size-fixed">每页 {{ opPageSize }} 条</span>
