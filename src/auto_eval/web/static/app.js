@@ -1,7 +1,50 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
+import { createApp, ref, computed, watch, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
 import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 
 createApp({
+  components: {
+    OperationReport: {
+      props: ["taskId", "revision", "report"],
+      setup(props) {
+        const host = ref(null), loading = ref(false), error = ref("");
+        let viewer = null, controller = null, disposed = false;
+        async function refresh() {
+          controller?.abort();
+          const current = new AbortController();
+          controller = current;
+          error.value = "";
+          viewer?.update(null);
+          if (!props.report && !props.taskId) { loading.value = false; return; }
+          loading.value = true;
+          const timeout = setTimeout(() => current.abort(), 30000);
+          try {
+            let data = props.report;
+            if (!data) {
+              const response = await fetch(`/api/eval/${encodeURIComponent(props.taskId)}/report`, { signal: current.signal });
+              data = await response.json();
+              if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+            }
+            if (disposed || current !== controller || current.signal.aborted) return;
+            if (!globalThis.AutoEvalOperationReport) throw new Error("报告资源未加载，请刷新页面");
+            if (!viewer) viewer = globalThis.AutoEvalOperationReport.mount(host.value, data);
+            else viewer.update(data);
+          } catch (e) {
+            if (!disposed && current === controller) {
+              error.value = current.signal.aborted ? "报告加载超时，请重试" : (e.message || "报告加载失败");
+            }
+          } finally {
+            clearTimeout(timeout);
+            if (current === controller) loading.value = false;
+          }
+        }
+        onMounted(refresh);
+        watch([() => props.taskId, () => props.revision, () => props.report], refresh, { flush: "post" });
+        onUnmounted(() => { disposed = true; controller?.abort(); viewer?.destroy(); viewer = null; });
+        return { host, loading, error, refresh };
+      },
+      template: '<div><p v-if="loading" class="hint">正在加载图表与 Case…</p><p v-if="error" class="run-error">{{ error }} <button @click="refresh">重试</button></p><div ref="host"></div></div>',
+    },
+  },
   setup() {
     const workspacePage = ref("evaluation");
     const taskModule = ref("operation");
@@ -2414,12 +2457,13 @@ createApp({
       }
     }
 
-    async function exportHistoryComparison() {
+    async function exportHistoryComparison(format = "xlsx") {
+      if (format !== "html") format = "xlsx";
       if (!historyComparison.value) return;
       historyComparisonLoading.value = true;
       historyComparisonError.value = "";
       try {
-        const response = await fetch("/api/operation/comparison/export", {
+        const response = await fetch(`/api/operation/comparison/export?format=${format}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(historyComparisonRequestBody()),
@@ -2433,7 +2477,7 @@ createApp({
         const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
         const filename = utf8Match
           ? decodeURIComponent(utf8Match[1])
-          : "operation_comparison.xlsx";
+          : `operation_comparison.${format}`;
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
@@ -2694,6 +2738,9 @@ createApp({
     }
     function exportXlsx() {
       window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
+    }
+    function exportHtml() {
+      window.open(`/api/eval/${encodeURIComponent(taskId.value)}/export?format=html`, "_blank", "noopener");
     }
     function exportFrames() {
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
@@ -3086,7 +3133,7 @@ createApp({
       removeComparisonSource, moveComparisonSource, clearComparisonSources,
       beginComparisonSourceNameEdit, saveComparisonSourceName,
       cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,
-      generateHistoryComparison, exportHistoryComparison,
+      generateHistoryComparison, exportHistoryComparison, exportHtml,
       comparisonCorrectnessCount, comparisonIsBestOkRate,
       comparisonPairChangeClass, comparisonPairChangeLabel, comparisonIssueRows,
       comparisonIssueDeltaClass, comparisonIssueDeltaStyle, comparisonIssueDeltaText,

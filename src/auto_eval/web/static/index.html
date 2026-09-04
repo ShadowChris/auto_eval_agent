@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
   <link rel="stylesheet" href="/static/style.css?v=__STATIC_ASSET_VERSION__">
+  <link rel="stylesheet" href="/report-assets/operation_report.css?v=__STATIC_ASSET_VERSION__">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -524,6 +525,7 @@
       <button @click="exportJson" :disabled="!taskId">导出任务快照 JSON</button>
       <button @click="exportJsonl" :disabled="!taskId">导出逐题 JSONL</button>
       <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
+      <button v-if="mode==='operation' && !isMultiGroupMode" @click="exportHtml" :disabled="!taskId">导出 HTML 报告</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId">导出抽帧 ZIP</button>
     </h2>
     <div class="summary" v-if="summary">
@@ -555,6 +557,9 @@
       open
     >
       <summary>📊 任务类统计分布</summary>
+      <operation-report :task-id="taskId" :revision="summary"></operation-report>
+      <details class="operation-statistics-legacy">
+      <summary>查看原始统计表</summary>
       <div class="operation-statistics-overview">
         <span>有效评估 {{ operationStatistics.valid_count }}/{{ operationStatistics.total_cases }}</span>
         <span>评估覆盖率 {{ operationStatistics.coverage_rate!=null ? (operationStatistics.coverage_rate*100).toFixed(2)+'%' : '—' }}</span>
@@ -597,11 +602,12 @@
             class="history-text-link operation-statistics-more"
             @click.prevent="issueStatsExpanded=!issueStatsExpanded"
           >{{ issueStatsExpanded ? '收起' : `展开全部（${operationStatistics.issue_type_rows.length} 类）` }}</a>
-          <p class="hint operation-statistics-detail-note">如需查看问题对应的具体 Case、判定和理由，请导出完整 XLSX，在“逐题结果”中查看。</p>
+          <p class="hint operation-statistics-detail-note">上方图表支持点击问题类型查看对应 Case；完整数据也可导出 XLSX 或 HTML。</p>
         </div>
       </div>
       <p class="operation-statistics-conclusion"><strong>结论：</strong>{{ operationStatistics.conclusion }}</p>
       <p class="hint operation-statistics-note">口径：OK 率、Correctness 和问题类型占比均以全部有效评估 Case 为分母。同一 Case 的同一问题类型只计一次，因此问题类型占比之和可能超过 100%。</p>
+      </details>
     </details>
     <details class="skill-breakdown" v-if="summary && summary.by_skill && summary.by_skill.overview && summary.by_skill.overview.length" open>
       <summary>📊 按垂域分析（{{ summary.by_skill.overview.length }} 个垂域 · 维度问题阈值 ≤ {{ summary.by_skill.threshold }}）</summary>
@@ -982,8 +988,14 @@
     <div v-if="historyComparison" class="history-comparison-result">
       <div class="history-comparison-heading">
         <h3>任务类对比分析结果</h3>
-        <button @click="exportHistoryComparison" :disabled="historyComparisonLoading">导出对比 XLSX</button>
+        <div class="row">
+          <button @click="exportHistoryComparison('xlsx')" :disabled="historyComparisonLoading">导出对比 XLSX</button>
+          <button @click="exportHistoryComparison('html')" :disabled="historyComparisonLoading">导出 HTML 报告</button>
+        </div>
       </div>
+      <operation-report v-if="historyComparison.report" :report="historyComparison.report"></operation-report>
+      <details class="operation-statistics-legacy" :open="!historyComparison.report">
+      <summary>完整对比表（含问题类型筛选、排序）</summary>
       <div class="summary">
         <span>批次数 {{ historyComparison.group_count }}</span>
         <span>全组共同 Case {{ historyComparison.all_groups_common_matched_count }}</span>
@@ -1041,6 +1053,7 @@
         <p>各组 Correctness 使用所有结果集共有且均有效的 Case；Issue Type 使用对应实验组与对照组的共同有效 Case。</p>
         <p v-for="pair in historyComparison.pairwise" :key="'comparison-conclusion-'+pair.target_task_id"><strong>{{ pair.target_label }}</strong> 相对 <strong>{{ pair.baseline_label }}</strong>：<strong class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ comparisonPairChangeLabel(pair) }}</strong>，共同有效 {{ pair.valid_pair_count }} 条，OK率相差 {{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}；其他→OK {{ pair.to_ok_count }} 条，OK→其他 {{ pair.from_ok_count }} 条，OK净变化 {{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }} 条。</p>
       </div>
+      </details>
     </div>
   </section>
 
@@ -1115,6 +1128,7 @@
 
 </div>
 
+  <script src="/report-assets/operation_report.js?v=__STATIC_ASSET_VERSION__"></script>
   <script type="module" src="/static/app.js?v=__STATIC_ASSET_VERSION__"></script>
 </body>
 </html>

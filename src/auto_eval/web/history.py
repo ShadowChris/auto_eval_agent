@@ -1570,6 +1570,8 @@ def operation_comparison_batch(snapshot: dict) -> dict:
         export_row = dict(export_rows[position]) if position < len(export_rows) else {}
         export_row["index"] = match_index
         export_row["case_id"] = item.get("case_id") or source.get("case_id") or ""
+        for key in ("video_url_domain", "video_url_ip"):
+            export_row[key] = source.get(key) or item.get(key) or ""
         for video_url_key in ("录屏URL", "录屏url", "video_url", "视频链接"):
             if source.get(video_url_key):
                 export_row["录屏URL"] = source[video_url_key]

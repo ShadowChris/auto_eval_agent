@@ -220,4 +220,4 @@ def test_comparison_module_ui_is_parallel_workspace() -> None:
     assert "加入对比分析" in html
     assert 'fetch("/api/operation/comparison/import"' in js
     assert 'fetch("/api/operation/comparison/analyze"' in js
-    assert 'fetch("/api/operation/comparison/export"' in js
+    assert "/api/operation/comparison/export?format=" in js

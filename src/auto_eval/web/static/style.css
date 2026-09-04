@@ -1,4 +1,7 @@
 * { box-sizing: border-box; }
+.operation-statistics-legacy { margin-top: 16px; }
+.operation-statistics > .operation-report,
+.operation-statistics > div { margin-top: 12px; }
 body {
   font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   margin: 0; padding: 24px; color: #1f2937; background: #f9fafb;

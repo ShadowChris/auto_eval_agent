@@ -32,10 +32,12 @@ from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
 from ..analysis.operation_comparison import compare_operation_batches
+from ..analysis.operation_report import build_comparison_report, build_single_report
 from ..config import ExpertKnowledgeBase, load_config
 from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
 from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
+from ..report.operation import OPERATION_REPORT_ASSETS, build_operation_report_html
 from ..table_dataset import convert_table
 from ..llm_stream import build_openai_client, stream_chat_completion
 from .parse_input import Mode, parse_jsonl, parse_text
@@ -96,6 +98,8 @@ def _static_asset_version() -> str:
     digest = hashlib.sha256()
     for name in ("app.js", "style.css"):
         digest.update((STATIC_DIR / name).read_bytes())
+    for name in ("operation_report.js", "operation_report.css"):
+        digest.update((OPERATION_REPORT_ASSETS / name).read_bytes())
     return digest.hexdigest()[:12]
 
 
@@ -1309,6 +1313,7 @@ def _operation_comparison_analysis_payload(
     request: OperationComparisonAnalyzeReq,
     *,
     include_union_rows: bool = False,
+    include_report: bool = False,
 ) -> dict:
     if not 2 <= len(request.sources) <= 5:
         raise HTTPException(422, "请选择 2～5 个任务类评估结果集")
@@ -1344,11 +1349,14 @@ def _operation_comparison_analysis_payload(
             batch["dataset_name"] = source.group_name.strip()
         batches.append(batch)
     try:
-        return compare_operation_batches(
+        payload = compare_operation_batches(
             batches,
             baseline_task_id=request.control_source_id,
             include_union_rows=include_union_rows,
         )
+        if include_report:
+            payload["report"] = build_comparison_report(batches, payload)
+        return payload
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -1356,27 +1364,37 @@ def _operation_comparison_analysis_payload(
 @app.post("/api/operation/comparison/analyze")
 def api_operation_comparison_analyze(request: OperationComparisonAnalyzeReq):
     """对历史任务和上传结果集进行混合对比分析。"""
-    return _operation_comparison_analysis_payload(request)
+    return _operation_comparison_analysis_payload(request, include_report=True)
 
 
 @app.post("/api/operation/comparison/export")
-def api_operation_comparison_export(request: OperationComparisonAnalyzeReq):
+def api_operation_comparison_export(
+    request: OperationComparisonAnalyzeReq,
+    format: Literal["xlsx", "html"] = "xlsx",
+):
     """导出独立任务类对比分析报告。"""
     payload = _operation_comparison_analysis_payload(
         request,
-        include_union_rows=True,
+        include_union_rows=format == "xlsx",
+        include_report=format == "html",
     )
-    content = build_operation_comparison_xlsx(payload)
+    content = (
+        build_operation_report_html(payload["report"])
+        if format == "html" else build_operation_comparison_xlsx(payload)
+    )
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     control_name = _download_stem(
         str(payload.get("baseline_name") or "operation"),
         "operation",
     )
-    utf8_name = f"{control_name}_comparison_{timestamp}.xlsx"
-    ascii_name = f"operation_comparison_{timestamp}.xlsx"
+    utf8_name = f"{control_name}_comparison_{timestamp}.{format}"
+    ascii_name = f"operation_comparison_{timestamp}.{format}"
     return Response(
         content,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        media_type=(
+            "text/html" if format == "html"
+            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
         headers={
             "Content-Disposition": (
                 f'attachment; filename="{ascii_name}"; '
@@ -1623,6 +1641,29 @@ def api_operation_statistics(task_id: str, download: bool = False):
     )
 
 
+def _single_operation_report(data: dict) -> dict:
+    try:
+        statistics = operation_statistics_payload(data)
+        return build_single_report(
+            operation_comparison_batch(data), statistics["statistics"],
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/eval/{task_id}/report")
+def api_operation_report(task_id: str):
+    """最新结果的紧凑报告数据；不缓存，重跑后重新计算。"""
+    task = get_live_task(task_id)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "task not found")
+    return JSONResponse(
+        _single_operation_report(data),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/api/eval/{task_id}/export")
 def api_export(task_id: str, format: str = "json"):
     task = get_live_task(task_id)
@@ -1632,6 +1673,21 @@ def api_export(task_id: str, format: str = "json"):
 
     if format == "json":
         return JSONResponse(snapshot_payload(data))
+
+    if format == "html":
+        content = build_operation_report_html(_single_operation_report(data))
+        ascii_name, utf8_name = _eval_download_names(data, task_id, "html")
+        return Response(
+            content,
+            media_type="text/html",
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+                ),
+            },
+        )
 
     if format == "jsonl":
         try:
@@ -1799,6 +1855,12 @@ def index():
         },
     )
 
+
+app.mount(
+    "/report-assets",
+    VersionedStaticFiles(directory=str(OPERATION_REPORT_ASSETS)),
+    name="report-assets",
+)
 
 app.mount(
     "/static",

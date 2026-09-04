@@ -43,6 +43,9 @@ auto-eval = "auto_eval.cli:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"auto_eval.report" = ["assets/*.css", "assets/*.js"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

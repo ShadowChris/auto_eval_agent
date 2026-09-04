@@ -287,6 +287,8 @@ def _standard_export(
         "分享链接": ("分享链接", "share_url", "share_link"),
         "video_path": ("video_path", "录屏项目相对路径"),
         "录屏URL": ("录屏URL", "录屏url", "video_url", "视频链接"),
+        "video_url_domain": ("video_url_domain",),
+        "video_url_ip": ("video_url_ip",),
     }
     export = {}
     for output_key, candidates in aliases.items():
@@ -297,6 +299,11 @@ def _standard_export(
         "execution_routes",
         "链路类型",
         "rationale",
+        "task_type",
+        "duration_s",
+        "latency_s",
+        "rubric",
+        "rubric_reasons",
     ):
         value, _ = _result_field(evaluation, record, (output_key,))
         export[output_key] = value
