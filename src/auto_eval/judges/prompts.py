@@ -106,7 +106,7 @@ RICH_CONTENT_SYSTEM = Template(
 【判定顺序（极其重要：先查问题，再下结论）】
 为让结论有据可依、避免先入为主，必须按以下顺序推进：
   第 1 步：按问题标签逐项核查，得出 answer_issues（你实际发现的所有问题）。这是后续判定的【输入】，必须最先完成。
-  第 2 步：综合 answer_issues 中查出的问题，判定 card_suitability / superlink_suitability / problem_solved。
+  第 2 步：综合 answer_issues 中查出的问题，判定 card_suitability / problem_solved。
   第 3 步：写 problem_solved_reason，呼应第 1 步发现的问题。
 
 【第 1 步：按问题标签逐项核查（写入 answer_issues）—— 必须最先完成】
@@ -115,7 +115,7 @@ RICH_CONTENT_SYSTEM = Template(
 - 与本题无关的标签判“无此问题”即可，不必写入 answer_issues。
 - 只把判定为“有此问题”的标签写入 answer_issues，每条一行，格式为“标签：具体描述（点出证据）”。例如：“文卡不一致：回答正文说‘点击下方卡片查看’但实际未出卡”。
 - 若逐项核查后确认没有任何问题，answer_issues 填空字符串 “”。
-- 核查结论同步落到对应字段：判定“卡片不相关”时 card_suitability 取 nok；判定“Superlink不相关”时 superlink_suitability 取 nok。
+- 核查结论同步落到对应字段：判定“卡片不相关”时 card_suitability 取 nok。
 - 特殊情况（“思考暴露”的判定方式）：多数问题需同时看抽帧图片和回答文本，但“思考暴露”只通过 answer_text 判断（如出现“我不确定”“我猜测”“我认为”，或输出了执行过程、使用了 skill/工具名等），不要通过抽帧图片判断；一旦命中，必须在 answer_issues 中记录“思考暴露”。
 - 特殊情况（“结果重复”的判定方式）：只要有多段相同文字的重复出现，或者相同卡片的重复出现，都算结果重复。
 - 特殊情况（多轮未闭环）：首先判断用户query和目前回答的已有信息之间的关系（注意回答信息包括图片、卡片信息）。
@@ -123,30 +123,40 @@ RICH_CONTENT_SYSTEM = Template(
     + 如果是用户意图不明确，或危险操作，回答核心信息正确但要求用户二次确认或澄清（如提示风险请用户确认），此时answer_issues写入“多轮对话造成需求未闭环：回答要求用户确认但用户未操作”。
 
 问题分类标签参考（按需逐项考虑，选最贴切的）：
-多轮对话造成需求未闭环 / 相关性 / 完整性 / 逻辑性 / 合规性 / 有用性 / 结构性 / 服务闭环 / 结果重复 / 思考暴露 / 未出卡 / 资源挂载缺失 / 计算错误 / 时延高 / 遵从性 / 文卡不一致 / 回答截断 / 无结果 / 本机机型不感知 / 多轮未接续 / 操作冗余 / 路径错误 / 提示无法操作 / 需求闭环 / 执行中卡住或中断 / 执行中循环出不来 / 没有总结信息或信息总结错误 / 未取到私域信息 / 中控规划 / 私域信息滥用 / skill技能实现问题 / 卡片不相关 / Superlink不相关
+多轮对话造成需求未闭环 / 相关性 / 完整性 / 逻辑性 / 合规性 / 有用性 / 结构性 / 服务闭环 / 结果重复 / 思考暴露 / 未出卡 / 资源挂载缺失 / 计算错误 / 时延高 / 遵从性 / 文卡不一致 / 回答截断 / 无结果 / 本机机型不感知 / 多轮未接续 / 操作冗余 / 路径错误 / 提示无法操作 / 需求闭环 / 执行中卡住或中断 / 执行中循环出不来 / 没有总结信息或信息总结错误 / 未取到私域信息 / 中控规划 / 私域信息滥用 / skill技能实现问题 / 卡片不相关
 
-【第 2 步：整体判定 —— card_suitability / superlink_suitability / problem_solved】
-先看第 1 步查出的问题再下结论，不得先定结果再找理由。本步给出三个结论：
+【第 2 步：整体判定 —— card_suitability / problem_solved】
+先看第 1 步查出的问题再下结论，不得先定结果再找理由。本步给出两个结论：
 
-卡片是否合适（card_suitability）：整体判断所有挂卡是否都与用户 query 相关（与“卡片不相关”标签的核查结论保持一致）。不要逐张评价，给出一个整体结论。
+## 卡片是否合适（card_suitability）：整体判断所有挂卡是否都与用户 query 相关（与“卡片不相关”标签的核查结论保持一致）。不要逐张评价，给出一个整体结论。
 - “ok”：所有出现的挂卡都与用户关心的内容相关（即使不是精确匹配，只要领域/主题对得上即可）。
 - “nok”：至少有一张挂卡与用户 query 明显无关（例如用户问天气但出了一张音乐卡片）。
 - 没有挂卡时填空字符串 “”。
 - 同时输出 card_suitability_reason：为 “nok” 时说明哪张卡片不合适及原因；为 “ok” 时填空字符串 “”。
 
-Superlink 是否合适（superlink_suitability）：整体判断所有 Superlink 是否合适（与“Superlink不相关”标签的核查结论保持一致）。Superlink 的判断标准比挂卡宽松——只要用户可能感兴趣，都算合适。
-- “ok”：所有 Superlink 用户都可能感兴趣。
-- “nok”：至少有一个 Superlink 明显与用户意图无关。
-- 没有 Superlink 时填空字符串 “”。
-- 同时输出 superlink_suitability_reason：为 “nok” 时说明哪个链接不合适及原因；为 “ok” 时填空字符串 “”。
+## 是否解决了用户问题（problem_solved）：仅允许选取以下3个枚举值：ok / nok / need_review
+### ok：回答已解决用户问题
+判定需同时满足：
+1. answer_issues无严重缺陷，仅可存在不影响核心结果的轻微瑕疵；
+2. 文本内容+可视化组件共同输出正确、完整的应答结果；
+3. 用户需求形成闭环即可判定为 ok。
 
-是否解决了用户问题（problem_solved）：只能取以下三值之一。
-- “ok”：回答解决了用户的问题。需同时满足：第 1 步未发现影响解决问题的严重问题（answer_issues 为空，或仅剩不影响核心功能的轻微瑕疵）；文字与视觉组件共同给出正确、完整的答案。只要完成用户需求闭环即判 ok；例如“思考暴露”问题，即便在暴露思考内容的情况下仍完成了用户需求，仍可判 ok（但 answer_issues 仍需记录“思考暴露”）。
-  · 多轮澄清例外：用户 query 本身不清晰、回答要求二次确认/澄清（如提示风险请确认），但核心信息和卡片本身正确——判 ok，并在 answer_issues 记录“多轮对话造成需求未闭环”。
-- “nok”：回答没有解决用户的问题。判定条件：第 1 步查出了实质性问题，如回答跑题、核心事实错误、挂卡与 query 完全不匹配、未给出有效信息、操作路径不可行、执行类 query 执行错误等。
-  · 注意：用户 query 意图已足够明确，回答却仍在询问、没有遵从意图执行，或要求二次确认/澄清才能完成核心意图，判 nok。
-  · 特别注意：出现“文卡不一致”（正文与挂卡信息矛盾）或“回答前后矛盾”时，**一律判 nok**——自相矛盾会使用户困惑，无法真正解决问题。
-- “need_review”：仅凭正文和截图无法确定是否满足需求，但回答中出现了与 query 高度相关的挂卡或 Superlink，需要点开卡片/链接查看详情才能判断。
+> 特例1：即便存在「思考暴露」类问题，只要最终完成用户需求闭环即可标记 ok，但该缺陷仍必须记录在 answer_issues 字段中。
+> 特例2（多轮澄清例外）：用户原始提问模糊，应答主动发起二次确认、补充风险提示；受客观限制无法继续执行，但已输出充足参考建议并征询用户意见，且核心应答信息、挂载卡片内容无误 → 标记 ok，同时在 answer_issues 标注「多轮对话造成需求未闭环」。
+
+### nok：回答未解决用户问题
+触发场景包含但不限于：应答跑题、核心事实错误、挂载卡片和用户问题完全不匹配、未输出任何有效信息、执行类指令执行出错。
+
+> 判定细则：用户意图清晰明确，但模型没有直接执行需求，反而发起额外询问、强制二次确认才可完成核心任务 → 判定 nok。
+> 示例：用户明确要求导航至指定地点，应答返回地点列表交由用户手动选择，列表内已存在完全匹配目标地点 → nok。
+> 强制规则：出现**文卡不一致（正文和挂载卡片信息冲突）、回答内容前后自相矛盾**时，统一判定为 nok；矛盾信息会造成用户困惑，无法达成问题解决。
+
+### need_review：信息不足，需进一步核验
+仅依靠回复正文、截图无法判断应答是否解决问题；但回复附带和用户查询强相关的卡片 / Super‑link，**必须点击卡片、打开链接查看详情**后，才可完成结果判定。
+
+> 示例1：用户要求创建周期性日历事件，卡片仅展示首个起始时间，无法查看后续周期配置；
+> 示例2：核验某段歌词是否对应指定歌名，卡片摘要信息不足以下定论；
+> 拿不准能否判定 ok / nok 的场景，优先选择 need_review。
 
 【第 3 步：评价原因（problem_solved_reason）】
 简明扼要地说明为何得出该 problem_solved。必须呼应第 1 步在 answer_issues 中查出的关键问题（或说明为何确认无问题），点出关键证据，不得与 answer_issues 矛盾。
@@ -162,11 +172,11 @@ Superlink 是否合适（superlink_suitability）：整体判断所有 Superlink
 3. Superlink 识别：逐行扫描回答正文，逐一列出所有蓝色/浅蓝色文字和标签（重点检查浅蓝底色的图标+文字胶囊小标签，禁止略过），再跨帧去重并记录可见文字。
 4. Part 1：纯客观视觉描述（撰写 visual_description 的思考过程）。
 5. 按问题标签逐项核查：对每一个【可能适用】的标签逐一判断“有此问题/无此问题”，并写下具体的画面或文字证据。这一步是后续判定的基础，必须逐项过一遍，不得只挑最显眼的问题、也不得凭整体印象跳过候选标签（此步的“有此问题”结论即 answer_issues 的来源）。
-6. 综合判定：基于第 5 步查出的问题，得出 card_suitability / superlink_suitability / problem_solved，再写 problem_solved_reason——结论必须呼应第 5 步发现（或说明为何确认无问题），不得与第 5 步矛盾。
+6. 综合判定：基于第 5 步查出的问题，得出 card_suitability / problem_solved，再写 problem_solved_reason——结论必须呼应第 5 步发现（或说明为何确认无问题），不得与第 5 步矛盾。
 7. 撰写本轮 turn_summary（≤120字）：客观压缩这一轮发生了什么——用户意图、助手给出的核心结果与关键实体（含挂卡/Superlink里的具体信息）、是否闭环；只做事实性压缩，不评价好坏。
 8. 不确定项和人工复核原因。
 </analysis>
-{"visual_description":"<Part 1：纯客观描述文本，不得包含评价性语言>","turn_summary":"<本轮≤120字总结：用户意图+核心结果/关键实体+是否闭环>","answer_coverage":"complete|partial|unclear","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","card_suitability":"<ok|nok|空>","card_suitability_reason":"<原因>","superlink_suitability":"<ok|nok|空>","superlink_suitability_reason":"<原因>","problem_solved":"<ok|nok|need_review>","problem_solved_reason":"<评价的原因>","answer_issues":"<问题标签：具体描述，无问题填空字符串>","rationale":"<一句话总结发现>"}
+{"visual_description":"<Part 1：纯客观描述文本，不得包含评价性语言>","turn_summary":"<本轮≤120字总结：用户意图+核心结果/关键实体+是否闭环>","answer_coverage":"complete|partial|unclear","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","card_suitability":"<ok|nok|空>","card_suitability_reason":"<原因>","problem_solved":"<ok|nok|need_review>","problem_solved_reason":"<评价的原因>","answer_issues":"<问题标签：具体描述，无问题填空字符串>","rationale":"<一句话总结发现>"}
 """
 )
 

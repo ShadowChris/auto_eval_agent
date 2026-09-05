@@ -64,8 +64,6 @@ class RichContentObservation(BaseModel):
     review_reason: str = ""
     card_suitability: str = ""  # Part 2：卡片是否合适（"ok"/"nok"/""）
     card_suitability_reason: str = ""  # Part 2：卡片是否合适的原因
-    superlink_suitability: str = ""  # Part 2：Superlink是否合适（"ok"/"nok"/""）
-    superlink_suitability_reason: str = ""  # Part 2：Superlink是否合适的原因
     problem_solved: str = ""  # Part 2：是否解决了用户问题（"ok"/"nok"/"need_review"）
     problem_solved_reason: str = ""  # Part 2：评价的原因
     answer_issues: str = ""  # Part 2：回答的内容有什么问题（分类标签：具体描述）

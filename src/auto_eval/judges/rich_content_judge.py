@@ -49,11 +49,6 @@ def rich_content_result_fields(
         card_suitability = ""
     card_suitability_reason = observation.card_suitability_reason or ""
 
-    superlink_suitability = (observation.superlink_suitability or "").strip()
-    if superlink_suitability not in ("ok", "nok"):
-        superlink_suitability = ""
-    superlink_suitability_reason = observation.superlink_suitability_reason or ""
-
     problem_solved_raw = (observation.problem_solved or "").strip()
     _PROBLEM_SOLVED_MAP = {
         "ok": "ok", "是": "ok", "yes": "ok",
@@ -90,8 +85,6 @@ def rich_content_result_fields(
         "review_reason": observation.review_reason,
         "card_suitability": card_suitability,
         "card_suitability_reason": card_suitability_reason,
-        "superlink_suitability": superlink_suitability,
-        "superlink_suitability_reason": superlink_suitability_reason,
         "problem_solved": problem_solved,
         "problem_solved_reason": problem_solved_reason,
         "answer_issues": answer_issues,

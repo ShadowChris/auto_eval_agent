@@ -238,12 +238,12 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
 
     仅支持 rich_content。**完全按 ``is_start``/``is_end``
     切 session**（不依赖上游 ``session_id`` 列）：每个 session 共享一段视频
-    （``video_path`` 取 ``is_end`` 行的「文件路径」），每行（每轮 query）产出一条
+    （``video_path`` 取 ``is_end`` 行的 video_path），每行（每轮 query）产出一条
     item，带上合成的 ``session_group``/``turn_index``，供 runner 组内串行评测、
     把前序轮次总结注入后续轮 context。
 
     必含列：``query``、``is_start``、``is_end``；时间列 ``开始时间``/``结束时间``
-    与 ``文件路径`` 可为空（按默认策略）。前序轮次的总结不在解析阶段生成，
+    与 ``video_path`` 可为空（按默认策略）。前序轮次的总结不在解析阶段生成，
     而是在评测时产生（见 runner.run_session）。
     """
     if mode != "rich_content":
@@ -268,7 +268,7 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
         return [], [
             "CSV 缺少必要列：" + "、".join(missing)
             + "（垂域视觉评测多轮 CSV 需含 index/query/is_start/is_end/"
-            "开始时间/结束时间/文件路径 等列）"
+            "开始时间/结束时间/video_path 等列）"
         ]
 
     # —— 按 is_start/is_end 切 session（与上游 session_id 列无关）——
@@ -293,15 +293,15 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     for session in sessions:
         group_id = f"csv-sess-{group_counter}"
         group_counter += 1
-        # video_path：优先取 is_end 行（组内最后一行）的「文件路径」
+        # video_path：优先取 is_end 行（组内最后一行）的 video_path
         video_path = ""
         for _ln, row in reversed(session):
-            vp = _csv_clean(row.get("文件路径"))
+            vp = _csv_clean(row.get("video_path"))
             if vp:
                 video_path = vp
                 break
         if not video_path:
-            errors.append(f"第 {session[0][0]} 行起的 session 缺少「文件路径」，已跳过")
+            errors.append(f"第 {session[0][0]} 行起的 session 缺少 video_path，已跳过")
             continue
 
         for turn, (ln, row) in enumerate(session):

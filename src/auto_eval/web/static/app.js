@@ -326,14 +326,12 @@ createApp({
         { key: "superlink_texts", label: "Superlink文字" },
         { key: "card_suitability", label: "卡片是否合适" },
         { key: "card_suitability_reason", label: "卡片不合适原因" },
-        { key: "superlink_suitability", label: "Superlink是否合适" },
-        { key: "superlink_suitability_reason", label: "Superlink不合适原因" },
         { key: "answer_coverage", label: "回答覆盖" },
         { key: "needs_review", label: "需人工复核" },
         { key: "review_reason", label: "复核原因" },
-        { key: "problem_solved", label: "是否解决用户问题" },
+        { key: "problem_solved", label: "Correctness" },
         { key: "problem_solved_reason", label: "评价原因" },
-        { key: "answer_issues", label: "回答内容问题" },
+        { key: "answer_issues", label: "error_type" },
         { key: "rationale", label: "识别结论" },
         { key: "latency_s", label: "耗时" },
       ];
@@ -382,6 +380,76 @@ createApp({
       const safePage = Math.min(resultPage.value, pageCount.value);
       const start = (safePage - 1) * resultPageSize.value;
       return filteredResults.value.slice(start, start + resultPageSize.value);
+    });
+
+    // —— 结果统计：Correctness(problem_solved) 与 error_type(answer_issues 标签) ——
+    const correctnessStats = computed(() => {
+      const counts = new Map();
+      let evaluated = 0;
+      filteredResults.value.forEach((r) => {
+        if (r.error) return;
+        evaluated += 1;
+        const key = String(r.problem_solved || "");
+        counts.set(key, (counts.get(key) || 0) + 1);
+      });
+      const labels = { ok: "OK", nok: "NOK", need_review: "需复查" };
+      const fixedKeys = ["ok", "nok", "need_review"];
+      const extraKeys = Array.from(counts.keys()).filter((k) => k && !fixedKeys.includes(k)).sort();
+      const orderedKeys = [...fixedKeys, ...extraKeys, ...(counts.has("") ? [""] : [])];
+      const rows = evaluated
+        ? orderedKeys.map((key) => {
+            const count = counts.get(key) || 0;
+            return {
+              key: key || "__unset__",
+              label: labels[key] || key || "未判定",
+              count,
+              percent: (count / evaluated) * 100,
+            };
+          })
+        : [];
+      return { evaluated, rows };
+    });
+
+    const errorTypeStats = computed(() => {
+      const counts = new Map();
+      const sampleCounts = new Map();
+      let issueTotal = 0;
+      let issueSampleTotal = 0;
+      let evaluated = 0;
+      filteredResults.value.forEach((r) => {
+        if (r.error) return;
+        evaluated += 1;
+        const rowLabels = new Set();
+        String(r.answer_issues || "").split(/\r?\n/).forEach((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return;
+          // 每条问题格式为“标签：具体描述”，分类只取“：”（或“:”）前的标签
+          const colon = trimmed.search(/[：:]/);
+          const label = (colon > 0 ? trimmed.slice(0, colon) : trimmed).trim();
+          if (!label) return;
+          counts.set(label, (counts.get(label) || 0) + 1);
+          rowLabels.add(label);
+          issueTotal += 1;
+        });
+        if (rowLabels.size) issueSampleTotal += 1;
+        rowLabels.forEach((label) => sampleCounts.set(label, (sampleCounts.get(label) || 0) + 1));
+      });
+      const rows = Array.from(counts.entries())
+        .map(([label, count]) => ({
+          label,
+          count,
+          percent: issueTotal ? (count / issueTotal) * 100 : 0,
+          // 样本占比 = 出现该错误的题数 / 已评测题数（同题重复标签只算一次）
+          sampleRate: evaluated ? ((sampleCounts.get(label) || 0) / evaluated) * 100 : 0,
+        }))
+        .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh"));
+      return {
+        issueTotal,
+        issueSampleTotal,
+        evaluated,
+        anyIssueRate: evaluated ? (issueSampleTotal / evaluated) * 100 : 0,
+        rows,
+      };
     });
 
     function selectSkill(key) {
@@ -808,7 +876,7 @@ createApp({
       if (c.key === "card_presence" || c.key === "superlink_presence") {
         return ({ present: "是", absent: "否", unclear: "不清楚" }[v] || v) || "";
       }
-      if (c.key === "card_suitability" || c.key === "superlink_suitability") {
+      if (c.key === "card_suitability") {
         if (v === "ok") return "OK";
         if (v === "nok") return "NOK";
         return v || "";
@@ -999,6 +1067,7 @@ createApp({
       resultBrowser,
       activeSkill, resultQuery, resultPage, resultPageSize,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
+      correctnessStats, errorTypeStats,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
       switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
