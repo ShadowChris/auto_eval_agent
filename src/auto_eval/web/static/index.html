@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260729_page_sizes">
+  <link rel="stylesheet" href="/static/style.css?v=20260906_judge_settings">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -39,6 +39,32 @@
   <div class="tabs">
     <button v-for="m in modes" :class="{active: mode===m.key}" @click="switchMode(m.key)">{{ m.label }}</button>
   </div>
+
+  <details class="settings-section" @toggle="onSettingsToggle">
+    <summary>系统设置（全局并发 {{ sysSettings.concurrency }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }} · 运行 {{ sysSettings.queue.running }} / 排队 {{ sysSettings.queue.queued }}）</summary>
+    <div class="row">
+      <span class="lbl">并发上限：</span>
+      <input type="number" min="1" max="64" v-model.number="settingsForm.concurrency" style="width:70px">
+      <span class="hint">全系统所有评测任务共享一个队列；按模型限流设置（默认 10）。</span>
+    </div>
+    <div class="row">
+      <span class="lbl">单题超时：</span>
+      <input type="number" min="30" max="3600" step="30" v-model.number="settingsForm.eval_timeout_s" style="width:90px">
+      <span class="hint">秒；对所有任务生效，运行中调整对后续题目生效。</span>
+    </div>
+    <div class="row">
+      <span class="lbl">裁判：</span>
+      <label v-for="j in judges" class="chip">
+        <input type="checkbox" :value="j.name" v-model="settingsForm.judges"> {{ j.display || j.name }}
+      </label>
+      <span class="hint">对所有任务生效，保存后新评测与重跑按此裁判执行。</span>
+    </div>
+    <div class="row">
+      <button class="primary" @click="saveSettings" :disabled="settingsSaving">保存系统设置</button>
+      <span v-if="settingsMessage" :class="settingsMessageOk ? 'ok' : 'err'">{{ settingsMessage }}</span>
+    </div>
+    <p class="hint">调低并发不会中断已开始的评测，新排队按新上限执行；设置保存在服务端，重启后仍生效。</p>
+  </details>
 
   <details class="history-section">
     <summary>历史记录（{{ historyItems.length }}）<button @click.stop="loadHistory" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
@@ -143,26 +169,6 @@
   </section>
 
   <section>
-    <h2>② 评估配置</h2>
-    <div class="row">
-      <span class="lbl">裁判：</span>
-      <label v-for="j in visibleJudges" class="chip">
-        <input type="checkbox" :value="j.name" v-model="selectedJudges"> {{ j.display || j.name }}
-      </label>
-    </div>
-    <div class="row">
-      <span class="lbl">并发：</span>
-      <input type="number" min="1" max="16" v-model.number="concurrency" style="width:70px">
-      <span class="hint">（裁判单轮直出多模态调用，过高易触发限流）</span>
-    </div>
-    <div class="row">
-      <span class="lbl">单题超时：</span>
-      <input type="number" min="30" max="3600" step="30" v-model.number="evalTimeout" style="width:90px">
-      <span class="hint">秒；复杂题/多裁判建议 300–900，防止真正卡死。</span>
-    </div>
-  </section>
-
-  <section>
     <button class="primary" @click="submit" :disabled="running || !canSubmit">▶ 开始评估</button>
     <span v-if="running" class="running">评估中… {{ progress }}/{{ total }}</span>
     <p v-if="runError" class="run-error">{{ runError }}</p>
@@ -251,7 +257,7 @@
   </section>
 
   <section v-if="results.length || summary">
-    <h2>③ 结果
+    <h2>② 结果
       <button @click="exportCsv" :disabled="!taskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId">导出 JSON</button>
       <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
@@ -275,6 +281,19 @@
         <button v-for="s in skillTabs" :key="s.key" :class="{active:activeSkill===s.key}" @click="selectSkill(s.key)">
           {{ s.label }} {{ s.count }}
         </button>
+      </div>
+      <div v-if="taskId && items.length" class="rerun-toolbar">
+        <span class="hint">在结果表勾选要重跑的题（成功/失败/未评估均可）；多轮组勾选任一轮会自动选中该轮到组尾并整段重跑（复用前序轮总结），取消勾选则清除该组选择。</span>
+        <div class="rerun-actions">
+          <button type="button" @click="selectAllFailedRerun" :disabled="running || rerunSubmitting || !failedRerunIndexes.length">
+            全选失败（{{ failedRerunIndexes.length }} 题）
+          </button>
+          <button type="button" @click="clearRerunSelection" :disabled="running || rerunSubmitting || !rerunSelection.length">清空</button>
+          <button type="button" class="primary" @click="submitRerun"
+                  :disabled="running || rerunSubmitting || !rerunSelection.length">
+            重跑选中（{{ rerunSelection.length }} 题）
+          </button>
+        </div>
       </div>
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
@@ -327,6 +346,7 @@
       <div class="result-table-wrap">
         <table class="grid results compact-results" :style="{ width: resultTableWidth + 'px' }">
           <colgroup>
+            <col style="width:36px">
             <col style="width:48px">
             <col v-for="c in resultCols" :key="'col-'+c.key" :style="{ width: columnWidth(c) + 'px' }">
             <col v-if="isVideoMode" style="width:100px">
@@ -335,6 +355,7 @@
           </colgroup>
           <thead>
             <tr>
+              <th class="rerun-col"></th>
               <th>#</th>
               <th v-for="c in resultCols" :key="c.key">{{ c.label }}</th>
               <th v-if="isVideoMode">原视频（MP4）</th>
@@ -345,6 +366,12 @@
           <tbody>
             <template v-for="(r,i) in pagedResults" :key="r.index ?? i">
               <tr :class="{'result-error':r.error}">
+                <td class="rerun-cell">
+                  <input type="checkbox"
+                         :checked="rerunSelection.includes(r.index)"
+                         @change="toggleRerunIndex(r.index, $event.target.checked)"
+                         :disabled="running || rerunSubmitting">
+                </td>
                 <td><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
                 <td
                   v-for="c in resultCols"
@@ -409,6 +436,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260902_sample_rate"></script>
+  <script type="module" src="/static/app.js?v=20260906_judge_settings"></script>
 </body>
 </html>

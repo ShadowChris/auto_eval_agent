@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -346,8 +345,7 @@ async def stream_chat_completion(
     include_usage: bool = True,
     total_timeout_s: float = 180.0,
     max_attempts: int = 4,
-    retry_base_s: float = 1.0,
-    retry_max_s: float = 20.0,
+    retry_base_s: float = 0.7,
 ):
     """始终使用流式接口，成功后返回与完整响应等价的聚合对象。
 
@@ -467,8 +465,9 @@ async def stream_chat_completion(
                     progress_status="error",
                 )
                 raise
-            cap = min(retry_max_s, retry_base_s * (2**attempt))
-            wait = random.uniform(0.0, cap)
+            # 固定间隔重试（默认 0.7 秒）。此前 uniform(0, cap) 抖动下界为 0，
+            # 首次重试可能背靠背发出，限流场景下反而加剧失败。
+            wait = retry_base_s
             details["等待"] = f"{wait:.2f}秒"
             log_event(
                 module,

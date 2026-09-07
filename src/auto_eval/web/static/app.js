@@ -20,10 +20,17 @@ createApp({
     const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
-    const selectedJudges = ref([]);
-    const visibleJudges = computed(() => judges.value);
-    const concurrency = ref(4);
-    const evalTimeout = ref(300);
+    // 全局系统设置（并发/单题超时/裁判）：所有任务共享，服务端持久化
+    const sysSettings = ref({
+      concurrency: 10,
+      eval_timeout_s: 300,
+      judges: [],
+      queue: { limit: 10, running: 0, queued: 0 },
+    });
+    const settingsForm = ref({ concurrency: 10, eval_timeout_s: 300, judges: [] });
+    const settingsSaving = ref(false);
+    const settingsMessage = ref("");
+    const settingsMessageOk = ref(true);
     const running = ref(false);
     const progress = ref(0);
     const total = ref(0);
@@ -49,9 +56,13 @@ createApp({
     const clockNow = ref(Date.now());
     let tooltipHideTimer = null;
     let progressClockTimer = null;
+    let activeEventSource = null;
     const pageSize = 10;
-    const opPageSize = 10;
+    const opPageSize = 5;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
+    // 手动重跑：结果表行内勾选（index 数组，随翻页/筛选存活），提交走 /api/eval/rerun
+    const rerunSelection = ref([]);
+    const rerunSubmitting = ref(false);
 
     const formatHint = computed(
       () =>
@@ -292,6 +303,100 @@ createApp({
       return results.value.filter((r) => !r.error && r.category === activeSkill.value);
     });
 
+    // 手动重跑：勾选框直接放结果表每行前（成功/失败/未评估均可重跑）。
+    // 组内选择 = 后缀闭包：勾选某轮自动选中该轮到组尾（后轮依赖前轮重评后的
+    // 新总结，必须连着重跑）；取消任一轮则清空该组选择。独立题普通增删。
+    // 选择以 item index 存数组，随翻页/筛选存活；提交走 /api/eval/rerun。
+    const indexGroups = computed(() => {
+      const groups = new Map();
+      const groupOf = new Map();
+      if (mode.value === "rich_content") {
+        items.value.forEach((it, i) => {
+          const grp = it.session_group;
+          if (!grp) return;
+          if (!groups.has(grp)) groups.set(grp, []);
+          groups.get(grp).push(i);
+        });
+        groups.forEach((idxs) => {
+          idxs.sort((a, b) => (items.value[a].turn_index ?? 0) - (items.value[b].turn_index ?? 0));
+          idxs.forEach((i) => groupOf.set(i, idxs));
+        });
+      }
+      return { groups, groupOf };
+    });
+
+    function toggleRerunIndex(i, checked) {
+      const idxs = indexGroups.value.groupOf.get(i);
+      const sel = new Set(rerunSelection.value);
+      if (!idxs) {
+        if (checked) sel.add(i);
+        else sel.delete(i);
+      } else if (checked) {
+        idxs.slice(idxs.indexOf(i)).forEach((x) => sel.add(x)); // 该轮 → 组尾
+      } else {
+        idxs.forEach((x) => sel.delete(x)); // 后轮被前轮强制，取消即清空整组
+      }
+      rerunSelection.value = [...sel].sort((a, b) => a - b);
+    }
+
+    // 全选失败：坏 = 最新结果有 error 或无结果行（中断任务的「未评估」条目）。
+    // 组内有坏 → 从首个坏轮的后缀展开（与后端 build_rerun_batches 切片一致），
+    // 独立坏题各自入选；与已有手工选择合并。
+    const failedRerunIndexes = computed(() => {
+      if (!taskId.value) return [];
+      const latest = new Map();
+      results.value.forEach((r) => {
+        if (Number.isInteger(r && r.index)) latest.set(r.index, r);
+      });
+      const isBad = (i) => {
+        const r = latest.get(i);
+        return !r || !!r.error;
+      };
+      const sel = new Set();
+      indexGroups.value.groups.forEach((idxs) => {
+        const firstBad = idxs.findIndex((i) => isBad(i));
+        if (firstBad !== -1) idxs.slice(firstBad).forEach((i) => sel.add(i));
+      });
+      items.value.forEach((it, i) => {
+        if (!it.session_group && isBad(i)) sel.add(i);
+      });
+      return [...sel].sort((a, b) => a - b);
+    });
+
+    function selectAllFailedRerun() {
+      rerunSelection.value = [...new Set([...rerunSelection.value, ...failedRerunIndexes.value])];
+    }
+
+    function clearRerunSelection() {
+      rerunSelection.value = [];
+    }
+
+    async function submitRerun() {
+      if (running.value || rerunSubmitting.value) return;
+      const indexes = [...new Set(rerunSelection.value)].sort((a, b) => a - b);
+      if (!indexes.length) return;
+      rerunSubmitting.value = true;
+      try {
+        const response = await fetch("/api/eval/rerun", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ task_id: taskId.value, indexes }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          alert("重跑提交失败：" + (data.detail || "未知错误"));
+          return;
+        }
+        rerunSelection.value = [];
+        runError.value = "";
+        running.value = true;
+        total.value = items.value.length || total.value;
+        connectSSE();
+      } finally {
+        rerunSubmitting.value = false;
+      }
+    }
+
     const resultCols = computed(() => {
       const contextCols = results.value.some((r) => r.context != null && r.context !== "")
         ? [{ key: "context", label: "背景" }]
@@ -364,7 +469,7 @@ createApp({
     }
 
     const resultTableWidth = computed(
-      () => 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0)
+      () => 36 + 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0)
     );
 
     const filteredResults = computed(() => {
@@ -515,13 +620,8 @@ createApp({
       resultJumpPage.value = "";
     }
 
-    function defaultJudgeSelection() {
-      return judges.value.length ? [judges.value[0].name] : [];
-    }
-
     function switchMode(k) {
       mode.value = k;
-      selectedJudges.value = defaultJudgeSelection();
       items.value = [];
       progressPage.value = 1;
       errors.value = [];
@@ -650,6 +750,91 @@ createApp({
       )
     );
 
+    // 摘要行里展示的裁判名（原名映射为显示名）
+    const settingsJudgeDisplay = computed(() => {
+      const names = sysSettings.value.judges || [];
+      const label = (n) => {
+        const j = judges.value.find((x) => x.name === n);
+        return j ? (j.display || j.name) : n;
+      };
+      return names.length ? names.map(label).join("、") : "未设置";
+    });
+
+    async function loadSettings() {
+      try {
+        const r = await fetch("/api/settings");
+        const d = await r.json();
+        if (r.ok && d) {
+          sysSettings.value = { ...sysSettings.value, ...d };
+          settingsForm.value = {
+            concurrency: d.concurrency,
+            eval_timeout_s: d.eval_timeout_s,
+            judges: d.judges || [],
+          };
+        }
+      } catch (_) {}
+    }
+
+    async function refreshQueueStats() {
+      // 只刷新摘要里的队列计数，不动用户正在编辑的表单
+      try {
+        const r = await fetch("/api/settings");
+        const d = await r.json();
+        if (r.ok && d) sysSettings.value = { ...sysSettings.value, ...d };
+      } catch (_) {}
+    }
+
+    async function saveSettings() {
+      const concurrency = Number(settingsForm.value.concurrency);
+      const evalTimeoutS = Number(settingsForm.value.eval_timeout_s);
+      const judgeNames = [...new Set(settingsForm.value.judges || [])];
+      if (!Number.isFinite(concurrency) || !Number.isFinite(evalTimeoutS)) {
+        settingsMessageOk.value = false;
+        settingsMessage.value = "请填写有效的并发上限与超时秒数";
+        return;
+      }
+      if (!judgeNames.length) {
+        settingsMessageOk.value = false;
+        settingsMessage.value = "请至少选择一位裁判";
+        return;
+      }
+      settingsSaving.value = true;
+      settingsMessage.value = "";
+      try {
+        const r = await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            concurrency,
+            eval_timeout_s: evalTimeoutS,
+            judges: judgeNames,
+          }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          settingsMessageOk.value = false;
+          settingsMessage.value =
+            typeof d.detail === "string" ? d.detail : "保存失败";
+          return;
+        }
+        sysSettings.value = { ...sysSettings.value, ...d };
+        settingsMessageOk.value = true;
+        settingsMessage.value =
+          d.persisted === false
+            ? "已生效，但写入磁盘失败（重启后回到旧值）"
+            : "已保存并生效 ✓";
+      } catch (error) {
+        settingsMessageOk.value = false;
+        settingsMessage.value = "保存失败：" + (error?.message || "网络错误");
+      } finally {
+        settingsSaving.value = false;
+      }
+    }
+
+    function onSettingsToggle(event) {
+      if (event?.currentTarget?.open) loadSettings();
+    }
+
     async function submit() {
       runError.value = "";
       const valid = opItems.value.filter(
@@ -718,11 +903,7 @@ createApp({
         mode: mode.value,
         items: items.value,
         dataset_name: datasetName.value || "手动录入",
-        options: {
-          judges: selectedJudges.value,
-          concurrency: concurrency.value,
-          eval_timeout_s: evalTimeout.value,
-        },
+        // 裁判由页首「系统设置」全局管理，提交不再随任务携带
       };
       let r;
       try {
@@ -785,14 +966,42 @@ createApp({
             || (Number.isFinite(updatedAt) ? updatedAt : Date.now()),
         };
       });
-      results.value = snapshotResults;
+      results.value = sortedResults(snapshotResults);
       progress.value = snapshotResults.length;
       itemProgress.value = reconciled;
       if (snapshot?.summary) summary.value = snapshot.summary;
     }
 
+    // 结果表始终按任务输入顺序（index 升序）排列：无/非整数 index 的行排末尾
+    const resultOrderKey = (r) => (Number.isInteger(r && r.index) ? r.index : Number.MAX_SAFE_INTEGER);
+
+    function sortedResults(rows) {
+      return [...rows].sort((a, b) => resultOrderKey(a) - resultOrderKey(b));
+    }
+
+    function upsertResultRow(result) {
+      // 按 index 有序 upsert：已有行原位替换，新行按序插入——并发完成乱序
+      // 到达（含断线重连的整段回放）也不产生重复行、不跳动顺序
+      const index = result && result.index;
+      if (index == null) {
+        results.value.push(result);
+        return;
+      }
+      const pos = results.value.findIndex((x) => x && x.index === index);
+      if (pos >= 0) {
+        results.value.splice(pos, 1, result);
+        return;
+      }
+      const at = results.value.findIndex((x) => resultOrderKey(x) > index);
+      if (at === -1) results.value.push(result);
+      else results.value.splice(at, 0, result);
+    }
+
     function connectSSE() {
+      // 重跑会再次连接：先关旧流，避免函数局部变量泄漏的 EventSource 越积越多
+      if (activeEventSource) activeEventSource.close();
       const es = new EventSource(`/api/eval/${taskId.value}/stream`);
+      activeEventSource = es;
       es.addEventListener("item_progress", (e) => {
         const d = JSON.parse(e.data);
         mergeItemProgress(d);
@@ -804,15 +1013,7 @@ createApp({
         const d = JSON.parse(e.data);
         const result = d.result;
         const index = result && result.index;
-        if (index == null) {
-          results.value.push(result);
-        } else {
-          // 断线重连时服务端会整段回放 results：按 index 替换去重，
-          // 防止重连一次就全量翻倍（重复行 + 内存线性增长）
-          const pos = results.value.findIndex((x) => x && x.index === index);
-          if (pos >= 0) results.value.splice(pos, 1, result);
-          else results.value.push(result);
-        }
+        upsertResultRow(result);
         progress.value = d.progress;
         if (index != null) {
           const previous = itemProgress.value[index] || {};
@@ -1008,7 +1209,7 @@ createApp({
       mode.value = d.mode;
       datasetName.value = d.dataset_name || "";
       items.value = d.items || [];
-      results.value = d.results || [];
+      results.value = sortedResults(d.results || []);
       itemProgress.value = d.item_progress || {};
       progressEvents.value = d.progress_events || {};
       summary.value = d.summary || null;
@@ -1042,23 +1243,34 @@ createApp({
     }
 
     onMounted(async () => {
+      let queueStatsTicks = 0;
       progressClockTimer = window.setInterval(() => {
         clockNow.value = Date.now();
+        // 评估运行中低频刷新全局队列状态（运行/排队计数）
+        queueStatsTicks += 1;
+        if (running.value && queueStatsTicks >= 5) {
+          queueStatsTicks = 0;
+          refreshQueueStats();
+        }
       }, 1000);
       const r = await fetch("/api/config");
       const d = await r.json();
       judges.value = d.judges || [];
-      selectedJudges.value = defaultJudgeSelection();
+      loadSettings();
       loadHistory();
     });
 
     onUnmounted(() => {
       if (progressClockTimer != null) window.clearInterval(progressClockTimer);
+      if (activeEventSource) activeEventSource.close();
     });
 
     return {
-      modes, mode, modeLabel, isVideoMode, items, errors, judges, visibleJudges, selectedJudges, datasetName,
-      concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
+      modes, mode, modeLabel, isVideoMode, items, errors, judges, datasetName,
+      sysSettings, settingsForm, settingsSaving, settingsMessage, settingsMessageOk,
+      settingsJudgeDisplay,
+      loadSettings, saveSettings, onSettingsToggle,
+      running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       opPage, opPageSize, opPageCount, opJumpPage,
@@ -1076,6 +1288,8 @@ createApp({
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,
+      rerunSelection, rerunSubmitting, toggleRerunIndex, failedRerunIndexes,
+      selectAllFailedRerun, clearRerunSelection, submitRerun,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,
     };
   },

@@ -1,28 +1,47 @@
+"""裁判选择已迁入页首「系统设置」（全局设置），「评估配置」区块删除。
+
+前端静态断言：设置面板承载裁判 chips、旧的任务级 selectedJudges 链路移除、
+批量输入预览每页 5 条。
+"""
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+APP_JS = PROJECT_ROOT / "src/auto_eval/web/static/app.js"
+INDEX_HTML = PROJECT_ROOT / "src/auto_eval/web/static/index.html"
 
 
-def test_single_and_operation_default_to_end_user_judge() -> None:
-    app_js = (PROJECT_ROOT / "src/auto_eval/web/static/app.js").read_text(encoding="utf-8")
-    index_html = (PROJECT_ROOT / "src/auto_eval/web/static/index.html").read_text(encoding="utf-8")
+def test_judge_chips_live_in_global_settings_panel() -> None:
+    index_html = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert '["single", "operation", "rich_content"].includes(targetMode)' in app_js
-    assert 'String(judge.display || "").trim() === "终端用户"' in app_js
-    assert 'judge.persona === "end_user"' in app_js
-    assert 'if (mode.value !== "operation") return judges.value;' in app_js
-    assert 'judges: mode.value === "operation"' in app_js
-    assert 'v-for="j in visibleJudges"' in index_html
-    assert ':disabled="mode===\'operation\'"' in index_html
-    assert "selectedJudges.value = defaultJudgeSelection(k)" in app_js
-    assert "selectedJudges.value = defaultJudgeSelection(mode.value)" in app_js
+    # 裁判 chips 绑定全局设置表单，位于系统设置面板内（单题超时行之后）
+    settings_start = index_html.index("settings-section")
+    judges_row_at = index_html.index('v-model="settingsForm.judges"')
+    timeout_row_at = index_html.index('v-model.number="settingsForm.eval_timeout_s"')
+    assert settings_start < timeout_row_at < judges_row_at
+    assert 'v-for="j in judges" class="chip"' in index_html
+    # 摘要行展示当前裁判
+    assert "裁判 {{ settingsJudgeDisplay }}" in index_html
 
 
-def test_operation_results_show_error_and_low_level_fields() -> None:
-    app_js = (PROJECT_ROOT / "src/auto_eval/web/static/app.js").read_text(encoding="utf-8")
+def test_per_task_judge_config_section_removed() -> None:
+    app_js = APP_JS.read_text(encoding="utf-8")
+    index_html = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert '{ key: "error_type", label: "错误类型" }' in app_js
-    assert '{ key: "is_low_level", label: "是否低级" }' in app_js
-    assert 'if (c.key === "is_low_level") return v === "yes" ? "是" : "否";' in app_js
-    assert 'partial: "◐ 完成但有瑕疵"' in app_js
+    assert "评估配置" not in index_html
+    assert "selectedJudges" not in app_js
+    assert "visibleJudges" not in app_js
+    assert "defaultJudgeSelection" not in app_js
+    # 提交不再随任务携带裁判（由全局设置管理）
+    assert "judges: selectedJudges.value" not in app_js
+    # 章节编号连续：① 批量输入 → ② 结果
+    assert "<h2>② 结果" in index_html
+    assert "<h2>③" not in index_html
+
+
+def test_batch_input_preview_page_size_is_five() -> None:
+    app_js = APP_JS.read_text(encoding="utf-8")
+
+    assert "const opPageSize = 5;" in app_js
+    # 逐题运行进度表与结果表分页不受影响
+    assert "const pageSize = 10;" in app_js

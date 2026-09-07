@@ -42,7 +42,6 @@ class OpenAICompatRunner(BaseRunner):
             total_timeout_s=self.cfg.total_timeout_s,
             max_attempts=self.cfg.max_attempts,
             retry_base_s=self.cfg.retry_base_s,
-            retry_max_s=self.cfg.retry_max_s,
         )
         choice = resp.choices[0]
         answer = (getattr(choice.message, "content", "") or "").strip()

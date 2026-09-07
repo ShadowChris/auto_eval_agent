@@ -286,6 +286,21 @@ def _preview(data: dict) -> str:
     return q[:80] + ("…" if len(q) > 80 else "")
 
 
+def _results_sorted_by_index(results: list[dict]) -> list[dict]:
+    """结果行按 index 升序稳定排序（= 任务输入顺序）；无/非 int index 的行排末尾。
+
+    新快照落盘时已由 upsert_result_by_index 维持有序，这里是对旧快照
+    （完成顺序、可能同 index 重复）的读侧兜底，保证历史详情展示稳定。
+    """
+    return sorted(
+        results,
+        key=lambda r: (
+            not isinstance(r.get("index"), int),
+            r.get("index") if isinstance(r.get("index"), int) else 0,
+        ),
+    )
+
+
 def snapshot_payload(data: dict) -> dict:
     return {
         "task_id": data.get("task_id"),
@@ -296,7 +311,7 @@ def snapshot_payload(data: dict) -> dict:
         "items": data.get("items") or [],
         "options": data.get("options") or {},
         "status": data.get("status"),
-        "results": data.get("results") or [],
+        "results": _results_sorted_by_index(data.get("results") or []),
         "item_progress": data.get("item_progress") or {},
         "progress_events": data.get("progress_events") or {},
         "summary": data.get("summary") or {},
@@ -327,6 +342,7 @@ def export_rows(snapshot: dict) -> dict[str, list[dict]]:
         result_rows = _visual_compare_export_rows(aligned_results)
     else:
         result_rows = _result_rows(aligned_results)
+    _append_result_passthrough(result_rows, snapshot)
     rows: dict[str, list[dict]] = {
         "数据集明细": _dataset_rows(snapshot),
         "逐题结果": result_rows,
@@ -421,6 +437,9 @@ _RUNTIME_ITEM_FIELDS = {
     "source_data",
 }
 
+# 逐题结果随行携带的原始输入列：数据集中存在该列才输出（值取自 source_data）
+_RESULT_PASSTHROUGH_SOURCE_KEYS = ("分享链接", "video_url_domain", "session_id")
+
 # 垂域视觉评测（rich_content）Excel/CSV 导出列：按此顺序输出。
 # query_id / 垂域分类 / 卡片存在情况 / correctness / error_type 为外部对接定名；
 # Superlink 合适度、回答覆盖、耗时不再导出。
@@ -503,6 +522,26 @@ def _source_data_for_item(item: dict) -> dict:
         for key, value in item.items()
         if key not in _RUNTIME_ITEM_FIELDS
     }
+
+
+def _append_result_passthrough(result_rows: list[dict], snapshot: dict) -> None:
+    """逐题结果尾部携带导入数据的几列原始字段（source_data 优先，旧快照回落 item 本体）。
+
+    仅当数据集中存在对应列时输出（整列缺失不加空列）；行与 items 逐位对齐，
+    长度不一致（异常快照）时宁可不加也不错位。CSV 与 xlsx「逐题结果」共用
+    这批行，天然同列同值。
+    """
+    items = snapshot.get("items") or []
+    if not items or len(result_rows) != len(items):
+        return
+    sources = [_source_data_for_item(item) for item in items]
+    wanted = [k for k in _RESULT_PASSTHROUGH_SOURCE_KEYS if any(k in s for s in sources)]
+    if not wanted:
+        return
+    for row, source in zip(result_rows, sources):
+        for key in wanted:
+            value = source.get(key)
+            row[key] = "" if value is None else value
 
 
 def _dataset_rows(snapshot: dict) -> list[dict]:

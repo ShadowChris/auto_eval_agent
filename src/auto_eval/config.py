@@ -27,8 +27,7 @@ class JudgeConfig(BaseModel):
     read_timeout_s: float = 90.0
     total_timeout_s: float = 180.0
     max_attempts: int = 5
-    retry_base_s: float = 1.0
-    retry_max_s: float = 20.0
+    retry_base_s: float = 0.7  # 失败重试的固定间隔（秒）
     stream_include_usage: bool = True
 
     def api_key(self) -> str | None:

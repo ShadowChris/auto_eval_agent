@@ -40,7 +40,14 @@ from .video_prepare import (
     VIDEO_EXTENSIONS,
     resolve_operation_video_path,
 )
-from .runner import run_eval, run_update_batch, spawn_background
+from .runner import (
+    build_rerun_batches,
+    run_eval,
+    run_update_batch,
+    spawn_background,
+)
+from . import scheduler
+from .scheduler import EVAL_LIMITER
 from .tasks import (
     TASKS,
     get_task,
@@ -65,6 +72,8 @@ _state: dict = {}
 @app.on_event("startup")
 def _load():
     _state["cfg"] = load_config(CONFIG_DIR)
+    # 全局并发/单题超时/裁判；文件缺失或损坏回退默认
+    scheduler.load_persisted_settings()
 
 
 def cfg():
@@ -95,8 +104,26 @@ class EvalItemsReq(BaseModel):
     dataset_name: str = ""  # 仅新建时生效，更新时忽略
 
 
+class RerunReq(BaseModel):
+    """失败重跑请求：indexes 为选中的 item index（任意组内一个 index 即选中该组）。
+
+    服务端权威展开：整组从首个失败/未评估轮切到组尾，前序好轮结果与总结复用。
+    """
+
+    task_id: str
+    indexes: list[int]
+
+
 class HistoryNoteReq(BaseModel):
     note: str = ""
+
+
+class SettingsReq(BaseModel):
+    """全局系统设置：并发上限、单题超时与裁判（均可选，至少传一个）。"""
+
+    concurrency: int | None = None
+    eval_timeout_s: float | None = None
+    judges: list[str] | None = None
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
@@ -108,8 +135,11 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
 
 def _validate_eval_request(req: EvalReq, app_cfg) -> None:
     """提交前校验：compare 模式每条必须有 video1 和 video2。"""
-    selected = req.options.get("judges") or (
-        [app_cfg.judges[0].name] if app_cfg.judges else []
+    # 裁判优先级：任务 options（兼容旧脚本）→ 全局设置 → 配置第一个
+    selected = (
+        req.options.get("judges")
+        or scheduler.get_settings().judges
+        or ([app_cfg.judges[0].name] if app_cfg.judges else [])
     )
     selected_judges = [judge for judge in app_cfg.judges if judge.name in selected]
     if not selected_judges:
@@ -174,6 +204,78 @@ def api_config():
             for j in c.judges
         ],
     }
+
+
+def _settings_payload(*, persisted: bool | None = None) -> dict:
+    s = scheduler.get_settings()
+    configured = [j.name for j in cfg().judges]
+    # 配置变化后持久化的名字可能失效：按当前配置过滤，空则回落第一个
+    judges = [name for name in s.judges if name in configured] or configured[:1]
+    payload = {
+        "concurrency": s.concurrency,
+        "eval_timeout_s": s.eval_timeout_s,
+        "judges": judges,
+        "queue": EVAL_LIMITER.stats(),
+    }
+    if persisted is not None:
+        payload["persisted"] = persisted
+    return payload
+
+
+@app.get("/api/settings")
+async def api_settings_get():
+    # async def：必须留在事件循环线程——stats() 遍历等待队列，且 PUT 会在
+    # 此处调整 limiter（future.set_result 只能在 loop 线程调用，见 R6 纪律）。
+    return _settings_payload()
+
+
+@app.put("/api/settings")
+async def api_settings_put(req: SettingsReq):
+    """更新全局并发/单题超时/裁判：即时生效（调大立即放行排队，调小为软限制，
+    运行中的评测跑完即止）并持久化到 runs/web_settings.json。"""
+    if (
+        req.concurrency is None
+        and req.eval_timeout_s is None
+        and req.judges is None
+    ):
+        raise HTTPException(
+            422, "需至少提供 concurrency / eval_timeout_s / judges 之一"
+        )
+    if req.concurrency is not None and not (
+        scheduler.MIN_CONCURRENCY <= req.concurrency <= scheduler.MAX_CONCURRENCY
+    ):
+        raise HTTPException(
+            422,
+            f"concurrency 需在 {scheduler.MIN_CONCURRENCY}–"
+            f"{scheduler.MAX_CONCURRENCY} 之间",
+        )
+    if req.eval_timeout_s is not None and not (
+        scheduler.MIN_EVAL_TIMEOUT_S
+        <= req.eval_timeout_s
+        <= scheduler.MAX_EVAL_TIMEOUT_S
+    ):
+        raise HTTPException(
+            422,
+            f"eval_timeout_s 需在 {int(scheduler.MIN_EVAL_TIMEOUT_S)}–"
+            f"{int(scheduler.MAX_EVAL_TIMEOUT_S)} 秒之间",
+        )
+    if req.judges is not None:
+        known = {j.name for j in cfg().judges}
+        unknown = [name for name in req.judges if name not in known]
+        if not req.judges or unknown:
+            known_names = "、".join(sorted(known)) or "（配置中无裁判）"
+            raise HTTPException(
+                422,
+                f"judges 需为配置内裁判名的非空列表，未知裁判："
+                f"{'、'.join(unknown) or '（空列表）'}；可选：{known_names}",
+            )
+    scheduler.apply_settings(
+        concurrency=req.concurrency,
+        eval_timeout_s=req.eval_timeout_s,
+        judges=req.judges,
+    )
+    persisted = scheduler.persist_settings()
+    return _settings_payload(persisted=persisted)
 
 
 @app.post("/api/parse")
@@ -272,6 +374,62 @@ async def api_eval_items(req: EvalItemsReq):
         "replaced_ids": replaced_ids,
         "added_ids": added_ids,
         "total_items": len(task.items),
+    }
+
+
+@app.post("/api/eval/rerun")
+async def api_eval_rerun(req: RerunReq):
+    """手动重跑：选中 index 所在的整组从首个选中轮起重评到组尾，结果按 index 覆盖。
+
+    选择驱动、不限失败项（成功/失败/未评估均可重跑）。每组一个串行更新批
+    （自带总结链接力/连坐失败/全局并发槽），切片前缀轮的 turn_summary
+    重建为种子总结链。任务运行中 409（防止与在跑评测对同 index 双评交错覆盖）。
+    结果经既有 SSE（result 事件 + R4 终态补发）推送，本接口非流式。
+    """
+    task_id = _validate_param_id(req.task_id, "task_id")
+    # R6：异步取任务，TASKS 变异留在事件循环线程
+    task = await get_task_async(task_id)
+    if not task:
+        raise HTTPException(404, "task not found")
+    if task.active_runs > 0 or task.status in {"pending", "running"}:
+        raise HTTPException(409, "任务正在评测中，结束后才能重跑")
+    if not req.indexes:
+        raise HTTPException(400, "indexes 为空")
+    out_of_range = [i for i in req.indexes if not (0 <= i < len(task.items))]
+    if out_of_range:
+        raise HTTPException(422, f"indexes 越界: {out_of_range}")
+
+    batches = build_rerun_batches(task, req.indexes)
+    app_cfg = cfg()
+    # R1：循环体内同步 pin（无 await 间隙），与 api_eval_items 同模式
+    for rb in batches:
+        task.active_runs += 1
+
+        async def _start_later(rb=rb):
+            # 先把受理结果响应出去，再启动可能较重的重评
+            await asyncio.sleep(0.05)
+            await run_update_batch(
+                task,
+                app_cfg,
+                rb.batch,
+                options=task.options,
+                manage_status=False,
+                initial_summary=rb.initial_summary,
+                initial_turn=rb.initial_turn,
+            )
+
+        spawn_background(_start_later())
+    return {
+        "task_id": task.id,
+        "batches": [
+            {
+                "group": rb.group,
+                "indexes": [i for i, _ in rb.batch],
+                "initial_turn": rb.initial_turn,
+            }
+            for rb in batches
+        ],
+        "rerun_indexes": sorted({i for rb in batches for i, _ in rb.batch}),
     }
 
 

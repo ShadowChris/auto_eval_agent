@@ -8,6 +8,7 @@ import os
 import time
 import traceback
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from .video_prepare import (
     prepare_session_rich_content_item,
     prepare_session_visual_compare_item,
 )
+from .scheduler import EVAL_LIMITER, get_settings
 from .tasks import Task, retire_task, upsert_result_by_index
 
 
@@ -165,17 +167,32 @@ def _make_item_evaluator(
     *,
     options: dict | None = None,
     on_result: Callable[[int, dict, float], Awaitable[None]] | None = None,
-) -> tuple[Callable[[int, dict], Awaitable[dict]], list[JudgeClient]]:
-    """构造单题评测协程 one(idx, item_dict) -> res（含失败 res，不抛出），
-    以及本套裁判客户端（调用方负责在 finally 中 aclose，见 _aclose_judge_clients）。
+) -> tuple[
+    Callable[[int, dict], Awaitable[dict]],
+    Callable[[int, dict, str], Awaitable[dict]],
+    list[JudgeClient],
+]:
+    """构造单题评测协程 one(idx, item_dict) -> res（含失败 res，不抛出）、
+    连坐失败协程 fail(idx, item_dict, reason) -> res，以及本套裁判客户端
+    （调用方负责在 finally 中 aclose，见 _aclose_judge_clients）。
 
+    one 不再管理并发槽：调用方（_run / _run_update_batch_body）须已通过
+    EVAL_LIMITER 取得全局并发槽（整组一个槽或独立题一个槽），排队时间因此
+    不计入单题耗时。并发、单题超时与裁判由全局设置管理（scheduler.get_settings），
+    不再从 options 读取（旧 options 中的 concurrency/eval_timeout_s 已废弃；
+    options.judges 仍生效但仅作兼容优先，前端已改为全局设置选裁判）。
     options：本次运行生效的配置（缺省 task.options），只读、不回写，
     供更新批以 {**task.options, **req.options} 运行。
     on_result：结果落地回调 (idx, res, started)，在评测上下文（bind_chain_context
     内）被 await，负责 append/merge、完成日志、SSE、持久化；缺省为完整跑批的原有行为。
     """
     runtime_options = options if options is not None else task.options
-    selected = runtime_options.get("judges") or [cfg.judges[0].name]
+    # 裁判优先级：任务 options（旧快照/脚本兼容）→ 全局设置 → 配置第一个
+    selected = (
+        runtime_options.get("judges")
+        or get_settings().judges
+        or [cfg.judges[0].name]
+    )
     judges_cfg = [j for j in cfg.judges if j.name in selected] or cfg.judges[:1]
     # R3：构造中途失败（如某个 judge 缺 base_url）时，已建客户端的连接池会
     # 无人关闭而泄漏——先登记再逐个构造，失败时交后台任务关闭后重抛。
@@ -201,12 +218,10 @@ def _make_item_evaluator(
     )
     # 垂域→中文显示名映射（rich_content.yaml 的 category_display）
     category_display = rich_profile.category_display if rich_profile else {}
-    sem = asyncio.Semaphore(int(runtime_options.get("concurrency", 4)))
-    eval_timeout = float(runtime_options.get("eval_timeout_s") or runtime_options.get("eval_timeout") or 300.0)
     loop = asyncio.get_running_loop()
 
     async def _default_on_result(idx: int, res: dict, started: float) -> None:
-        task.results.append(res)
+        upsert_result_by_index(task, res)  # 按 index 有序落位，结果表保持输入顺序
         task.done_total += 1
         failed = bool(res.get("error"))
         log_event(
@@ -230,10 +245,7 @@ def _make_item_evaluator(
 
     finish = on_result or _default_on_result
 
-    async def one(idx: int, item_dict: dict) -> dict:
-        request_id = make_request_id(task.created_at, task.id, idx)
-        pending_judge_traces: list[tuple[str, dict]] = []
-
+    def _progress_publisher(idx: int) -> Callable[[dict], None]:
         def publish_progress(payload: dict) -> None:
             def apply() -> None:
                 _record_progress(task, idx, payload)
@@ -244,6 +256,14 @@ def _make_item_evaluator(
                     loop.call_soon_threadsafe(apply)
             except RuntimeError:
                 loop.call_soon_threadsafe(apply)
+        return publish_progress
+
+    async def one(idx: int, item_dict: dict) -> dict:
+        # 调用方须已取得全局并发槽（整组一个槽或独立题一个槽，见 _run /
+        # _run_update_batch_body）；排队时间不计入单题耗时，计时从进入本函数起。
+        request_id = make_request_id(task.created_at, task.id, idx)
+        pending_judge_traces: list[tuple[str, dict]] = []
+        publish_progress = _progress_publisher(idx)
 
         item_id = item_dict.get("id") or f"q{idx}"
 
@@ -270,139 +290,139 @@ def _make_item_evaluator(
                 progress=0,
                 progress_message="排队等待评测",
             )
-            async with sem:
-                # 排队时间不计入单题耗时；取得并发槽后才启动计时。
-                started = time.perf_counter()
-                log_event(
-                    "任务",
-                    "开始评测",
-                    progress=1,
-                    progress_message="开始评测",
-                    progress_fields={"started_at": int(time.time() * 1000)},
-                )
-                last_error = None
-                res = None
-                if not item_dict.get("frames") and not item_dict.get("frames1"):
+            started = time.perf_counter()
+            log_event(
+                "任务",
+                "开始评测",
+                progress=1,
+                progress_message="开始评测",
+                progress_fields={"started_at": int(time.time() * 1000)},
+            )
+            last_error = None
+            res = None
+            if not item_dict.get("frames") and not item_dict.get("frames1"):
+                try:
+                    log_event(
+                        "视频准备",
+                        "校验视频并分析场景",
+                        details={"视频路径": item_dict.get("video_path")},
+                        progress=3,
+                        progress_message="正在校验视频并分析场景",
+                    )
+                    if rich_profile is None:
+                        raise ValueError("缺少 rich_content 视觉模式配置")
+                    prepare_call = (
+                        prepare_session_visual_compare_item
+                        if task.mode == "compare"
+                        else prepare_session_rich_content_item
+                    )
+                    prepared = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            prepare_call,
+                            item_dict,
+                            session_name=task.session_name,
+                            item_index=idx,
+                            total_items=len(task.items),
+                            profile=rich_profile,
+                        ),
+                        timeout=float(runtime_options.get("video_prepare_timeout_s") or 300),
+                    )
+                    item_dict.clear()
+                    item_dict.update(prepared)
+                    _persist_task(task)
+                    _frame_dir = ""
+                    if item_dict.get("frames"):
+                        _frame_dir = str(Path(item_dict["frames"][0]).parent)
+                    elif item_dict.get("frames1"):
+                        _frame_dir = str(Path(item_dict["frames1"][0]).parent)
+                    log_event(
+                        "视频准备",
+                        "关键帧提取完成",
+                        details={
+                            "关键帧数": item_dict.get("frame_count"),
+                            "抽帧目录": _frame_dir,
+                        },
+                        progress=12,
+                        progress_message=f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
+                    )
+                except Exception as e:
+                    last_error = e
+                    log_event(
+                        "视频准备",
+                        "失败",
+                        level=logging.ERROR,
+                        details=error_details(e),
+                        progress=12,
+                        progress_message="视频校验或抽帧失败",
+                        progress_status="error",
+                    )
+            if last_error is None:
+                for attempt in range(2):
+                    # 每次尝试现读全局设置：运行中调整超时对后续轮次/题目生效
+                    eval_timeout = get_settings().eval_timeout_s
                     try:
-                        log_event(
-                            "视频准备",
-                            "校验视频并分析场景",
-                            details={"视频路径": item_dict.get("video_path")},
-                            progress=3,
-                            progress_message="正在校验视频并分析场景",
-                        )
-                        if rich_profile is None:
-                            raise ValueError("缺少 rich_content 视觉模式配置")
-                        prepare_call = (
-                            prepare_session_visual_compare_item
-                            if task.mode == "compare"
-                            else prepare_session_rich_content_item
-                        )
-                        prepared = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                prepare_call,
-                                item_dict,
-                                session_name=task.session_name,
-                                item_index=idx,
-                                total_items=len(task.items),
-                                profile=rich_profile,
+                        if attempt:
+                            log_event(
+                                "单题评测",
+                                "开始外层重试",
+                                level=logging.WARNING,
+                                details={"请求次数": f"{attempt + 1}/2"},
+                                progress=15,
+                                progress_message="正在重新执行单题评测",
+                            )
+                        res = await asyncio.wait_for(
+                            _eval_one(
+                                task.mode, idx, item_dict,
+                                rich_judges=rich_judges,
+                                compare_judges=compare_judges,
+                                category_display=category_display,
                             ),
-                            timeout=float(runtime_options.get("video_prepare_timeout_s") or 300),
+                            timeout=eval_timeout,
                         )
-                        item_dict.clear()
-                        item_dict.update(prepared)
-                        _persist_task(task)
-                        _frame_dir = ""
-                        if item_dict.get("frames"):
-                            _frame_dir = str(Path(item_dict["frames"][0]).parent)
-                        elif item_dict.get("frames1"):
-                            _frame_dir = str(Path(item_dict["frames1"][0]).parent)
+                        break
+                    except asyncio.TimeoutError:
+                        last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
                         log_event(
-                            "视频准备",
-                            "关键帧提取完成",
-                            details={
-                                "关键帧数": item_dict.get("frame_count"),
-                                "抽帧目录": _frame_dir,
-                            },
-                            progress=12,
-                            progress_message=f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
+                            "单题评测",
+                            "超时",
+                            level=logging.ERROR,
+                            details=error_details(last_error),
                         )
+                        break
                     except Exception as e:
                         last_error = e
+                        retryable = is_retriable_llm_error(e)
+                        will_retry = attempt == 0 and retryable
                         log_event(
-                            "视频准备",
-                            "失败",
-                            level=logging.ERROR,
-                            details=error_details(e),
-                            progress=12,
-                            progress_message="视频校验或抽帧失败",
-                            progress_status="error",
+                            "单题评测",
+                            "失败，准备重试" if will_retry else "最终失败",
+                            level=logging.WARNING if will_retry else logging.ERROR,
+                            details={
+                                "请求次数": f"{attempt + 1}/2",
+                                "可重试": retryable,
+                                **error_details(e),
+                            },
                         )
-                if last_error is None:
-                    for attempt in range(2):
-                        try:
-                            if attempt:
-                                log_event(
-                                    "单题评测",
-                                    "开始外层重试",
-                                    level=logging.WARNING,
-                                    details={"请求次数": f"{attempt + 1}/2"},
-                                    progress=15,
-                                    progress_message="正在重新执行单题评测",
-                                )
-                            res = await asyncio.wait_for(
-                                _eval_one(
-                                    task.mode, idx, item_dict,
-                                    rich_judges=rich_judges,
-                                    compare_judges=compare_judges,
-                                    category_display=category_display,
-                                ),
-                                timeout=eval_timeout,
-                            )
-                            break
-                        except asyncio.TimeoutError:
-                            last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
-                            log_event(
-                                "单题评测",
-                                "超时",
-                                level=logging.ERROR,
-                                details=error_details(last_error),
-                            )
-                            break
-                        except Exception as e:
-                            last_error = e
-                            retryable = is_retriable_llm_error(e)
-                            will_retry = attempt == 0 and retryable
-                            log_event(
-                                "单题评测",
-                                "失败，准备重试" if will_retry else "最终失败",
-                                level=logging.WARNING if will_retry else logging.ERROR,
-                                details={
-                                    "请求次数": f"{attempt + 1}/2",
-                                    "可重试": retryable,
-                                    **error_details(e),
-                                },
-                            )
-                            if will_retry:
-                                await asyncio.sleep(1.0)
-                                continue
-                            break
-                if res is None:
-                    res = {
-                        "index": idx,
-                        "item_id": item_id,
-                        "query": item_dict.get("query", ""),
-                        "error": f"{type(last_error).__name__}: {last_error}",
-                    }
-                    if item_dict.get("context"):
-                        res["context"] = item_dict["context"]
-                    _write_eval_error(
-                        task.id,
-                        idx,
-                        item_dict,
-                        last_error,
-                        request_id=request_id,
-                    )
+                        if will_retry:
+                            await asyncio.sleep(0.7)  # 与模型调用层的固定重试间隔一致
+                            continue
+                        break
+            if res is None:
+                res = {
+                    "index": idx,
+                    "item_id": item_id,
+                    "query": item_dict.get("query", ""),
+                    "error": f"{type(last_error).__name__}: {last_error}",
+                }
+                if item_dict.get("context"):
+                    res["context"] = item_dict["context"]
+                _write_eval_error(
+                    task.id,
+                    idx,
+                    item_dict,
+                    last_error,
+                    request_id=request_id,
+                )
             res["index"] = idx
             if pending_judge_traces:
                 await asyncio.to_thread(
@@ -413,7 +433,44 @@ def _make_item_evaluator(
             await finish(idx, res, started)
             return res
 
-    return one, clients
+    async def fail(idx: int, item_dict: dict, reason: str) -> dict:
+        """连坐失败：组内前序轮次失败后，为剩余轮次落一条 error 结果。
+
+        结果形状与 one() 失败路径一致（index/item_id/query/error），走同一个
+        finish 回调落结果、发 result 事件、持久化；进度侧发一条 error 事件，
+        SSE 逐题进度即时可见。根因轮已写过 eval_errors.jsonl，这里不再重复。
+        """
+        request_id = make_request_id(task.created_at, task.id, idx)
+        item_id = item_dict.get("id") or f"q{idx}"
+        with bind_chain_context(
+            task_id=task.id,
+            session_name=task.session_name,
+            request_id=request_id,
+            item_id=item_id,
+            item_index=idx,
+            progress_callback=_progress_publisher(idx),
+        ):
+            log_event(
+                "会话",
+                "跳过评测",
+                level=logging.WARNING,
+                details={"原因": reason},
+                progress=100,
+                progress_message=reason,
+                progress_status="error",
+            )
+            res = {
+                "index": idx,
+                "item_id": item_id,
+                "query": item_dict.get("query", ""),
+                "error": reason,
+            }
+            if item_dict.get("context"):
+                res["context"] = item_dict["context"]
+            await finish(idx, res, time.perf_counter())
+            return res
+
+    return one, fail, clients
 
 
 async def _aclose_judge_clients(clients: list[JudgeClient]) -> None:
@@ -425,10 +482,12 @@ async def _aclose_judge_clients(clients: list[JudgeClient]) -> None:
 
 
 async def _run(task: Task, cfg: AppConfig) -> None:
-    one, clients = _make_item_evaluator(task, cfg)
+    one, fail, clients = _make_item_evaluator(task, cfg)
 
     # 多轮垂域视觉评测：同一 session_group 的各轮按 turn_index 串行评测，
-    # 评完一轮即生成 ≤120 字总结并注入下一轮 context（会话间/独立项仍并发）。
+    # 评完一轮即生成 ≤120 字总结并注入下一轮 context。调度单位是「整组」或
+    # 「独立题」，在全局 EVAL_LIMITER 上排队（跨任务共享并发上限）；整组占
+    # 一个槽跑完全部轮次，后续轮次不再重新排队（不会被排到队尾）。
     # session_group 由 parse_csv 据 is_start/is_end 切组赋值，与上游 session_id 列无关。
     sessions: dict[str, list[int]] = {}
     standalone: list[int] = []
@@ -443,7 +502,9 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 
     async def run_session(idxs: list[int]) -> None:
         """组内按轮次串行：把前序各轮总结累积写进当前轮 context 后再评测。
-        总结直接取评测调用顺带产出的 turn_summary 字段，不再单独调用模型总结。"""
+        总结直接取评测调用顺带产出的 turn_summary 字段，不再单独调用模型总结。
+        任一轮失败即连坐：缺一轮信息的后续评测不可信，剩余轮次直接落
+        「同组前序轮次失败」结果并提前终止（session 槽位随之释放）。"""
         prior_summary = ""
         for turn_no, idx in enumerate(idxs, 1):
             it = task.items[idx]
@@ -455,20 +516,31 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                     else f"历史对话总结：\n{prior_summary}"
                 )
             res = await one(idx, it)
+            if res.get("error") and turn_no < len(idxs):
+                reason = f"同组前序轮次失败：{res['error']}"
+                for later_idx in idxs[turn_no:]:
+                    await fail(later_idx, task.items[later_idx], reason)
+                return
             if turn_no == len(idxs):
                 continue  # 最后一轮总结无人消费，跳过
-            if res and not res.get("error"):
-                summary = (res.get("turn_summary") or "").strip()
-                prior_summary += (
-                    f"【第{turn_no}轮】{summary}\n"
-                    if summary
-                    else f"【第{turn_no}轮】（未生成总结）\n"
-                )
-            else:
-                prior_summary += f"【第{turn_no}轮】（评测未产出结果）\n"
+            summary = (res.get("turn_summary") or "").strip()
+            prior_summary += (
+                f"【第{turn_no}轮】{summary}\n"
+                if summary
+                else f"【第{turn_no}轮】（未生成总结）\n"
+            )
 
-    coros = [run_session(idxs) for idxs in sessions.values()]
-    coros += [one(i, task.items[i]) for i in standalone]
+    async def _session_job(idxs: list[int]) -> None:
+        # 整组独占一个全局并发槽：轮次背靠背执行，不与其他组/独立题交错排队
+        async with EVAL_LIMITER:
+            await run_session(idxs)
+
+    async def _standalone_job(i: int) -> None:
+        async with EVAL_LIMITER:
+            await one(i, task.items[i])
+
+    coros = [_session_job(idxs) for idxs in sessions.values()]
+    coros += [_standalone_job(i) for i in standalone]
     try:
         await asyncio.gather(*coros)
     finally:
@@ -487,6 +559,132 @@ def spawn_background(coro: Awaitable[None]) -> asyncio.Task:
     return t
 
 
+# ── 手动重跑 ────────────────────────────────────────────────────────────────
+# 调度单位与 _run 相同：整组（rich_content 且带 session_group）或独立题；
+# 选择驱动：每组从首个选中轮切到组尾，复用前序轮的 turn_summary 重建总结链。
+
+# 视频预处理 / UI 提交写入 item 的运行时键；重跑副本剔除后强制重抽帧
+# （与 merge_items_by_id 的整字典替换语义一致）
+_RUNTIME_ITEM_KEYS = {
+    "frames", "frames1", "frames2", "frame_count", "media", "video_name",
+    "duration", "duration1", "duration2", "video1_path", "video2_path",
+}
+# run_session / 更新批注入历史总结所用的标记；重跑副本剥离上次注入的块，防止跨次累积
+_SUMMARY_MARKER = "\n\n历史对话总结：\n"
+_SUMMARY_MARKER_FLAT = "历史对话总结：\n"
+
+
+def _strip_injected_summary(context: str) -> str:
+    """剥掉上一次运行注入的「历史对话总结」块，还原原始 context。
+
+    注入格式见 run_session / _run_update_batch_body：base 非空时为
+    "{base}\\n\\n历史对话总结：\\n{链}"，base 为空时直接以标记开头。取首次
+    出现位置截断即可幂等还原（多次注入只会叠在首次标记之后）。边界：用户
+    context 恰含该字面量会被误截，属可接受的病态场景。
+    """
+    pos = context.find(_SUMMARY_MARKER)
+    if pos != -1:
+        return context[:pos].rstrip()
+    if context.startswith(_SUMMARY_MARKER_FLAT):
+        return ""
+    return context
+
+
+def _latest_result_by_index(task: Task) -> dict[int, dict]:
+    """index → 最新一条结果（正向一趟后写覆盖，与 upsert_result_by_index 一致）。"""
+    latest: dict[int, dict] = {}
+    for r in task.results:
+        idx = r.get("index")
+        if isinstance(idx, int):
+            latest[idx] = r
+    return latest
+
+
+def _rerun_item_copy(item: dict) -> dict:
+    """重跑用 item 副本：剔除运行时键（强制重抽帧），剥离上次注入的历史总结块。
+
+    必须传副本而非 task.items[i] 本体——one() 的视频预处理 clear()+update()
+    与批体的 context 注入都是原地变更，直接传会污染 task.items 并随快照落盘。
+    """
+    copy = {k: v for k, v in item.items() if k not in _RUNTIME_ITEM_KEYS}
+    context = _strip_injected_summary(copy.get("context") or "")
+    if context:
+        copy["context"] = context
+    else:
+        copy.pop("context", None)
+    return copy
+
+
+@dataclass
+class RerunBatch:
+    """一个重跑批：batch 为 (index, 干净 item 副本) 列表，顺序即轮次顺序。"""
+
+    batch: list[tuple[int, dict]]
+    initial_summary: str  # 复用前序轮总结重建的种子总结链
+    initial_turn: int     # 种子链覆盖的前缀轮数；批内轮次编号从 initial_turn+1 接续
+    group: str            # 组名 / standalone:{index}
+
+
+def build_rerun_batches(task: Task, indexes: list[int]) -> list[RerunBatch]:
+    """把选中的 item index 展开为重跑批（组展开/切片规则的服务端权威实现）。
+
+    选择驱动、不限失败项：成功/失败/未评估条目均可重跑。组展开与 _run 一致：
+    rich_content 且带 session_group 的进组，其余为独立题。每个被选中的组从
+    首个「选中」轮切到组尾（后轮依赖前轮重评后的新总结，必须连着重跑）；
+    切片前缀的结果不动，其 turn_summary 重建为种子总结链在批内接着注入。
+    独立题选中即单题批。返回 batches（每个选中组/独立题恰一批）。
+    """
+    latest = _latest_result_by_index(task)
+
+    selected = {i for i in indexes if isinstance(i, int)}
+
+    # 与 _run 相同的分组规则：组名 → 组内全部 index（按 turn_index 排序）
+    sessions: dict[str, list[int]] = {}
+    standalone_selected: list[int] = []
+    for i, it in enumerate(task.items):
+        grp = it.get("session_group")
+        if task.mode == "rich_content" and grp:
+            sessions.setdefault(str(grp), []).append(i)
+        elif i in selected:
+            standalone_selected.append(i)
+    for idxs in sessions.values():
+        idxs.sort(key=lambda i: task.items[i].get("turn_index", 0))
+
+    batches: list[RerunBatch] = []
+    for grp, idxs in sessions.items():
+        first_sel = next((p for p, i in enumerate(idxs) if i in selected), None)
+        if first_sel is None:
+            continue
+        initial_summary = ""
+        for pos, i in enumerate(idxs[:first_sel], 1):
+            summary = (latest[i].get("turn_summary") or "").strip() if i in latest else ""
+            initial_summary += (
+                f"【第{pos}轮】{summary}\n"
+                if summary
+                else f"【第{pos}轮】（未生成总结）\n"
+            )
+        batches.append(RerunBatch(
+            batch=[(i, _rerun_item_copy(task.items[i])) for i in idxs[first_sel:]],
+            initial_summary=initial_summary,
+            initial_turn=first_sel,
+            group=grp,
+        ))
+    for i in standalone_selected:
+        batches.append(RerunBatch(
+            batch=[(i, _rerun_item_copy(task.items[i]))],
+            initial_summary="",
+            initial_turn=0,
+            group=f"standalone:{i}",
+        ))
+    return batches
+
+
+def _all_items_healthy(task: Task) -> bool:
+    """每个 item index 的最新结果都存在且无 error（latest-wins 语义）。"""
+    latest = _latest_result_by_index(task)
+    return all(i in latest and not latest[i].get("error") for i in range(len(task.items)))
+
+
 async def _run_update_batch_body(
     task: Task,
     cfg: AppConfig,
@@ -494,6 +692,8 @@ async def _run_update_batch_body(
     *,
     options: dict,
     manage_status: bool = False,
+    initial_summary: str = "",
+    initial_turn: int = 0,
 ) -> None:
     """后台更新批：batch 内全部条目按提交顺序作为一个串行会话评测；
     每题结果按 index 原地覆盖/追加（后完成者赢），全量重算 summary 并落快照。
@@ -501,6 +701,10 @@ async def _run_update_batch_body(
     不做任务级状态迁移、不动 done_total、不发 start 事件；manage_status=True
     仅供"本接口新建的任务"使用（否则任务永远停在 pending，重启后会被
     get_task 误判为服务中断，且已连接的 SSE 流收不到终态）。
+
+    initial_summary/initial_turn 供失败重跑使用：种子总结链（前序好轮复用）
+    及其覆盖的前缀轮数，批内轮次编号从 initial_turn+1 接续编，避免重跑批
+    从 1 重开导致总结链出现重复的【第1轮】标签。
     """
     async def _merge_on_result(idx: int, res: dict, started: float) -> None:
         action = upsert_result_by_index(task, res)
@@ -527,7 +731,7 @@ async def _run_update_batch_body(
         )
         _persist_task(task)
 
-    one, clients = _make_item_evaluator(
+    one, fail, clients = _make_item_evaluator(
         task, cfg, options=options, on_result=_merge_on_result
     )
     if manage_status:
@@ -535,34 +739,40 @@ async def _run_update_batch_body(
         _persist_task(task, force=True)
     current: tuple[int, dict] | None = None
     try:
-        # 整批一个串行会话：前轮总结在批次内本地链式注入，
-        # 不从 task.results 读回，不受并行批次覆盖影响。
-        prior_summary = ""
-        for turn_no, (idx, item_dict) in enumerate(batch, 1):
-            current = (idx, item_dict)
-            if prior_summary:
-                base_ctx = (item_dict.get("context") or "").strip()
-                item_dict["context"] = (
-                    f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
-                    if base_ctx
-                    else f"历史对话总结：\n{prior_summary}"
-                )
-            task.in_flight_indexes.add(idx)
-            try:
-                res = await one(idx, item_dict)
-            finally:
-                task.in_flight_indexes.discard(idx)
-            if turn_no == len(batch):
-                continue  # 最后一轮总结无人消费，跳过
-            if res and not res.get("error"):
+        # 整批一个串行会话：占一个全局并发槽跑完整批（跨任务共享上限）；
+        # 前轮总结在批次内本地链式注入，不从 task.results 读回，
+        # 不受并行批次覆盖影响。任一轮失败即连坐：剩余条目直接落
+        # 「同组前序轮次失败」结果并提前终止（槽位随之释放）。
+        async with EVAL_LIMITER:
+            prior_summary = initial_summary
+            for pos, (idx, item_dict) in enumerate(batch, 1):
+                turn_no = pos + initial_turn  # 总结链编号延续原组轮次
+                current = (idx, item_dict)
+                if prior_summary:
+                    base_ctx = (item_dict.get("context") or "").strip()
+                    item_dict["context"] = (
+                        f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
+                        if base_ctx
+                        else f"历史对话总结：\n{prior_summary}"
+                    )
+                task.in_flight_indexes.add(idx)
+                try:
+                    res = await one(idx, item_dict)
+                finally:
+                    task.in_flight_indexes.discard(idx)
+                if res.get("error") and pos < len(batch):
+                    reason = f"同组前序轮次失败：{res['error']}"
+                    for later_idx, later_item in batch[pos:]:
+                        await fail(later_idx, later_item, reason)
+                    break
+                if pos == len(batch):
+                    continue  # 最后一轮总结无人消费，跳过
                 summary = (res.get("turn_summary") or "").strip()
                 prior_summary += (
                     f"【第{turn_no}轮】{summary}\n"
                     if summary
                     else f"【第{turn_no}轮】（未生成总结）\n"
                 )
-            else:
-                prior_summary += f"【第{turn_no}轮】（评测未产出结果）\n"
         if manage_status:
             task.status = "done"
             task.summary = _summarize(task)  # publish 前重算（节流后不再每题重算）
@@ -592,6 +802,8 @@ async def run_update_batch(
     *,
     options: dict,
     manage_status: bool = False,
+    initial_summary: str = "",
+    initial_turn: int = 0,
 ) -> None:
     """后台更新批公共入口（实现见 _run_update_batch_body）。
 
@@ -601,12 +813,19 @@ async def run_update_batch(
     """
     try:
         await _run_update_batch_body(
-            task, cfg, batch, options=options, manage_status=manage_status
+            task, cfg, batch, options=options, manage_status=manage_status,
+            initial_summary=initial_summary, initial_turn=initial_turn,
         )
     finally:
         task.active_runs -= 1
         idle = task.active_runs <= 0
         interrupted = _mark_interrupted_if_stuck(task) if idle else False
+        if idle and not manage_status and task.status == "error" and _all_items_healthy(task):
+            # 重跑修复全部坏项：error 任务 heal 为 done，让下方 R4 补发
+            # done+新 summary；否则中断过的任务重跑成功后仍挂着 error 终态。
+            # manage_status 批的终态由 body 自己发过，不在 heal 范围内。
+            task.status = "done"
+            task.error = None
         _persist_task(task, force=True)  # 退休前最后一次落盘，磁盘先于内存下线
         if idle and not manage_status and not interrupted and task.status in {"done", "error"}:
             # R4：manage_status=False 的批不发 start/done 终态事件，SSE 订阅者

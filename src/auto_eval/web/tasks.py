@@ -150,15 +150,23 @@ def merge_items_by_id(
 
 
 def upsert_result_by_index(task: Task, res: dict) -> str:
-    """按 res["index"] 从后往前找同 index 旧结果并整体替换；找不到则追加。
-    从后往前保证命中"最近一次"写入（历史里可能存在同 index 重复条目）。
+    """按 res["index"] upsert：同 index 旧结果原位整体替换；没有则按 index
+    升序插入。维护「每 index 单行、按输入顺序排列」的结果表——并发完成
+    乱序到达也会落成输入顺序，快照 / 历史详情 / SSE 回放 / 前端展示同源。
     返回 "replaced" | "appended"。"""
     idx = res.get("index")
-    for pos in range(len(task.results) - 1, -1, -1):
-        if task.results[pos].get("index") == idx:
-            task.results[pos] = res
-            return "replaced"
-    task.results.append(res)
+    if isinstance(idx, int):
+        # 从后往前命中"最近一次"写入（legacy 快照可能存在同 index 重复条目）
+        for pos in range(len(task.results) - 1, -1, -1):
+            if task.results[pos].get("index") == idx:
+                task.results[pos] = res
+                return "replaced"
+        for pos, row in enumerate(task.results):
+            old = row.get("index")
+            if isinstance(old, int) and old > idx:
+                task.results.insert(pos, res)
+                return "appended"
+    task.results.append(res)  # 无 index 或排在全部现有行之后
     return "appended"
 
 
