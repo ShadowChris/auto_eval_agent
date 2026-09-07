@@ -18,10 +18,8 @@ logger = logging.getLogger("auto_eval.classify")
 from .base import JudgeClient, JudgeOutputParseError
 from .operation_fields import (
     QUERY_ALIGNMENT_ISSUE,
-    format_operation_route_rationale,
     hoist_misnested_operation_fields,
     normalize_operation_fields,
-    normalize_operation_routes,
 )
 from .prompts import (
     OPERATION_MULTI_USER,
@@ -127,11 +125,6 @@ def _operation_score_from_data(
         task_type,
         policy.issue_types if policy else None,
     )
-    execution_routes, route_evidence, route_status = normalize_operation_routes(
-        data.get("execution_routes"),
-        data.get("route_evidence"),
-        data.get("route_status"),
-    )
     if QUERY_ALIGNMENT_ISSUE in issue_types:
         rubric = {}
         rubric_reasons = {}
@@ -152,12 +145,11 @@ def _operation_score_from_data(
         issue_types=issue_types,
         is_low_level=is_low_level,
         rationale=data.get("rationale", ""),
-        execution_routes=execution_routes,
-        route_evidence=route_evidence,
-        route_rationale=format_operation_route_rationale(
-            execution_routes, data.get("route_rationale")
-        ),
-        route_status=route_status,
+        # 旧链路字段仅保留在 Schema 中兼容历史结果；当前主裁判不再生成它们。
+        execution_routes=[],
+        route_evidence=[],
+        route_rationale="",
+        route_status="insufficient_evidence",
         analysis=analysis,
         used_search=reply.used_search,
         tool_trace=reply.tool_trace,

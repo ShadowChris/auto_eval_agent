@@ -828,6 +828,12 @@ createApp({
       const queryImageCols = results.value.some((r) => Number(r.query_image_count || 0) > 0)
         ? [{ key: "query_image_count", label: "用户图片" }]
         : [];
+      // 新评估不再生成链路字段；仅在打开含旧链路结果的历史任务时展示兼容列。
+      const routeCols = results.value.some((r) =>
+        (Array.isArray(r.execution_routes) && r.execution_routes.length)
+        || ["detected", "uncertain"].includes(r.route_status))
+        ? [{ key: "execution_routes", label: "执行链路" }]
+        : [];
       if (mode.value === "compare")
         return [
           { key: "query", label: "题目" },
@@ -845,7 +851,7 @@ createApp({
           { key: "query", label: "操作意图" },
           ...queryImageCols,
           ...contextCols,
-          { key: "execution_routes", label: "执行链路" },
+          ...routeCols,
           { key: "correctness", label: "完成判定" },
           { key: "issue_types", label: "问题类型" },
           { key: "is_low_level", label: "是否低级" },

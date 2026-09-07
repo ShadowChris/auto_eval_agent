@@ -182,18 +182,6 @@ OPERATION_SYSTEM = Template(
 - {{ rule }}
 {% endfor %}
 
-{% if policy.route_policy %}
-【执行链路识别（独立观察字段）】
-{% for key, route in policy.route_policy.routes.items() -%}
-- {{ key }}（{{ route.name }}）：{{ route.description }}
-  正向视觉特征：{{ route.positive_cues | join("；") }}
-  排除：{{ route.exclusions | join("；") }}
-{% endfor %}
-{% for rule in policy.route_policy.rules -%}
-- {{ rule }}
-{% endfor %}
-{% endif %}
-
 【条件任务】
 {% for rule in policy.conditional_rules -%}
 - {{ rule }}
@@ -246,9 +234,9 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 2. 【逐组目标状态】每个 group_id 分别核验 Query，并将每个目标归为已完成、等待用户、缺少前置条件、未执行、结果错误或证据不足；每项引用该组局部帧证据。不得合并组间证据。
 3. 【逐组最终映射】依据上述目标状态和既定判定顺序，分别输出 correctness、主要 issue_type 和结论。到达必须由用户本人完成的登录、授权、身份验证或敏感操作环节，不得判 ok；正确触发且仍在等待用户时判 no_support。
 最后输出一行 JSON：顶层只能包含 results；results 必须覆盖用户消息列出的每个 group_id 且不得增加其他组。
-每组对象的字段与单组任务类结果完全一致；evidence_frames 和 route_evidence.evidence_frames 使用该组内部从 1 开始的局部帧序号：
+每组对象的字段与单组任务类结果完全一致；证据帧序号使用该组内部从 1 开始的局部帧序号：
 特别注意：rubric 对象只包含下列维度；写 total、correctness、issue_types 等组级字段前必须先用 `}` 完整关闭 rubric。
-{"results":[{% raw %}{"group_id":"<用户消息中的group_id>","task_type":"simple|complex","rubric":{% endraw %}{ {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }{% raw %},"total":<适用维度加权总分或null>,"correctness":"ok|nok|no_support|others","issue_types":["<受控中文问题类型>"],"is_low_level":"yes|no","rationale":"<完整判定理由>","execution_routes":["fast_system|skill|jarvis|other"],"route_evidence":[{"route":"fast_system|skill|jarvis|other","evidence_frames":[1],"evidence":"<视觉依据>","confidence":0.0}],"route_rationale":"<链路说明>","route_status":"detected|uncertain|insufficient_evidence"}{% endraw %}{% raw %}]}{% endraw %}
+{"results":[{% raw %}{"group_id":"<用户消息中的group_id>","task_type":"simple|complex","rubric":{% endraw %}{ {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }{% raw %},"total":<适用维度加权总分或null>,"correctness":"ok|nok|no_support|others","issue_types":["<受控中文问题类型>"],"is_low_level":"yes|no","rationale":"<完整判定理由>"}{% endraw %}{% raw %}]}{% endraw %}
 {% else %}
 先输出 <analysis>...</analysis>，再输出一行 JSON。rubric 的 key 必须严格使用维度名；不适用维度填 null：
 <analysis>
@@ -261,12 +249,9 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 7. 【阻塞资格表】若考虑等待用户或缺少前置条件，必须逐项写明：A. 用户必须补充的信息或完成的具体动作；B. 为什么这是继续原任务不可替代的条件，而不是让用户选择 agent 的搜索、导航、工具或补救策略；C. 最后有效状态中该阻塞是否仍未解除；D. 阻塞前是否已有足以独立导致失败的可见错误。只有 A/B/C 成立且 D 为否，才允许判 no_support。“需要我继续到设置中查找吗”“换关键词、换入口还是上报”等都是恢复策略询问，不是必要澄清；专家经验确认能力存在时，找不到入口也不能改判等待用户。复杂任务若在当前步骤进入真实必要的澄清并停止整条串行任务流，后续尚未开始的目标属于中断后果，不单独判遗漏。
 8. 【时序与强制映射】录屏停在登录、授权或身份验证页面，同时出现明确用户接管指引或“本次任务超时/终止”反馈时，可以归为缺少前置条件。只有普通登录入口或登录页面、三路证据均无澄清提示、agent 最终回答为空、没有等待反馈且流程静默停止时，才归为三方应用跳转中断。用户实际答复、选择、确认、完成登录授权，或后续画面进入应用内容、搜索结果、商品详情等阻塞后的执行页面时，旧阻塞立即解除；解除后必须重新评价剩余目标，即使后续执行错误或不完整。仅返回桌面或助手界面不算解除。
 9. 【结果证据专项】若目标要求播放，结果卡、详情卡、播放按钮和流程“已完成”都不证明已经播放；必须检查播放器、进度、暂停按钮或同等直接播放状态。
-{% if policy.route_policy %}10. 【执行链路】独立识别快系统、skill、贾维斯、其他链路；按首次出现顺序记录 execution_routes，并为每种链路给出帧序号、视觉依据和置信度。无法判断时输出空数组和 insufficient_evidence。链路识别不得参与 correctness 判断。
-11. 【最终结论】汇总 correctness、issue_types 与 is_low_level。标记回复与界面不一致前，必须引用冲突的具体 agent 自然语言回复；不要让 issue type 或执行链路反向覆盖已经确认的根因。
-{% else %}10. 【最终结论】汇总 correctness、issue_types 与 is_low_level。标记回复与界面不一致前，必须引用冲突的具体 agent 自然语言回复；不要让 issue type 反向覆盖已经确认的根因。
-{% endif %}
+10. 【最终结论】汇总 correctness、issue_types 与 is_low_level。标记回复与界面不一致前，必须引用冲突的具体 agent 自然语言回复；不要让 issue type 反向覆盖已经确认的根因。
 </analysis>
-{"task_type": "simple|complex", "rubric": { {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分；全部不适用填null>, "correctness": "ok|nok|no_support|others", "issue_types": ["<受控中文问题类型>"], "is_low_level": "yes|no", "rationale": "<任务形态 + 生效目标 + 最终状态 + 整体步骤证据 + 自述一致性 + 判定理由>"{% if policy.route_policy %}, "execution_routes": ["fast_system|skill|jarvis|other，按首次出现顺序，多标签"], "route_evidence": [{"route": "fast_system|skill|jarvis|other", "evidence_frames": [<帧序号>], "evidence": "<只描述链路视觉依据，不评价任务成败>", "confidence": <0-1>}], "route_rationale": "<一句话说明识别到的链路及出现顺序；无法判断时说明原因>", "route_status": "detected|uncertain|insufficient_evidence"{% endif %}}
+{"task_type": "simple|complex", "rubric": { {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分；全部不适用填null>, "correctness": "ok|nok|no_support|others", "issue_types": ["<受控中文问题类型>"], "is_low_level": "yes|no", "rationale": "<任务形态 + 生效目标 + 最终状态 + 整体步骤证据 + 自述一致性 + 判定理由>"}
 {% endif %}
 """
 )

@@ -686,7 +686,7 @@
               <template v-if="multiGroupResult(result,group.group_id)">
                 <div><strong>correctness：</strong>{{ multiGroupResult(result,group.group_id).correctness || '—' }}</div>
                 <div><strong>issue_types：</strong>{{ displayArray(multiGroupResult(result,group.group_id).issue_types) }}</div>
-                <div><strong>执行链路：</strong>{{ displayArray(multiGroupResult(result,group.group_id).execution_routes) }}</div>
+                <div v-if="(multiGroupResult(result,group.group_id).execution_routes || []).length"><strong>执行链路：</strong>{{ displayArray(multiGroupResult(result,group.group_id).execution_routes) }}</div>
                 <div><strong>rationale：</strong>{{ multiGroupResult(result,group.group_id).rationale || '—' }}</div>
                 <div class="hint">图片 {{ multiGroupResult(result,group.group_id).submitted_image_count || 0 }} 张 · 模型耗时 {{ multiGroupResult(result,group.group_id).latency_s!=null ? formatProgressElapsed(multiGroupResult(result,group.group_id).latency_s) : '—' }} · {{ multiGroupResult(result,group.group_id).evaluation_status || 'pending' }}</div>
                 <div class="err" v-if="multiGroupResult(result,group.group_id).error">{{ multiGroupResult(result,group.group_id).error }}</div>
