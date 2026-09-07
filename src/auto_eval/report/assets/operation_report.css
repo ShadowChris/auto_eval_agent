@@ -39,6 +39,7 @@
 .operation-report .or-stack{display:flex;height:32px;border-radius:4px;overflow:hidden;background:var(--or-bg)}
 .operation-report .or-stack span{display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-variant-numeric:tabular-nums}
 .operation-report .or-issue-rows{display:grid;gap:4px}
+.operation-report .or-issue-scroll{max-height:520px;overflow-y:auto;overscroll-behavior:contain;padding-right:4px;scrollbar-gutter:stable}
 .operation-report .or-issue-bar{display:grid;grid-template-columns:minmax(90px,140px) minmax(45px,1fr) 98px;gap:8px;align-items:center;width:100%;border:0;background:transparent;padding:7px 5px;text-align:left;font-size:12px}
 .operation-report .or-issue-bar[aria-pressed=true]{background:var(--or-soft)}
 .operation-report .or-track{height:12px;background:#f1f5f9;position:relative;border-radius:2px}
@@ -74,4 +75,4 @@
 .operation-report .or-hint{margin-top:12px}
 @media(max-width:900px){.operation-report .or-panels{grid-template-columns:1fr}.operation-report .or-chart{min-height:0}}
 @media(max-width:520px){.operation-report .or-summary{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.operation-report .or-metric,.operation-report .or-panel{padding:12px}.operation-report .or-metric-value{font-size:23px}.operation-report .or-issue-bar{grid-template-columns:100px minmax(25px,1fr) 78px;gap:5px;font-size:11px}.operation-report .or-radar-label{font-size:11px}}
-@media print{.operation-report button,.operation-report input,.operation-report select{display:none}.operation-report .or-panel{break-inside:avoid}.operation-report .or-table-wrap{overflow:visible}}
+@media print{.operation-report button,.operation-report input,.operation-report select{display:none}.operation-report .or-panel{break-inside:avoid}.operation-report .or-table-wrap,.operation-report .or-issue-scroll{overflow:visible;max-height:none}}

@@ -193,6 +193,9 @@ def test_comparison_html_and_live_report_share_statistics(monkeypatch, tmp_path)
     experiment["results"][1]["correctness"] = "ok"
     experiment["results"][1]["issue_types"] = []
     experiment["results"][0]["issue_types"] = ["内部过程信息泄露"]
+    # 覆盖超过 10 类的问题分布，确保离线报告可验证完整柱状图，而非只测 Top 10。
+    for index in range(2, 14):
+        experiment["results"][index]["issue_types"].append(f"扩展问题类型_{index:02d}")
     snapshots = {"control": source, "experiment": experiment}
     monkeypatch.setattr(server, "get_live_task", lambda _: None)
     monkeypatch.setattr(server, "load_snapshot", snapshots.get)
