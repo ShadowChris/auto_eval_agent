@@ -851,6 +851,7 @@ createApp({
           { key: "query", label: "操作意图" },
           ...queryImageCols,
           ...contextCols,
+          { key: "answer", label: "Agent 自述" },
           ...routeCols,
           { key: "correctness", label: "完成判定" },
           { key: "issue_types", label: "问题类型" },
@@ -1978,6 +1979,21 @@ createApp({
       if (c.key === "execution_routes") return r.route_rationale || "";
       return "";
     }
+    function operationResultAnswer(result) {
+      const direct = result?.answer;
+      if (direct != null && String(direct) !== "") return direct;
+      const index = Number(result?.index);
+      const indexedItem = Number.isInteger(index) ? items.value[index] : null;
+      const item = indexedItem || items.value.find((candidate) =>
+        String(candidate?.id || "") === String(result?.item_id || "")
+      );
+      return item?.answer
+        ?? item?.agent_statement
+        ?? item?.source_data?.agent_statement
+        ?? item?.source_data?.answer
+        ?? "";
+    }
+
     function cell(r, c) {
       const v = r[c.key];
       if (c.rubricDim) {
@@ -1985,6 +2001,7 @@ createApp({
         return r.rubric && r.rubric[c.rubricDim] != null ? r.rubric[c.rubricDim] : "";
       }
       if (c.key === "category") return r.category_display || (!v || v === "default" ? "通用" : v);
+      if (c.key === "answer" && mode.value === "operation") return operationResultAnswer(r);
       if (c.key === "agree") {
         if (v === undefined) return "";
         return v === true ? "✓ 一致" : v === false ? "✗ 不一致" : "?";
