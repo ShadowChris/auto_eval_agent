@@ -50,6 +50,8 @@ createApp({
     const progressJumpPage = ref("");
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
+    const historyPage = ref(1);
+    const historyJumpPage = ref("");
     const historyNoteDrafts = ref({});
     const historyNoteEditing = ref({});
     const loadingHistory = ref(false);
@@ -59,10 +61,14 @@ createApp({
     let activeEventSource = null;
     const pageSize = 10;
     const opPageSize = 5;
+    const historyPageSize = 10;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
     // 手动重跑：结果表行内勾选（index 数组，随翻页/筛选存活），提交走 /api/eval/rerun
     const rerunSelection = ref([]);
     const rerunSubmitting = ref(false);
+    // 重跑进行中：头部计数切「重跑中… k/N」（批内口径），并忽略无 batch
+    // 标记的 result 事件（全量跑/断线回放），避免把 k/N 打回旧值
+    const rerunMode = ref(false);
 
     const formatHint = computed(
       () =>
@@ -84,9 +90,11 @@ createApp({
 
     const progressRows = computed(() =>
       items.value.map((item, index) => {
-        const current = itemProgress.value[index] || {};
+        // 快照（历史加载）的 item_progress/progress_events 键是字符串（str(idx)），
+        // 实时事件是数字键——双键回落，历史任务的逐题进度不再全部显示「排队中」
+        const current = itemProgress.value[index] || itemProgress.value[String(index)] || {};
         const result = results.value.find((entry) => entry.index === index);
-        const events = progressEvents.value[index] || [];
+        const events = progressEvents.value[index] || progressEvents.value[String(index)] || [];
         const startedAt = Number(current.started_at || 0);
         const finishedAt = Number(current.finished_at || 0);
         const resultElapsed = Number(result?.latency_s);
@@ -390,7 +398,27 @@ createApp({
         rerunSelection.value = [];
         runError.value = "";
         running.value = true;
-        total.value = items.value.length || total.value;
+        rerunMode.value = true;
+        total.value = indexes.length;
+        progress.value = 0;
+        // 与 submit() 同形预置所选行 pending：mergeItemProgress 的 stage_rank
+        // 只前进、finished_at 一经设置就保留，不重置会永远停在上一轮「完成」。
+        // 与后端 reset_item_progress 互为幂等（SSE 回放也会推来 pending 态）。
+        const nextProgress = { ...itemProgress.value };
+        const nextEvents = { ...progressEvents.value };
+        indexes.forEach((index) => {
+          nextProgress[index] = {
+            item_index: index,
+            item_id: items.value[index]?.id || `q${index}`,
+            status: "pending",
+            percent: 0,
+            message: "排队中（重跑）",
+            stage_rank: 0,
+          };
+          delete nextEvents[index];
+        });
+        itemProgress.value = nextProgress;
+        progressEvents.value = nextEvents;
         connectSSE();
       } finally {
         rerunSubmitting.value = false;
@@ -586,6 +614,7 @@ createApp({
         result: [resultPage, pageCount, resultJumpPage],
         operation: [opPage, opPageCount, opJumpPage],
         progress: [progressPage, progressPageCount, progressJumpPage],
+        history: [historyPage, historyPageCount, historyJumpPage],
       };
       const config = configs[kind];
       if (!config || requestedPage === "" || requestedPage == null) return;
@@ -605,11 +634,15 @@ createApp({
     function changeProgressPage(delta) {
       setTablePage("progress", progressPage.value + delta);
     }
+    function changeHistoryPage(delta) {
+      setTablePage("history", historyPage.value + delta);
+    }
     function jumpTablePage(kind) {
       const jumpValues = {
         result: resultJumpPage.value,
         operation: opJumpPage.value,
         progress: progressJumpPage.value,
+        history: historyJumpPage.value,
       };
       setTablePage(kind, jumpValues[kind]);
     }
@@ -899,6 +932,7 @@ createApp({
         ])
       );
       running.value = true;
+      rerunMode.value = false; // 全量跑：计数器回到全量口径
       const body = {
         mode: mode.value,
         items: items.value,
@@ -1014,7 +1048,14 @@ createApp({
         const result = d.result;
         const index = result && result.index;
         upsertResultRow(result);
-        progress.value = d.progress;
+        // 重跑批次的 result 事件带 batch 标记：progress/total 为批内口径（k/N）；
+        // 无标记的是全量跑或断线回放的旧事件，重跑中忽略，避免 k/N 被打回旧值
+        if (d.batch) {
+          progress.value = d.progress;
+          total.value = d.total;
+        } else if (!rerunMode.value) {
+          progress.value = d.progress;
+        }
         if (index != null) {
           const previous = itemProgress.value[index] || {};
           itemProgress.value = {
@@ -1035,6 +1076,7 @@ createApp({
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
         resultPage.value = 1;
         running.value = false;
+        rerunMode.value = false;
         es.close();
         loadHistory();
       });
@@ -1047,6 +1089,7 @@ createApp({
           message = d.message || message;
         } catch (_) {}
         running.value = false;
+        rerunMode.value = false;
         es.close();
         await reconcileTaskAfterError(message);
         runError.value = "评估出错：" + message;
@@ -1132,6 +1175,15 @@ createApp({
       if (Number.isNaN(d.getTime())) return String(ts);
       return d.toLocaleString();
     }
+    // 历史记录分页：列表按创建时间倒序，刷新后回到第一页看最新
+    const historyPageCount = computed(() =>
+      Math.max(1, Math.ceil(historyItems.value.length / historyPageSize))
+    );
+    const pagedHistoryItems = computed(() => {
+      const page = Math.min(historyPage.value, historyPageCount.value);
+      const start = (page - 1) * historyPageSize;
+      return historyItems.value.slice(start, start + historyPageSize);
+    });
 
     async function loadHistory() {
       loadingHistory.value = true;
@@ -1139,6 +1191,8 @@ createApp({
         const r = await fetch("/api/history?limit=50");
         const d = await r.json();
         historyItems.value = d.items || [];
+        historyPage.value = 1;
+        historyJumpPage.value = "";
         historyNoteDrafts.value = Object.fromEntries(
           historyItems.value.map((item) => [item.task_id, item.note || ""]),
         );
@@ -1215,7 +1269,24 @@ createApp({
       summary.value = d.summary || null;
       total.value = items.value.length || results.value.length;
       progress.value = results.value.length;
-      running.value = false;
+      // 重跑/全量跑中途打开历史（active_runs>0）需重连 SSE 继续跟进：
+      // status 已是终态但仍有活动批 = 重跑进行中（重跑条目已被后端重置为
+      // pending，重连回放即重跑态）；status 仍 running/pending = 全量跑。
+      if ((d.active_runs || 0) > 0 || d.status === "running" || d.status === "pending") {
+        rerunMode.value = d.status !== "running" && d.status !== "pending";
+        if (rerunMode.value) {
+          const pendingCount = Object.values(d.item_progress || {}).filter(
+            (p) => p && p.status === "pending"
+          ).length;
+          progress.value = 0;
+          total.value = pendingCount || total.value;
+        }
+        running.value = true;
+        connectSSE();
+      } else {
+        running.value = false;
+        rerunMode.value = false;
+      }
       activeSkill.value = "";
       resultQuery.value = "";
       resultPage.value = 1;
@@ -1273,6 +1344,7 @@ createApp({
       running, progress, total, results, summary, taskId, runError,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
+      historyPage, historyPageSize, historyPageCount, pagedHistoryItems, historyJumpPage,
       opPage, opPageSize, opPageCount, opJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
@@ -1284,11 +1356,11 @@ createApp({
       switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, resetResultPage, changePage,
-      changeProgressPage, changeOpPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
+      changeProgressPage, changeOpPage, changeHistoryPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
       progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
       formatProgressElapsed, shortRequestId, copyRequestId,
-      rerunSelection, rerunSubmitting, toggleRerunIndex, failedRerunIndexes,
+      rerunSelection, rerunSubmitting, rerunMode, toggleRerunIndex, failedRerunIndexes,
       selectAllFailedRerun, clearRerunSelection, submitRerun,
       cellTooltip, showCellTooltip, scheduleHideCellTooltip, keepCellTooltip, hideCellTooltip,
     };

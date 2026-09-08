@@ -216,7 +216,6 @@ def _snapshot_meta_row(data: dict, path: Path) -> dict:
         "created_at": created_at,
         "updated_at": data.get("updated_at") or data.get("created_at"),
         "error": data.get("error"),
-        "preview": _preview(data),
         "meta_version": 1,
     }
 
@@ -260,6 +259,7 @@ def _load_meta_row(path: Path) -> dict | None:
         row = _snapshot_meta_row(data, path)
         _write_meta(path, row)
     row.pop("meta_version", None)  # 版本号只落侧车，响应形状与旧实现一致
+    row.pop("preview", None)  # 预览列已下线；旧侧车里残留的字段不再外发
     status, error = _apply_interrupted_status(row.get("status"), row.get("error"))
     row["status"] = status
     row["error"] = error
@@ -277,14 +277,6 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             rows.append(row)
     rows.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
     return rows[:limit]
-
-def _preview(data: dict) -> str:
-    items = data.get("items") or []
-    if not items:
-        return ""
-    q = str(items[0].get("query") or "")
-    return q[:80] + ("…" if len(q) > 80 else "")
-
 
 def _results_sorted_by_index(results: list[dict]) -> list[dict]:
     """结果行按 index 升序稳定排序（= 任务输入顺序）；无/非 int index 的行排末尾。

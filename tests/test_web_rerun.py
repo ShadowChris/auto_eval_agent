@@ -14,6 +14,10 @@ from test_web_scheduler import _patch_runner, _reset_scheduler_globals
 
 _CFG = load_config(Path("config"))
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+APP_JS = PROJECT_ROOT / "src/auto_eval/web/static/app.js"
+INDEX_HTML = PROJECT_ROOT / "src/auto_eval/web/static/index.html"
+
 
 def _task(groups: dict[str, int], *, standalone: int = 0, status: str = "done") -> Task:
     """构造带污染 context + 运行时键的 rich_content 任务（模拟跑过一轮后的状态）。"""
@@ -319,6 +323,131 @@ def test_snapshot_payload_sorts_legacy_results():
         ],
     })
     assert [r.get("index") for r in payload["results"]] == [0, 1, 2, None]
+
+
+# ---------- 重跑进度可见性：逐题进度重置 + 批次口径计数 ----------
+
+def test_reset_item_progress_resets_terminal_state():
+    """上一轮终态（done/100/事件序列）被清：回落「排队中（重跑）」并即时 fanout。"""
+    task = _task({"g1": 2})
+    task.item_progress["0"] = {
+        "status": "done", "percent": 100, "message": "评测完成", "sequence": 3,
+    }
+    task.progress_events["0"] = [
+        {"sequence": 1, "message": "a"},
+        {"sequence": 2, "message": "b"},
+        {"sequence": 3, "message": "评测完成"},
+    ]
+    task.item_progress["1"] = {"status": "error", "percent": 100, "message": "评测失败"}
+    q = task.subscribe()
+    try:
+        runner.reset_item_progress(task, [0])
+    finally:
+        task.unsubscribe(q)
+    row = task.item_progress["0"]
+    assert row["status"] == "pending"
+    assert row["percent"] == 0
+    assert row["message"] == "排队中（重跑）"
+    assert row["item_id"] == "g1_t1"
+    # 事件序列清空重开（从 sequence 1 起）
+    assert [e["sequence"] for e in task.progress_events["0"]] == [1]
+    assert task.progress_events["0"][0]["message"] == "排队中（重跑）"
+    # 未选中条目不动（仍是上一轮终态）
+    assert task.item_progress["1"]["status"] == "error"
+    # 重置即时 fanout：已连接的订阅者立刻看到重新排队
+    events = _drain_events(q)
+    assert events[-1]["event"] == "item_progress"
+    assert events[-1]["data"]["status"] == "pending"
+    assert events[-1]["data"]["message"] == "排队中（重跑）"
+
+
+async def test_rerun_endpoint_resets_progress_and_counts_batch_scope(monkeypatch):
+    """端到端：POST rerun 同步重置所选条目逐题进度；result 事件为批内口径
+    （progress=批内完成数、total=批大小、batch=True），不再是恒等于
+    len(task.results) 的全量口径。"""
+    task = _task({"g1": 3})
+    task.results = [
+        _result(0, task.items[0], turn_summary="s1"),
+        _result(1, task.items[1], error="ValueError: boom"),
+        _result(2, task.items[2], error="同组前序轮次失败：ValueError: boom"),
+    ]
+    # 上一轮终态残留
+    for idx in (1, 2):
+        task.item_progress[str(idx)] = {
+            "status": "error", "percent": 100, "message": "评测失败",
+        }
+        task.progress_events[str(idx)] = [{"sequence": 1, "message": "评测失败"}]
+
+    async def fake_eval_one(mode, idx, item, **kw):
+        return {
+            "index": idx,
+            "item_id": item.get("id"),
+            "query": item.get("query"),
+            "turn_summary": f"rerun-{idx}",
+        }
+
+    _patch_runner(monkeypatch, ResizableLimiter(4), fake_eval_one)
+    _patch_video_prep(monkeypatch)
+    TASKS[task.id] = task
+    old_cfg = server._state.get("cfg")
+    server._state["cfg"] = _CFG
+    q = task.subscribe()
+    try:
+        resp = await server.api_eval_rerun(
+            server.RerunReq(task_id=task.id, indexes=[1])
+        )
+        assert resp["rerun_indexes"] == [1, 2]
+        # 重置在 spawn 之前同步完成（spawn 的批有 0.05s 延迟）：
+        # 两个切片条目都回落 pending，事件序列重开
+        for idx in (1, 2):
+            assert task.item_progress[str(idx)]["status"] == "pending"
+            assert task.item_progress[str(idx)]["message"] == "排队中（重跑）"
+            assert [e["sequence"] for e in task.progress_events[str(idx)]] == [1]
+        await asyncio.gather(*list(runner._BACKGROUND_TASKS))
+        # result 事件：批内口径 1/2 → 2/2，带 batch 标记
+        result_payloads = [e["data"] for e in _drain_events(q) if e["event"] == "result"]
+        assert result_payloads == [
+            {"progress": 1, "total": 2, "batch": True, "result": task.results[1]},
+            {"progress": 2, "total": 2, "batch": True, "result": task.results[2]},
+        ]
+    finally:
+        task.unsubscribe(q)
+        TASKS.pop(task.id, None)
+        server._state["cfg"] = old_cfg
+        _reset_scheduler_globals()
+
+
+def test_history_detail_exposes_active_runs():
+    """历史详情带 active_runs：前端据此判断重跑/全量跑仍在进行、需重连 SSE。"""
+    task = _task({"g1": 1}, status="done")
+    task.active_runs = 2
+    TASKS[task.id] = task
+    try:
+        with TestClient(server.app) as client:
+            payload = client.get(f"/api/history/{task.id}").json()
+        assert payload["active_runs"] == 2
+    finally:
+        TASKS.pop(task.id, None)
+        _reset_scheduler_globals()
+
+
+def test_frontend_rerun_progress_static_asserts():
+    app_js = APP_JS.read_text(encoding="utf-8")
+    index_html = INDEX_HTML.read_text(encoding="utf-8")
+    # rerunMode 标志 + 提交重跑预置 pending 行（与后端重置互为幂等）
+    assert "const rerunMode = ref(false);" in app_js
+    assert 'message: "排队中（重跑）"' in app_js
+    # result 事件批次口径分支：重跑中忽略无 batch 标记的回放事件
+    assert "if (d.batch) {" in app_js
+    assert "else if (!rerunMode.value)" in app_js
+    # 历史快照字符串键双键回落（快照 item_progress 键为 str(idx)）
+    assert "itemProgress.value[String(index)]" in app_js
+    assert "progressEvents.value[String(index)]" in app_js
+    # 重跑/全量跑中途打开历史自动重连 SSE
+    assert "d.active_runs" in app_js
+    assert "rerunMode.value = d.status" in app_js
+    # 头部计数标签切「重跑中」
+    assert '{{ rerunMode ? "重跑中" : "评估中" }}' in index_html
 
 
 # ---------- POST /api/eval/rerun ----------

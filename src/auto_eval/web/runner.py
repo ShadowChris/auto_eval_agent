@@ -109,6 +109,36 @@ def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
     return event_payload
 
 
+def reset_item_progress(task: Task, indexes: list[int]) -> None:
+    """重跑前重置所选条目的逐题进度：清掉上一轮的事件序列与终态
+    （done/error、percent 100），回落「排队中（重跑）」并即时 fanout——
+    已连接的 SSE 订阅者立刻看到这些行重新排队，之后连接的回放到的
+    也是 pending 态。须在 spawn 重跑批次之前同步调用。
+    """
+    for idx in indexes:
+        if not isinstance(idx, int) or not (0 <= idx < len(task.items)):
+            continue
+        task.progress_events.pop(str(idx), None)
+        item = task.items[idx]
+        _record_progress(
+            task,
+            idx,
+            {
+                "item_index": idx,
+                "item_id": item.get("id", f"q{idx}"),
+                "status": "pending",
+                "percent": 0,
+                "message": "排队中（重跑）",
+                "module": "任务",
+                "event": "重跑排队",
+                "level": "info",
+                "updated_at": datetime.now().astimezone().isoformat(
+                    timespec="milliseconds"
+                ),
+            },
+        )
+
+
 def _to_evalitem(item: dict, idx: int) -> EvalItem:
     meta = dict(item.get("metadata") or {})
     if item.get("frames"):
@@ -706,7 +736,11 @@ async def _run_update_batch_body(
     及其覆盖的前缀轮数，批内轮次编号从 initial_turn+1 接续编，避免重跑批
     从 1 重开导致总结链出现重复的【第1轮】标签。
     """
+    batch_done = 0  # 批内已完成数（批次口径计数，区别于全量 len(task.results)）
+
     async def _merge_on_result(idx: int, res: dict, started: float) -> None:
+        nonlocal batch_done
+        batch_done += 1
         action = upsert_result_by_index(task, res)
         # summary 全量重算移入 _flush_now（随节流后的落盘一起做），
         # 不再每题重算 O(n)
@@ -727,7 +761,12 @@ async def _run_update_batch_body(
         )
         await task.publish(
             "result",
-            {"progress": len(task.results), "total": len(task.items), "result": res},
+            {
+                "progress": batch_done,
+                "total": len(batch),
+                "batch": True,
+                "result": res,
+            },
         )
         _persist_task(task)
 

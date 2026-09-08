@@ -42,6 +42,7 @@ from .video_prepare import (
 )
 from .runner import (
     build_rerun_batches,
+    reset_item_progress,
     run_eval,
     run_update_batch,
     spawn_background,
@@ -400,6 +401,9 @@ async def api_eval_rerun(req: RerunReq):
         raise HTTPException(422, f"indexes 越界: {out_of_range}")
 
     batches = build_rerun_batches(task, req.indexes)
+    # 同步重置所选条目的逐题进度（清上一轮终态、回落 pending 并即时 fanout），
+    # 须在 spawn 批次之前做：之后连接的 SSE 订阅者回放到的就是 pending 态。
+    reset_item_progress(task, sorted({i for rb in batches for i, _ in rb.batch}))
     app_cfg = cfg()
     # R1：循环体内同步 pin（无 await 间隙），与 api_eval_items 同模式
     for rb in batches:
@@ -580,7 +584,11 @@ def api_history_detail(task_id: str):
     task = peek_task(task_id, touch=False)
     if not task:
         raise HTTPException(404, "task not found")
-    return snapshot_payload(task_to_snapshot(task))
+    payload = snapshot_payload(task_to_snapshot(task))
+    # 供前端判断"仍在跑（重跑/全量）需重连 SSE"：peek 命中的是活对象，
+    # 直接取字段；快照本身不含运行态。
+    payload["active_runs"] = task.active_runs
+    return payload
 
 
 @app.delete("/api/history/{task_id}")
