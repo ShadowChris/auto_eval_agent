@@ -88,6 +88,8 @@ def task_to_snapshot(task) -> dict:
         "error": task.error,
         "active_rerun": getattr(task, "active_rerun", None),
         "rerun_history": getattr(task, "rerun_history", []),
+        "active_append": getattr(task, "active_append", None),
+        "append_history": getattr(task, "append_history", []),
         "judge_trace_path": judge_trace_reference,
     }
 
@@ -213,6 +215,8 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "error": error,
             "active_rerun": data.get("active_rerun"),
             "rerun_count": len(data.get("rerun_history") or []),
+            "active_append": data.get("active_append"),
+            "append_count": len(data.get("append_history") or []),
             **_judge_backend_summary(data),
             "preview": _preview(data),
         })
@@ -286,6 +290,8 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             "error": error,
             "active_rerun": data.get("active_rerun"),
             "rerun_count": len(data.get("rerun_history") or []),
+            "active_append": data.get("active_append"),
+            "append_count": len(data.get("append_history") or []),
             **_judge_backend_summary(data),
             "preview": _preview(data),
         })
@@ -358,6 +364,8 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         "error": data.get("error"),
         "active_rerun": data.get("active_rerun"),
         "rerun_history": data.get("rerun_history") or [],
+        "active_append": data.get("active_append"),
+        "append_history": data.get("append_history") or [],
     }
 
 
@@ -435,6 +443,7 @@ def _jsonl_eval_run(snapshot: dict) -> dict:
         "concurrency": options.get("concurrency"),
         "eval_timeout_s": options.get("eval_timeout_s"),
         "rerun_count": len(snapshot.get("rerun_history") or []),
+        "append_count": len(snapshot.get("append_history") or []),
     }
 
 
@@ -554,7 +563,15 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
                 progress,
                 str(snapshot.get("status") or ""),
             ),
-            "eval_run": dict(eval_run),
+            "eval_run": {
+                **eval_run,
+                "segment_no": item.get("evaluation_segment_no") or 1,
+                "segment_source_dataset": (
+                    item.get("evaluation_source_dataset")
+                    or snapshot.get("dataset_name")
+                    or ""
+                ),
+            },
         })
         rows.append(row)
     return rows
@@ -714,6 +731,7 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
             rows["逐题结果"] = _operation_export_rows(
                 aligned_results,
                 snapshot.get("items") or [],
+                dataset_name=str(snapshot.get("dataset_name") or ""),
             )
     frame_rows = _frame_manifest_rows(
         snapshot,
@@ -724,6 +742,9 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     rerun_rows = _rerun_record_rows(snapshot)
     if rerun_rows:
         rows["重跑记录"] = rerun_rows
+    append_rows = _append_record_rows(snapshot)
+    if append_rows:
+        rows["追加记录"] = append_rows
     if mode == "operation":
         # 任务类只有一个固定垂域，不再生成重复的按垂域拆分表、
         # 失败表和通用垂域统计表。失败与告警仍在“逐题结果”原行展示。
@@ -842,6 +863,8 @@ _OPERATION_EXPORT_COLUMNS = (
     "query",
     "video_path",
     "分享链接",
+    "评估分段",
+    "分段来源数据集",
     "query_images",
     "query_image_count",
     "context",
@@ -902,7 +925,12 @@ def _format_operation_routes_zh(value: Any) -> str:
     return "；".join(_OPERATION_ROUTE_DISPLAY.get(route, route) for route in routes)
 
 
-def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]:
+def _operation_export_rows(
+    results: list[dict],
+    items: list[dict],
+    *,
+    dataset_name: str = "",
+) -> list[dict]:
     """将任务类结果转为固定列。
 
     原始数据集字段由“数据集明细”完整保留；这里只展示任务类的
@@ -925,6 +953,10 @@ def _operation_export_rows(results: list[dict], items: list[dict]) -> list[dict]
         reasons = result.get("rubric_reasons") or {}
         values = {
             "数据集序号": result.get("数据集序号", position + 1),
+            "评估分段": item.get("evaluation_segment_no") or 1,
+            "分段来源数据集": (
+                item.get("evaluation_source_dataset") or dataset_name
+            ),
             "item_id": item_id,
             "index": (
                 source.get("index")
@@ -1126,7 +1158,11 @@ def operation_item_result_row(snapshot: dict, item_index: int) -> dict:
 
     results = _results_with_identity(normalized)
     aligned = _aligned_results(normalized, results)
-    rows = _operation_export_rows(aligned, items)
+    rows = _operation_export_rows(
+        aligned,
+        items,
+        dataset_name=str(normalized.get("dataset_name") or ""),
+    )
     row = dict(rows[item_index])
 
     raw_evidence = aligned[item_index].get("route_evidence") or []
@@ -1264,6 +1300,12 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
         source = _source_data_for_item(item)
         row: dict[str, Any] = {
             "数据集序号": index + 1,
+            "评估分段": item.get("evaluation_segment_no") or 1,
+            "分段来源数据集": (
+                item.get("evaluation_source_dataset")
+                or snapshot.get("dataset_name")
+                or ""
+            ),
             "source_line": item.get("source_line") or index + 1,
             "id": item.get("id") or f"q{index}",
             "query": item.get("query") or item.get("question") or "",
@@ -1432,6 +1474,7 @@ def _run_info(snapshot: dict) -> dict:
         **_judge_backend_summary(snapshot),
         "error": snapshot.get("error") or "",
         "rerun_count": len(snapshot.get("rerun_history") or []),
+        "append_count": len(snapshot.get("append_history") or []),
     }
 
 
@@ -1479,6 +1522,39 @@ def _rerun_record_rows(snapshot: dict) -> list[dict]:
     return rows
 
 
+def _append_record_rows(snapshot: dict) -> list[dict]:
+    """把分段追加评估记录展开为一批一行。"""
+    rows: list[dict] = []
+    for attempt in snapshot.get("append_history") or []:
+        backend = attempt.get("judge_backend") or {}
+        rows.append({
+            "追加批次": attempt.get("segment_no", ""),
+            "append_id": attempt.get("append_id", ""),
+            "来源数据集": attempt.get("source_dataset_name", ""),
+            "本次评估题数": attempt.get("total", 0),
+            "完成题数": attempt.get("done", 0),
+            "实际新增": attempt.get("inserted_count", attempt.get("total", 0)),
+            "覆盖重跑": attempt.get("replaced_count", 0),
+            "保留旧数据": attempt.get("skipped_count", 0),
+            "冲突题数": attempt.get("conflict_count", 0),
+            "批次状态": attempt.get("status", ""),
+            "新增索引": "；".join(
+                str(index + 1) for index in (attempt.get("item_indices") or [])
+            ),
+            "Provider": backend.get("provider_name") or "角色默认配置",
+            "Provider ID": backend.get("provider_id") or "",
+            "模型": backend.get("model") or "",
+            "Provider版本": backend.get("provider_revision") or "",
+            "并发": attempt.get("concurrency", ""),
+            "单题超时（秒）": attempt.get("eval_timeout_s", ""),
+            "开始时间": _format_ts(attempt.get("started_at")),
+            "完成时间": _format_ts(attempt.get("finished_at")),
+            "批次耗时（秒）": attempt.get("duration_s", ""),
+            "error": attempt.get("error") or "",
+        })
+    return rows
+
+
 def _operation_run_summary(snapshot: dict) -> dict:
     """任务类单行运行汇总。
 
@@ -1507,6 +1583,7 @@ def _operation_run_summary(snapshot: dict) -> dict:
         "finished_at": _format_ts(snapshot.get("finished_at")),
         "duration_s": _stored_timing(snapshot)["duration_s"],
         "rerun_count": len(snapshot.get("rerun_history") or []),
+        "append_count": len(snapshot.get("append_history") or []),
         "judges": judges,
         "model": options.get("model") or "",
         **_judge_backend_summary(snapshot),
@@ -1559,7 +1636,11 @@ def operation_comparison_batch(snapshot: dict) -> dict:
     items = normalized.get("items") or []
     results = _results_with_identity(normalized)
     aligned = _aligned_results(normalized, results)
-    export_rows = _operation_export_rows(aligned, items)
+    export_rows = _operation_export_rows(
+        aligned,
+        items,
+        dataset_name=str(normalized.get("dataset_name") or ""),
+    )
     rows = []
     for position, item in enumerate(items):
         source = _source_data_for_item(item)

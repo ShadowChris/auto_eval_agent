@@ -330,6 +330,124 @@ async def run_rerun(
         prune_task_cache(keep_task_ids={task.id})
 
 
+async def run_append(
+    task: Task,
+    cfg: AppConfig,
+    item_indices: list[int],
+) -> None:
+    """只评估追加到既有任务的数据，并把结果合并回同一历史快照。"""
+    pending = dict(task.active_append or {})
+    started_at = float(pending.get("started_at") or time.time())
+    base_duration_s = float(
+        pending.get("base_duration_s") or task.duration_s or 0.0
+    )
+    base_status = str(pending.get("base_status") or "done")
+    base_error = pending.get("base_error")
+    attempt = {
+        **pending,
+        "append_id": pending.get("append_id") or f"append-{uuid.uuid4().hex[:8]}",
+        "segment_no": int(
+            pending.get("segment_no") or len(task.append_history) + 2
+        ),
+        "item_indices": list(item_indices),
+        "total": len(item_indices),
+        "done": int(pending.get("done") or 0),
+        "status": "running",
+        "started_at": started_at,
+        "base_duration_s": base_duration_s,
+    }
+    task.active_append = attempt
+    task.status = "running"
+    task.error = None
+    for index in item_indices:
+        item = task.items[index]
+        _record_progress(task, index, {
+            "item_index": index,
+            "item_id": item.get("id") or f"q{index}",
+            "status": "pending",
+            "percent": 0,
+            "message": "等待追加评估",
+            "stage_rank": 0,
+            "started_at": None,
+            "finished_at": None,
+            "append_id": attempt["append_id"],
+        })
+    _persist_task(task, force=True)
+    await task.publish("append_start", dict(attempt))
+
+    terminal_event = "done"
+    try:
+        await _run(
+            task,
+            cfg,
+            item_indices=item_indices,
+            append_attempt=attempt,
+            evaluation_timestamp=started_at,
+        )
+        attempt["status"] = "done"
+        unique_count = len({
+            value for row in task.results
+            if (value := _result_index(row)) is not None
+        })
+        task.status = "done" if unique_count >= len(task.items) else base_status
+        if task.status not in {"done", "error", "cancelled"}:
+            task.status = "error"
+        task.error = None if task.status == "done" else base_error
+    except asyncio.CancelledError:
+        attempt["status"] = "cancelled"
+        attempt["error"] = "用户手动中断追加评估"
+        task.status = "cancelled"
+        task.error = attempt["error"]
+        terminal_event = "cancelled"
+    except Exception as exc:
+        attempt["status"] = "error"
+        attempt["error"] = f"{type(exc).__name__}: {exc}"
+        task.status = "error"
+        task.error = attempt["error"]
+        terminal_event = "error"
+    finally:
+        finished_at = time.time()
+        attempt["finished_at"] = finished_at
+        attempt["duration_s"] = round(max(0.0, finished_at - started_at), 3)
+        if terminal_event != "done":
+            progress_status = "cancelled" if terminal_event == "cancelled" else "error"
+            progress_message = (
+                "追加评估已中断" if terminal_event == "cancelled" else "追加评估失败"
+            )
+            for index in item_indices:
+                previous = task.item_progress.get(str(index)) or {}
+                if previous.get("status") in {"done", "error", "cancelled"}:
+                    continue
+                _record_progress(task, index, {
+                    **previous,
+                    "item_index": index,
+                    "item_id": task.items[index].get("id") or f"q{index}",
+                    "status": progress_status,
+                    "message": progress_message,
+                    "updated_at": datetime.now().astimezone().isoformat(
+                        timespec="milliseconds"
+                    ),
+                })
+        attempt.pop("base_duration_s", None)
+        task.duration_s = round(base_duration_s + attempt["duration_s"], 3)
+        task.finished_at = finished_at
+        task.append_history.append(dict(attempt))
+        task.active_append = None
+        task.summary = _summarize(task, cfg)
+        _persist_task(task, force=True)
+        payload = {
+            "summary": task.summary,
+            "total": len(task.items),
+            "progress": task.done_total,
+            "duration_s": task.duration_s,
+            "append": attempt,
+        }
+        if terminal_event != "done":
+            payload["message"] = task.error
+        await task.publish(terminal_event, payload)
+        prune_task_cache(keep_task_ids={task.id})
+
+
 async def run_single_api_item(
     task: Task,
     cfg: AppConfig,
@@ -436,6 +554,8 @@ async def _run(
     *,
     item_indices: list[int] | None = None,
     rerun: dict | None = None,
+    append_attempt: dict | None = None,
+    evaluation_timestamp: float | None = None,
 ) -> None:
     judges_cfg = _selected_judge_configs(task, cfg)
     run_backend = dict(
@@ -454,7 +574,9 @@ async def _run(
     run_provider_revision = str(
         run_backend.get("provider_revision") or ""
     )
-    evaluation_time = datetime.fromtimestamp(task.created_at).astimezone()
+    evaluation_time = datetime.fromtimestamp(
+        evaluation_timestamp or task.created_at
+    ).astimezone()
     _providers = cfg.eval_options.effective_providers()
     clients = [
         JudgeClient(j, _providers, cfg.eval_options.search_topk)
@@ -919,6 +1041,8 @@ async def _run(
                     ),
                     "finished_at": time.time(),
                 })
+            if append_attempt is not None:
+                append_attempt["done"] = int(append_attempt.get("done") or 0) + 1
             failed = bool(res.get("error"))
             log_event(
                 "任务",
@@ -944,6 +1068,9 @@ async def _run(
                     "rerun": rerun is not None,
                     "rerun_progress": (rerun or {}).get("done"),
                     "rerun_total": (rerun or {}).get("total"),
+                    "append": append_attempt is not None,
+                    "append_progress": (append_attempt or {}).get("done"),
+                    "append_total": (append_attempt or {}).get("total"),
                     "attempt_id": attempt_id or None,
                 },
             )

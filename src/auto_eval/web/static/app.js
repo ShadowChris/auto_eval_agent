@@ -142,6 +142,12 @@ createApp({
       return issueStatsExpanded.value ? rows : rows.slice(0, 10);
     });
     const taskId = ref("");
+    const submitMode = ref("create");
+    const appendTargetTaskId = ref("");
+    const appendTargetMeta = ref(null);
+    const appendMergePreview = ref(null);
+    const appendConflictResolutions = ref({});
+    const appendPreviewing = ref(false);
     const loadedTaskOptions = ref({});
     const runError = ref("");
     const runKind = ref("initial");
@@ -401,6 +407,27 @@ createApp({
       () => Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value)),
     );
     const pagedHistoryItems = computed(() => historyItems.value);
+    const appendTargetCandidates = computed(() => {
+      const candidates = historyItems.value.filter(canAppendHistoryItem);
+      const selected = appendTargetMeta.value;
+      if (selected && !candidates.some((item) => item.task_id === selected.task_id)) {
+        candidates.unshift(selected);
+      }
+      return candidates;
+    });
+    const selectedAppendTarget = computed(() => (
+      appendTargetCandidates.value.find(
+        (item) => item.task_id === appendTargetTaskId.value,
+      ) || null
+    ));
+    const unresolvedAppendConflictCount = computed(() => (
+      (appendMergePreview.value?.conflicts || []).filter(
+        (conflict) => !appendConflictResolutions.value[String(conflict.key)],
+      ).length
+    ));
+    watch(opItems, () => {
+      if (appendMergePreview.value) clearAppendConflictPreview();
+    }, { deep: true });
     const skillOverviewRows = computed(() => summary.value?.by_skill?.overview || []);
     const selectedKnowledgeCategory = computed(() =>
       knowledgeDraft.value.categories.find((category) => category.key === knowledgeCategoryKey.value)
@@ -1242,6 +1269,7 @@ createApp({
       rerunProgressIndices.value = [];
       progressView.value = "all";
       selectedRerunIndices.value = new Set();
+      clearAppendConflictPreview();
     }
 
     function switchMode(k) {
@@ -1259,6 +1287,9 @@ createApp({
       datasetImportSummary.value = null;
       datasetImportWarnings.value = [];
       groupAlignment.value = null;
+      submitMode.value = "create";
+      appendTargetTaskId.value = "";
+      appendTargetMeta.value = null;
       if (["operation", "rich_content", "rich_content_quality"].includes(k)) {
         releaseAllQueryImagePreviews();
         opItems.value = [newOpItem()];
@@ -1439,6 +1470,7 @@ createApp({
       opItems.value = [newOpItem()];
       opPage.value = 1;
       opJumpPage.value = "";
+      let importedSuccessfully = false;
       try {
         const parsed = await parseOperationDatasetFile(file);
         const importErrors = [...(parsed.errors || [])];
@@ -1476,11 +1508,20 @@ createApp({
             };
           });
           opPage.value = 1;
+          importedSuccessfully = true;
         }
       } catch (error) {
         errors.value = ["批量导入失败：" + (error?.message || String(error))];
       } finally {
         opPreparing.value = false;
+      }
+      if (
+        importedSuccessfully
+        && mode.value === "operation"
+        && submitMode.value === "append"
+        && selectedAppendTarget.value
+      ) {
+        await submit(false, true);
       }
     }
 
@@ -1616,7 +1657,14 @@ createApp({
     }
 
     const canSubmit = computed(() => {
-      if (selectedProviderId.value && !selectedProviderModel.value.trim()) return false;
+      const isAppendSubmit = mode.value === "operation" && submitMode.value === "append";
+      if (appendPreviewing.value) return false;
+      if (!isAppendSubmit && selectedProviderId.value && !selectedProviderModel.value.trim()) return false;
+      if (
+        mode.value === "operation"
+        && submitMode.value === "append"
+        && !selectedAppendTarget.value
+      ) return false;
       if (isMultiGroupMode.value) {
         return !groupAligning.value
           && !operationGroups.value.some((group) => group.importing)
@@ -1645,8 +1693,11 @@ createApp({
       if (errors.value.length) console.log("解析错误：", errors.value);
     }
 
-    async function submit() {
+    async function submit(appendConfirmed = false, automaticPreview = false) {
       runError.value = "";
+      const isAppendSubmit = mode.value === "operation" && submitMode.value === "append";
+      const isConfirmedAppend = isAppendSubmit && appendConfirmed === true;
+      const isAutomaticPreview = isAppendSubmit && automaticPreview === true;
       if (isMultiGroupMode.value) {
         if (!(await alignOperationGroups())) return;
         items.value = groupAlignment.value?.cases || [];
@@ -1709,8 +1760,10 @@ createApp({
       problemDimFilter.value = "";
       resultPage.value = 1;
       progress.value = 0;
-      total.value = items.value.length;
-      itemProgress.value = Object.fromEntries(
+      total.value = isAppendSubmit
+        ? Number(selectedAppendTarget.value?.total || 0) + items.value.length
+        : items.value.length;
+      itemProgress.value = isAppendSubmit ? {} : Object.fromEntries(
         items.value.map((item, index) => [
           index,
           {
@@ -1723,14 +1776,23 @@ createApp({
           },
         ])
       );
-      running.value = true;
-      runKind.value = "initial";
+      running.value = !isAutomaticPreview;
+      appendPreviewing.value = isAutomaticPreview;
+      runKind.value = isAppendSubmit ? "append" : "initial";
       rerunProgressIndices.value = [];
       progressView.value = "all";
       const body = {
         mode: isMultiGroupMode.value ? "operation" : mode.value,
         items: items.value,
         dataset_name: datasetName.value || (isVideoMode.value ? "手动录入" : (isJsonl.value ? "未命名数据集.jsonl" : "文本输入")),
+        submit_mode: isAppendSubmit ? "append" : "create",
+        task_id: isAppendSubmit ? appendTargetTaskId.value : "",
+        conflict_policy: isAppendSubmit
+          ? (isConfirmedAppend ? "resolve" : "preview")
+          : "reject",
+        conflict_resolutions: isConfirmedAppend
+          ? appendConflictResolutions.value
+          : {},
         options: {
           judges: ["operation", "operation_multi_group"].includes(mode.value)
             ? defaultJudgeSelection("operation")
@@ -1761,6 +1823,7 @@ createApp({
         });
       } catch (error) {
         running.value = false;
+        appendPreviewing.value = false;
         itemProgress.value = {};
         runError.value = "无法启动评估：" + (error?.message || "网络错误");
         return;
@@ -1768,13 +1831,38 @@ createApp({
       const d = await r.json().catch(() => ({}));
       if (!r.ok || !d.task_id) {
         running.value = false;
+        appendPreviewing.value = false;
         itemProgress.value = {};
         const detail = typeof d.detail === "string" ? d.detail : "服务端拒绝了评估请求";
         runError.value = "无法启动评估：" + detail;
         return;
       }
+      if (isAppendSubmit && d.action === "preview") {
+        running.value = false;
+        appendPreviewing.value = false;
+        itemProgress.value = {};
+        appendMergePreview.value = d.merge_preview || {
+          conflicts: [],
+          incoming_total: items.value.length,
+          new_count: items.value.length,
+          conflict_count: 0,
+        };
+        appendConflictResolutions.value = Object.fromEntries(
+          (appendMergePreview.value.conflicts || [])
+            .filter((conflict) => conflict.recommended_action)
+            .map((conflict) => [String(conflict.key), conflict.recommended_action]),
+        );
+        return;
+      }
+      appendPreviewing.value = false;
       taskId.value = d.task_id;
       eventCursor.value = 0;
+      if (isAppendSubmit) {
+        clearAppendConflictPreview();
+        await loadHistoryTask(d.task_id, false);
+        await loadHistory();
+        return;
+      }
       loadHistory();
       connectSSE();
     }
@@ -1845,7 +1933,11 @@ createApp({
         total.value = Number.isFinite(Number(d.total)) ? Number(d.total) : total.value;
         progress.value = Number.isFinite(Number(d.progress)) ? Number(d.progress) : progress.value;
         running.value = isActiveHistoryStatus(d.status);
-        runKind.value = d.run_kind === "rerun" || d.status === "rerunning" ? "rerun" : "initial";
+        runKind.value = d.run_kind === "rerun" || d.status === "rerunning"
+          ? "rerun"
+          : d.run_kind === "append" || d.active_append
+            ? "append"
+            : "initial";
         if (runKind.value === "rerun") {
           rerunProgress.value = Number(d.rerun_progress || d.active_rerun?.done || 0);
           rerunTotal.value = Number(d.rerun_total || d.active_rerun?.total || 0);
@@ -1893,6 +1985,8 @@ createApp({
           runKind.value = "rerun";
           rerunProgress.value = Number(d.rerun_progress || 0);
           rerunTotal.value = Number(d.rerun_total || rerunTotal.value || 0);
+        } else if (d.append) {
+          runKind.value = "append";
         }
         const index = d.result.index;
         if (index != null) {
@@ -2164,12 +2258,14 @@ createApp({
 
     function formatHistoryDuration(item) {
       const startedAt = Number(item?.started_at);
-      const runningSeconds = isActiveHistoryStatus(item?.status) && startedAt > 0
-        ? clockNow.value / 1000 - startedAt
-        : null;
       const storedSeconds = item?.duration_s == null
         ? Number.NaN
         : Number(item.duration_s);
+      const runningSeconds = item?.active_append && Number.isFinite(storedSeconds)
+        ? storedSeconds
+        : isActiveHistoryStatus(item?.status) && startedAt > 0
+        ? clockNow.value / 1000 - startedAt
+        : null;
       const rawSeconds = runningSeconds != null
         ? runningSeconds
         : Number.isFinite(storedSeconds) && storedSeconds >= 0
@@ -2211,6 +2307,12 @@ createApp({
           historyItems.value.map((item) => [item.task_id, item.note || ""]),
         );
         historyNoteEditing.value = {};
+        if (appendTargetTaskId.value) {
+          const refreshed = historyItems.value.find(
+            (item) => item.task_id === appendTargetTaskId.value,
+          );
+          if (refreshed) appendTargetMeta.value = { ...refreshed };
+        }
       } catch (error) {
         console.error("历史记录加载失败", error);
       } finally {
@@ -2258,6 +2360,7 @@ createApp({
         results.value = [];
         summary.value = null;
       }
+      if (appendTargetTaskId.value === id) clearAppendTarget();
       if (comparisonSelectedItems.value[id]) {
         const next = { ...comparisonSelectedItems.value };
         delete next[id];
@@ -2277,6 +2380,90 @@ createApp({
       return item?.mode === "operation"
         && item?.operation_layout !== "multi_group"
         && item?.status === "done";
+    }
+
+    function canAppendHistoryItem(item) {
+      return item?.mode === "operation"
+        && item?.operation_layout !== "multi_group"
+        && ["done", "error", "cancelled"].includes(item?.status);
+    }
+
+    function hasOperationInputForAppend() {
+      return opItems.value.some(
+        (item) => item.query.trim() && ((item.frames || []).length || item.videoPath),
+      );
+    }
+
+    async function selectAppendTarget(item) {
+      if (!canAppendHistoryItem(item)) return;
+      submitMode.value = "append";
+      appendTargetTaskId.value = item.task_id;
+      appendTargetMeta.value = { ...item };
+      clearAppendConflictPreview();
+      nextTick(() => {
+        document.querySelector(".append-submit-config")?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      });
+      if (hasOperationInputForAppend() && !opPreparing.value) await submit(false, true);
+    }
+
+    async function onAppendTargetChange() {
+      const selected = appendTargetCandidates.value.find(
+        (item) => item.task_id === appendTargetTaskId.value,
+      );
+      appendTargetMeta.value = selected ? { ...selected } : null;
+      clearAppendConflictPreview();
+      if (selected && hasOperationInputForAppend() && !opPreparing.value) {
+        await submit(false, true);
+      }
+    }
+
+    async function onSubmitModeChange() {
+      clearAppendConflictPreview();
+      if (
+        submitMode.value === "append"
+        && selectedAppendTarget.value
+        && hasOperationInputForAppend()
+        && !opPreparing.value
+      ) {
+        await submit(false, true);
+      }
+    }
+
+    function clearAppendTarget() {
+      submitMode.value = "create";
+      appendTargetTaskId.value = "";
+      appendTargetMeta.value = null;
+      clearAppendConflictPreview();
+    }
+
+    function clearAppendConflictPreview() {
+      appendMergePreview.value = null;
+      appendConflictResolutions.value = {};
+      appendPreviewing.value = false;
+    }
+
+    function setAllAppendConflictResolutions(action) {
+      appendConflictResolutions.value = Object.fromEntries(
+        (appendMergePreview.value?.conflicts || []).map(
+          (conflict) => [String(conflict.key), action],
+        ),
+      );
+    }
+
+    function appendEvaluationStatusLabel(status) {
+      return {
+        succeeded: "已正常产出评测结果",
+        failed: "评测调用失败",
+        missing: "没有评测结果",
+      }[status] || status || "未知";
+    }
+
+    async function confirmAppendMerge() {
+      if (unresolvedAppendConflictCount.value) return;
+      await submit(true);
     }
 
     function isHistoryComparisonSelected(taskId) {
@@ -2696,7 +2883,11 @@ createApp({
           ? Number(d.done_total)
           : results.value.length;
         running.value = isActiveHistoryStatus(d.status);
-        runKind.value = d.status === "rerunning" ? "rerun" : "initial";
+        runKind.value = d.status === "rerunning"
+          ? "rerun"
+          : d.active_append
+            ? "append"
+            : "initial";
         rerunProgress.value = Number(d.active_rerun?.done || 0);
         rerunTotal.value = Number(d.active_rerun?.total || 0);
         const latestRerun = (d.rerun_history || []).at(-1) || {};
@@ -3128,6 +3319,8 @@ createApp({
       providerMessage, providerError, onProviderChange, loadProviders, newProvider,
       editProvider, saveProvider, deleteProvider, testProvider,
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
+      submitMode, appendTargetTaskId, appendTargetMeta, appendTargetCandidates, selectedAppendTarget,
+      appendMergePreview, appendConflictResolutions, unresolvedAppendConflictCount, appendPreviewing,
       operationStatistics, visibleOperationIssueStats, issueStatsExpanded,
       runKind, rerunProgress, rerunTotal, rerunProgressIndices, progressView,
       hasRerunProgress, visibleProgressRows, selectedRerunIndices,
@@ -3150,6 +3343,10 @@ createApp({
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit, formatOptionalTaskTime, formatAttachmentPath,
       trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, resultQueryImageCount, queryImagePreviewUrl, resultQueryImageFilename, openQueryImagePreview, closeQueryImagePreview, moveResultQueryImagePreview, addOpItem, removeOpItem, onOpVideo, onQueryImage, removeQueryImage, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
+      canAppendHistoryItem, selectAppendTarget, onAppendTargetChange, clearAppendTarget,
+      onSubmitModeChange,
+      clearAppendConflictPreview, setAllAppendConflictResolutions,
+      appendEvaluationStatusLabel, confirmAppendMerge,
       canCompareHistoryItem, isHistoryComparisonSelected, toggleHistoryComparisonItem,
       clearHistoryComparisonSelection, addSelectedHistoryComparisonSources,
       openComparisonPage, openComparisonFromHistory, onComparisonResultFile,

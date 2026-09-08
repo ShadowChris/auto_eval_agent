@@ -79,6 +79,7 @@
             <td class="history-dataset-cell">
               <div>{{ h.dataset_name || '未记录' }}</div>
               <div class="history-task-id" :title="h.task_id">task_id: {{ h.task_id }}</div>
+              <div v-if="h.append_count" class="history-append-count">已追加 {{ h.append_count }} 次</div>
             </td>
             <td>{{ historyModeLabel(h) }}</td>
             <td>
@@ -94,6 +95,7 @@
                 @click="loadHistoryTask(h.task_id)"
                 :disabled="loadingHistoryTaskId===h.task_id"
               >{{ loadingHistoryTaskId===h.task_id ? '加载中…' : '加载' }}</button>
+              <button v-if="canAppendHistoryItem(h)" @click="selectAppendTarget(h)">追加数据</button>
               <button v-if="isActiveHistoryStatus(h.status)" @click="cancelHistoryTask(h)" class="btn-warning">中断</button>
               <button @click="delHistory(h.task_id)" class="btn-danger" :disabled="isActiveHistoryStatus(h.status)">删除</button>
             </td>
@@ -150,6 +152,82 @@
   <section>
     <h2>① 批量输入</h2>
     <p class="hint">{{ formatHint }}</p>
+
+    <div v-if="mode==='operation'" class="append-submit-config">
+      <div class="append-submit-modes">
+        <label><input type="radio" v-model="submitMode" value="create" @change="onSubmitModeChange"> 新建评估集</label>
+        <label><input type="radio" v-model="submitMode" value="append" @change="onSubmitModeChange"> 追加到历史评估集</label>
+      </div>
+      <div v-if="submitMode==='append'" class="append-target-row">
+        <span class="lbl">目标任务：</span>
+        <select v-model="appendTargetTaskId" @change="onAppendTargetChange" :disabled="appendPreviewing">
+          <option value="" disabled>请选择历史评估集</option>
+          <option v-for="target in appendTargetCandidates" :key="target.task_id" :value="target.task_id">
+            {{ target.dataset_name || '未命名数据集' }} · {{ target.done }}/{{ target.total }} · {{ target.task_id }}
+          </option>
+        </select>
+        <button type="button" @click="loadHistory" :disabled="loadingHistory">刷新历史</button>
+        <button v-if="selectedAppendTarget" type="button" @click="clearAppendTarget">取消追加</button>
+      </div>
+      <p v-if="appendPreviewing" class="running append-previewing">正在自动预检数据冲突…</p>
+      <p v-if="submitMode==='append' && runError && !running" class="run-error append-preview-error">{{ runError }}</p>
+      <div v-if="submitMode==='append' && selectedAppendTarget" class="append-target-summary">
+        <strong>{{ selectedAppendTarget.dataset_name || '未命名数据集' }}</strong>
+        <span>task_id: {{ selectedAppendTarget.task_id }}</span>
+        <span>现有 {{ selectedAppendTarget.total }} 条</span>
+        <span>本次导入 {{ items.length }} 条</span>
+      </div>
+      <p v-if="submitMode==='append'" class="hint append-submit-hint">
+        提交前会预检 index、序号和 id 冲突。旧题评测调用失败时默认建议覆盖重跑，已正常产出结果时默认建议保留；nok 也属于正常评测结果。Query 不一致必须人工确认。
+      </p>
+      <div v-if="appendMergePreview" class="append-conflict-preview">
+        <div class="append-conflict-summary">
+          <strong>合并预检</strong>
+          <span>传入 {{ appendMergePreview.incoming_total }} 条</span>
+          <span class="ok">新增 {{ appendMergePreview.new_count }} 条</span>
+          <span :class="appendMergePreview.conflict_count ? 'err' : 'ok'">冲突 {{ appendMergePreview.conflict_count }} 条</span>
+          <span>建议保留 {{ appendMergePreview.recommended_keep_count || 0 }} 条</span>
+          <span>建议覆盖重跑 {{ appendMergePreview.recommended_replace_count || 0 }} 条</span>
+        </div>
+        <template v-if="appendMergePreview.conflict_count">
+          <div class="append-conflict-actions">
+            <button type="button" @click="setAllAppendConflictResolutions('keep_existing')">全部保留旧数据</button>
+            <button type="button" @click="setAllAppendConflictResolutions('replace_and_rerun')">全部使用新数据</button>
+            <span v-if="unresolvedAppendConflictCount" class="err">还有 {{ unresolvedAppendConflictCount }} 条未选择</span>
+          </div>
+          <div class="table-scroll append-conflict-table-wrap">
+            <table class="grid append-conflict-table">
+              <thead><tr><th>冲突标识</th><th>旧评测状态</th><th>旧 Query</th><th>新 Query</th><th>处理方式</th></tr></thead>
+              <tbody>
+                <tr v-for="conflict in appendMergePreview.conflicts" :key="conflict.key" :class="{'append-query-mismatch':!conflict.query_match}">
+                  <td>
+                    <strong>{{ conflict.key }}</strong>
+                    <small>原第 {{ conflict.existing_dataset_index }} 条</small>
+                  </td>
+                  <td>
+                    {{ appendEvaluationStatusLabel(conflict.existing_evaluation_status) }}
+                    <small>{{ conflict.recommendation_reason }}</small>
+                  </td>
+                  <td>{{ conflict.existing_query }}</td>
+                  <td>{{ conflict.incoming_query }}</td>
+                  <td>
+                    <select v-model="appendConflictResolutions[String(conflict.key)]">
+                      <option value="" disabled>请选择</option>
+                      <option value="keep_existing">保留旧数据，跳过新数据</option>
+                      <option value="replace_and_rerun">使用新数据覆盖并重跑</option>
+                    </select>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <div class="append-conflict-confirm">
+          <button type="button" class="primary" @click="confirmAppendMerge" :disabled="running || unresolvedAppendConflictCount>0">确认追加并评估</button>
+          <button type="button" @click="clearAppendConflictPreview" :disabled="running">取消</button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="isMultiGroupMode" class="multi-group-input">
       <div class="op-import">
@@ -331,7 +409,17 @@
       <span class="lbl">被测模型：</span>
       <select v-model="selectedModel"><option v-for="m in models">{{ m }}</option></select>
     </div>
-    <div class="row">
+    <div v-if="mode==='operation' && submitMode==='append'" class="row append-provider-row">
+      <span class="lbl">模型服务：</span>
+      <span class="hint">
+        沿用目标任务配置
+        <template v-if="selectedAppendTarget">
+          · {{ selectedAppendTarget.judge_provider || '默认配置' }}
+          <template v-if="selectedAppendTarget.judge_model"> / {{ selectedAppendTarget.judge_model }}</template>
+        </template>
+      </span>
+    </div>
+    <div v-else class="row">
       <span class="lbl">Provider：</span>
       <select v-model="selectedProviderId" @change="onProviderChange">
         <option value="">默认配置</option>
@@ -347,13 +435,14 @@
       <button type="button" @click="testProvider()" :disabled="providerBusy || !selectedProviderId">测试连接</button>
       <button type="button" @click="providerManagerOpen=!providerManagerOpen">管理模型服务</button>
     </div>
-    <div v-if="!selectedProviderId" class="row provider-default-row">
-      <span class="lbl provider-default-spacer" aria-hidden="true"></span>
-      <div class="hint provider-default-config">
-        <div>默认接口：{{ defaultJudgeBaseUrl || '未配置' }}</div>
-        <div>默认模型：{{ defaultJudgeModel || '未配置' }}</div>
+    <template v-if="!(mode==='operation' && submitMode==='append')">
+      <div v-if="!selectedProviderId" class="row provider-default-row">
+        <span class="lbl provider-default-spacer" aria-hidden="true"></span>
+        <div class="hint provider-default-config">
+          <div>默认接口：{{ defaultJudgeBaseUrl || '未配置' }}</div>
+          <div>默认模型：{{ defaultJudgeModel || '未配置' }}</div>
+        </div>
       </div>
-    </div>
     <div v-if="providerManagerOpen" class="provider-manager">
       <div class="provider-list">
         <div class="provider-list-heading">
@@ -388,6 +477,7 @@
       </div>
       <p v-if="providerMessage" class="provider-message" :class="{err:providerError,ok:!providerError}">{{ providerMessage }}</p>
     </div>
+    </template>
     <div class="row">
       <span class="lbl">并发：</span>
       <input type="number" min="1" max="16" v-model.number="concurrency" style="width:70px">
@@ -401,9 +491,10 @@
   </section>
 
   <section>
-    <button class="primary" @click="submit" :disabled="running || !canSubmit">▶ 开始评估</button>
+    <button v-if="!(mode==='operation' && submitMode==='append' && appendMergePreview)" class="primary" @click="submit" :disabled="running || !canSubmit">▶ {{ mode==='operation' && submitMode==='append' ? '预检冲突' : '开始评估' }}</button>
     <span v-if="running" class="running">
       <template v-if="runKind==='rerun'">重跑中… {{ rerunProgress }}/{{ rerunTotal }}</template>
+      <template v-else-if="runKind==='append'">追加评估中… {{ progress }}/{{ total }}</template>
       <template v-else>评估中… {{ progress }}/{{ total }}</template>
     </span>
     <p v-if="runError" class="run-error">{{ runError }}</p>
