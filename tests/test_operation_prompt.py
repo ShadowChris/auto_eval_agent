@@ -40,7 +40,7 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     assert [dim.name for dim in operation.rubrics] == ["操作完成度", "步骤正确性"]
     assert [dim.weight for dim in operation.rubrics] == [0.7, 0.3]
     assert operation.operation_policy is not None
-    assert config.expert_knowledge["operation"].version == 3
+    assert config.expert_knowledge["operation"].version == 4
     assert config.expert_knowledge["operation"].categories
     assert operation.operation_policy.scope_rules
     assert operation.operation_policy.evidence_rules
@@ -56,12 +56,10 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
         "no_support",
         "others",
     ]
-    assert list(operation.operation_policy.route_policy.routes) == [
-        "fast_system",
-        "skill",
-        "jarvis",
-        "other",
-    ]
+    assert "有非空 answer 时只检查 answer" in prompt
+    assert "系统 step info" in prompt
+    assert "不得标记本类型" in prompt
+    assert "route_policy" not in type(operation.operation_policy).model_fields
     assert operation.operation_policy.issue_types[
         "录屏Query无法与输入Query一致核验"
     ].allowed_correctness == ["others"]
@@ -72,20 +70,15 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     assert "2. 步骤正确性（权重 0.3，1–5 分）" in prompt
 
 
-def test_operation_prompt_keeps_route_detection_independent() -> None:
+def test_operation_prompt_does_not_request_route_detection() -> None:
     _, prompt = _operation_prompt()
 
-    assert "【执行链路识别（独立观察字段）】" in prompt
-    assert "fast_system（快系统）" in prompt
-    assert "skill（skill）" in prompt
-    assert "jarvis（贾维斯）" in prompt
-    assert "other（其他）" in prompt
-    assert "链路识别不得参与 correctness 判断" in prompt
-    assert "普通文字如果只是快系统、skill 或贾维斯的最终回复" in prompt
-    assert '"execution_routes"' in prompt
-    assert '"route_evidence"' in prompt
-    assert '"route_rationale"' in prompt
-    assert '"route_status"' in prompt
+    assert "【执行链路识别（独立观察字段）】" not in prompt
+    assert "【执行链路】" not in prompt
+    assert '"execution_routes"' not in prompt
+    assert '"route_evidence"' not in prompt
+    assert '"route_rationale"' not in prompt
+    assert '"route_status"' not in prompt
 
 
 def test_normalize_operation_routes_accepts_human_labels_and_keeps_order() -> None:
@@ -574,6 +567,37 @@ def test_operation_prompt_distinguishes_empty_query_result_from_missing_action_o
     assert "未找到、无记录、暂无结果" in prompt
     assert "没有可恢复应用、目标文件、剪贴板内容或活动对象" in prompt
     assert "不能因为成功进入页面或展示空状态就判 ok" in prompt
+    assert "仅有 agent 文字声称“没有结果/找不到”" in prompt
+    assert "页面仅显示“搜索中/加载中”" in prompt
+    assert "不能证明查询完成" in prompt
+    assert "泛化的“执行查询”“调用工具”“已完成”" in prompt
+    assert "不能代替真实查询页面、结果列表、结果卡或明确空结果" in prompt
+
+
+def test_operation_prompt_distinguishes_sensitive_credentials_from_privacy_settings() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "账号密码、支付密码、验证码、私钥" in prompt
+    assert "明确说明安全或隐私原因的拒绝属于正确响应" in prompt
+    assert "不要把普通隐私或权限设置误当成敏感凭据披露" in prompt
+    assert "常规系统设置与设备操控默认属于已支持能力" in prompt
+    assert "静态隐私说明、帮助文案、风险提示或协议链接" in prompt
+
+
+def test_operation_prompt_keeps_reply_omission_and_visual_conflict_separate() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "属于回复不够完整，不等于回复与界面冲突" in prompt
+    assert "与可见状态相反的结果、对象或参数" in prompt
+
+
+def test_operation_prompt_distinguishes_unverified_condition_from_false_condition() -> None:
+    _, prompt = _operation_prompt()
+
+    assert "已核验条件不成立" in prompt
+    assert "没有能力或信息核验条件" in prompt
+    assert "不能把“无法核验”解释成“核验结果为空”" in prompt
+    assert "裁判不得假设 agent 应当暂停当前步骤" in prompt
 
 
 def test_operation_prompt_models_shared_clarification_dependencies() -> None:

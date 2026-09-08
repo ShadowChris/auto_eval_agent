@@ -166,12 +166,13 @@
         $("issues").innerHTML = '<div data-or="radar" class="or-radar"></div>';
         drawRadar();
       } else {
-        const shown = rows.slice(0, 10), max = Math.max(...rows.map(r => isCompare ? Math.abs(r.rateDelta || 0) : r.count), 1e-6);
-        $("issues").innerHTML = `<div class="or-muted">${isCompare ? "← 问题减少 · 占比差值（pp） · 问题增加 →" : "频次降序 · 数量 / 占比"}</div><div class="or-issue-rows">${shown.map(r => {
+        const max = Math.max(...rows.map(r => isCompare ? Math.abs(r.rateDelta || 0) : r.count), 1e-6);
+        const scrollClass = rows.length > 10 ? " or-issue-scroll" : "";
+        $("issues").innerHTML = `<div class="or-muted">${isCompare ? "← 问题减少 · 占比差值（pp） · 问题增加 →" : "频次降序 · 数量 / 占比"}</div><div class="or-issue-rows${scrollClass}">${rows.map(r => {
           const d = r.rateDelta || 0;
           const style = isCompare ? `left:${d < 0 ? 50 - Math.abs(d) / max * 50 : 50}%;width:${Math.abs(d) / max * 50}%;background:var(${d < 0 ? "--or-green" : "--or-red"})` : `width:${r.count / max * 100}%`;
           return `<button class="or-issue-bar" data-issue="${esc(r.name)}" aria-pressed="${state.issue === r.name}"><span>${esc(r.name)}</span><span class="or-track ${isCompare ? "or-delta" : ""}"><span class="or-fill" style="${style}"></span></span><span class="or-value ${isCompare ? deltaClass(d) : ""}">${isCompare ? signed(r.rateDelta, true) : `${r.count} · ${pct(r.rate)}`}</span></button>`;
-        }).join("")}</div>${rows.length > 10 ? `<p class="or-muted">显示 10 / ${rows.length} 类，完整类别见表格。</p>` : ""}`;
+        }).join("")}</div>${rows.length > 10 ? `<p class="or-muted">共 ${rows.length} 类，柱状图已完整展示，可在图内滚动查看。</p>` : ""}`;
       }
       $("issue-note").textContent = state.view === "radar"
         ? "相同轴、相同刻度；越向外问题越常见，面积不代表整体能力。下方可选择问题查看 Case。"

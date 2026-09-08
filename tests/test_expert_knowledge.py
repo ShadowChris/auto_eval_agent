@@ -30,7 +30,7 @@ def test_operation_expert_knowledge_loads_separately_from_policy() -> None:
     knowledge = config.expert_knowledge["operation"]
 
     assert knowledge.name == "任务类专家经验"
-    assert knowledge.version == 3
+    assert knowledge.version == 4
     assert any(
         "来电播报功能" in rule
         for category in knowledge.categories
@@ -38,6 +38,16 @@ def test_operation_expert_knowledge_loads_separately_from_policy() -> None:
     )
     assert any(
         "证书与凭据" in rule
+        for category in knowledge.categories
+        for rule in category.rules
+    )
+    assert any(
+        "支付密码、验证码、私钥" in rule
+        for category in knowledge.categories
+        for rule in category.rules
+    )
+    assert any(
+        "常规系统设置与设备操控任务默认" in rule
         for category in knowledge.categories
         for rule in category.rules
     )

@@ -38,7 +38,12 @@ const { chromium } = require("playwright");
     assert((await page.locator('[data-or="case-count"]').innerText()).includes(axisIssue));
     await page.screenshot({ path: path.join(output, "single-radar.png"), fullPage: true });
 
+    const comparisonPayload = JSON.parse(fs.readFileSync(comparisonPath, "utf8").match(/id="operation-report-data" type="application\/json">(.*?)<\/script>/s)[1]);
     await page.goto(pathToFileURL(comparisonPath).href);
+    const expectedIssueCount = comparisonPayload.pairs[0].issue_type_rows.length;
+    assert(expectedIssueCount > 10);
+    assert.equal(await page.locator('[data-or="issues"] .or-issue-bar').count(), expectedIssueCount);
+    assert((await page.locator('[data-or="issues"]').innerText()).includes(`共 ${expectedIssueCount} 类，柱状图已完整展示`));
     await page.selectOption('[data-or="issue"]', "任务结果错误");
     await page.locator('[data-change="resolved"]').click();
     assert((await page.locator('[data-or="case-count"]').innerText()).includes("1 条"));

@@ -180,6 +180,47 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
+.history-append-count { margin-top: 3px; color: #2563eb; font-size: 11px; }
+.append-submit-config {
+  margin: 10px 0 14px; padding: 11px 12px;
+  border: 1px solid #bfdbfe; border-radius: 8px; background: #f8fbff;
+}
+.append-submit-modes { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.append-submit-modes label { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+.append-target-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.append-target-row select { min-width: 340px; max-width: 100%; }
+.append-target-summary {
+  display: flex; align-items: center; gap: 8px 18px; flex-wrap: wrap;
+  margin-top: 9px; padding: 8px 10px; border-radius: 6px;
+  color: #334155; background: #eff6ff; font-size: 13px;
+}
+.append-target-summary span { color: #64748b; }
+.append-submit-hint { margin: 8px 0 0; line-height: 1.55; }
+.append-provider-row .hint { margin: 0; }
+.append-previewing { display: block; margin: 8px 0 0; }
+.append-preview-error { margin-top: 8px; }
+.append-conflict-preview {
+  margin-top: 10px; padding: 10px; border: 1px solid #fcd34d;
+  border-radius: 7px; background: #fffdf5;
+}
+.append-conflict-summary,
+.append-conflict-actions,
+.append-conflict-confirm {
+  display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap;
+}
+.append-conflict-summary { color: #475569; font-size: 13px; }
+.append-conflict-actions { margin-top: 9px; }
+.append-conflict-table-wrap { max-height: 360px; margin-top: 8px; }
+.append-conflict-table { min-width: 980px; }
+.append-conflict-table th:nth-child(1) { width: 110px; }
+.append-conflict-table th:nth-child(2) { width: 220px; }
+.append-conflict-table th:nth-child(3),
+.append-conflict-table th:nth-child(4) { width: 250px; }
+.append-conflict-table th:nth-child(5) { width: 220px; }
+.append-conflict-table small { display: block; margin-top: 3px; color: #94a3b8; }
+.append-conflict-table select { width: 100%; min-width: 190px; }
+.append-query-mismatch td { background: #fff7ed !important; }
+.append-conflict-confirm { margin-top: 10px; justify-content: flex-end; }
 .history-comparison-toolbar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin: 10px 0; padding: 9px 10px; border: 1px solid #dbeafe;

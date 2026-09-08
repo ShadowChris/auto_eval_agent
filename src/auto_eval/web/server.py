@@ -77,7 +77,7 @@ from .operation_comparison_import import (
     validate_uploaded_comparison_source,
 )
 from .llm_providers import LLMProviderPayload, LLMProviderStore
-from .runner import run_eval, run_rerun, run_single_api_item
+from .runner import run_append, run_eval, run_rerun, run_single_api_item
 from .tasks import (
     get_live_task,
     get_task,
@@ -147,8 +147,15 @@ class ParseReq(BaseModel):
 class EvalReq(BaseModel):
     mode: Mode
     items: list[dict]
-    options: dict = {}
+    options: dict = Field(default_factory=dict)
     dataset_name: str = ""
+    submit_mode: Literal["create", "append"] = "create"
+    task_id: str = ""
+    conflict_policy: Literal["reject", "preview", "smart", "resolve"] = "reject"
+    conflict_resolutions: dict[
+        str,
+        Literal["keep_existing", "replace_and_rerun"],
+    ] = Field(default_factory=dict)
 
 
 class SingleEvalReq(BaseModel):
@@ -377,6 +384,164 @@ def _validate_external_task_id(task_id: str) -> str:
             "task_id 仅支持 1-128 位字母、数字、下划线和连字符，且首位必须是字母或数字",
         )
     return normalized
+
+
+def _normalized_dataset_identity(value) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    normalized = str(value).strip()
+    if not normalized or normalized.lower() in {"nan", "none", "null"}:
+        return None
+    return normalized
+
+
+def _dataset_item_keys(item: dict) -> set[str]:
+    """返回题目的全部稳定标识，兼容表格原始列与标准字段。"""
+    source = item.get("source_data")
+    source = source if isinstance(source, dict) else {}
+    keys: set[str] = set()
+    for field in ("index", "序号", "id"):
+        for container in (source, item):
+            normalized = _normalized_dataset_identity(container.get(field))
+            if normalized is not None:
+                keys.add(normalized)
+    return keys
+
+
+def _dataset_item_key(item: dict) -> str | None:
+    """返回用于提示的主标识；表格优先原始 index/序号。"""
+    source = item.get("source_data")
+    source = source if isinstance(source, dict) else {}
+    for field in ("index", "序号", "id"):
+        for container in (source, item):
+            normalized = _normalized_dataset_identity(container.get(field))
+            if normalized is not None:
+                return normalized
+    return None
+
+
+def _normalized_query(value) -> str:
+    """Query 冲突只忽略首尾及连续空白，不做语义改写判断。"""
+    return " ".join(str(value or "").split())
+
+
+def _append_item_evaluation_status(task, item_index: int) -> str:
+    result = next(
+        (
+            row for row in task.results
+            if _web_result_index(row) == item_index
+        ),
+        None,
+    )
+    if result is not None:
+        return "failed" if result.get("error") else "succeeded"
+    progress = task.item_progress.get(str(item_index)) or {}
+    return "failed" if progress.get("status") == "error" else "missing"
+
+
+def _build_append_merge_preview(task, incoming_items: list[dict]) -> dict:
+    """构造只读合并计划；新批次内部重复仍视为数据错误。"""
+    identity_to_indices: dict[str, set[int]] = {}
+    for index, item in enumerate(task.items):
+        for identity in _dataset_item_keys(item):
+            identity_to_indices.setdefault(identity, set()).add(index)
+
+    seen_incoming: set[str] = set()
+    duplicate_labels: list[str] = []
+    missing_labels: list[str] = []
+    entries: list[dict] = []
+    conflicts: list[dict] = []
+    for position, item in enumerate(incoming_items):
+        identities = _dataset_item_keys(item)
+        key = _dataset_item_key(item)
+        label = str(item.get("id") or f"第{position + 1}条")
+        if not identities or key is None:
+            missing_labels.append(label)
+            continue
+        if identities & seen_incoming:
+            duplicate_labels.append(label)
+            continue
+        seen_incoming.update(identities)
+
+        matched_indices: set[int] = set()
+        for identity in identities:
+            matched_indices.update(identity_to_indices.get(identity) or set())
+        if len(matched_indices) > 1:
+            raise HTTPException(
+                409,
+                f"历史数据中标识 {key} 同时命中多条记录，无法安全自动合并",
+            )
+        existing_index = next(iter(matched_indices), None)
+        entry = {
+            "key": key,
+            "incoming_position": position,
+            "existing_index": existing_index,
+        }
+        entries.append(entry)
+        if existing_index is None:
+            continue
+
+        existing_item = task.items[existing_index]
+        existing_query = str(
+            existing_item.get("query") or existing_item.get("question") or ""
+        )
+        incoming_query = str(item.get("query") or item.get("question") or "")
+        query_match = _normalized_query(existing_query) == _normalized_query(incoming_query)
+        evaluation_status = _append_item_evaluation_status(task, existing_index)
+        recommended_action = None
+        recommendation_reason = "Query 不一致，需要人工确认保留哪一条"
+        if query_match and evaluation_status in {"failed", "missing"}:
+            recommended_action = "replace_and_rerun"
+            recommendation_reason = "旧数据评测调用失败或没有结果，建议使用新数据重跑"
+        elif query_match:
+            recommended_action = "keep_existing"
+            recommendation_reason = "旧数据已经正常产出评测结果，建议保留并跳过新数据"
+        conflict = {
+            **entry,
+            "existing_dataset_index": existing_index + 1,
+            "existing_id": existing_item.get("id") or f"q{existing_index}",
+            "incoming_id": item.get("id") or f"第{position + 1}条",
+            "existing_query": existing_query,
+            "incoming_query": incoming_query,
+            "query_match": query_match,
+            "existing_evaluation_status": evaluation_status,
+            "recommended_action": recommended_action,
+            "recommendation_reason": recommendation_reason,
+        }
+        conflicts.append(conflict)
+
+    if missing_labels:
+        raise HTTPException(
+            422,
+            "追加数据缺少稳定题目标识（index、序号或 id）："
+            + "、".join(missing_labels[:10]),
+        )
+    if duplicate_labels:
+        raise HTTPException(
+            409,
+            "新增数据集内部包含重复题目标识："
+            + "、".join(duplicate_labels[:10])
+            + (" 等" if len(duplicate_labels) > 10 else ""),
+        )
+
+    return {
+        "incoming_total": len(incoming_items),
+        "new_count": len(entries) - len(conflicts),
+        "conflict_count": len(conflicts),
+        "recommended_keep_count": sum(
+            row["recommended_action"] == "keep_existing" for row in conflicts
+        ),
+        "recommended_replace_count": sum(
+            row["recommended_action"] == "replace_and_rerun" for row in conflicts
+        ),
+        "unresolved_count": sum(
+            row["recommended_action"] is None for row in conflicts
+        ),
+        "conflicts": conflicts,
+        "_entries": entries,
+    }
 
 
 def _web_result_index(result: dict) -> int | None:
@@ -715,11 +880,46 @@ async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
     app_cfg = cfg()
-    requested_options = _with_operation_eval_persona(
-        app_cfg,
-        req.mode,
-        req.options,
-    )
+    append_task = None
+    if req.submit_mode == "append":
+        if req.mode != "operation":
+            raise HTTPException(422, "目前仅任务类（录屏）支持追加评估")
+        if not req.task_id.strip():
+            raise HTTPException(422, "追加评估必须指定 task_id")
+        task_id = _validate_external_task_id(req.task_id)
+        append_task = get_task(task_id)
+        if append_task is None:
+            raise HTTPException(404, "目标历史评估集不存在")
+        if append_task.mode != req.mode:
+            raise HTTPException(409, "目标历史评估集的评测模式不一致")
+        if (append_task.options or {}).get("operation_layout") == "multi_group":
+            raise HTTPException(409, "任务类多组评估暂不支持分段追加")
+        if append_task.status in {"pending", "running", "rerunning"}:
+            raise HTTPException(409, "目标历史评估集正在运行，请完成或中断后再追加")
+        if append_task.execution is not None and not append_task.execution.done():
+            raise HTTPException(409, "目标历史评估集已有执行中的操作")
+        if any(
+            not execution.done()
+            for execution in append_task.item_executions.values()
+        ):
+            raise HTTPException(409, "目标历史评估集仍有单题任务在执行")
+        append_options = dict(append_task.options or {})
+        for key in ("concurrency", "eval_timeout_s", "eval_timeout"):
+            if key in req.options:
+                append_options[key] = req.options[key]
+        requested_options = _with_operation_eval_persona(
+            app_cfg,
+            req.mode,
+            append_options,
+        )
+    else:
+        if req.task_id.strip():
+            raise HTTPException(422, "新建评估不能指定 task_id")
+        requested_options = _with_operation_eval_persona(
+            app_cfg,
+            req.mode,
+            req.options,
+        )
     _validate_eval_request(
         req.model_copy(update={"options": requested_options}),
         app_cfg,
@@ -733,19 +933,215 @@ async def api_eval(req: EvalReq):
         raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    task = new_task(
-        req.mode,
-        req.items,
-        task_options,
-        dataset_name=req.dataset_name.strip(),
-    )
-    async def _start_later():
-        # 先把 task_id 响应给前端，再启动可能较重的评估任务；
-        # 避免后台裁判/工具调用抢占事件循环，导致 /api/eval 本身迟迟不返回。
-        await asyncio.sleep(0.05)
-        await run_eval(task, runtime_cfg)
+    if append_task is None:
+        task = new_task(
+            req.mode,
+            req.items,
+            task_options,
+            dataset_name=req.dataset_name.strip(),
+        )
 
-    execution = asyncio.create_task(_start_later())
+        async def _start_later():
+            # 先把 task_id 响应给前端，再启动可能较重的评估任务；
+            # 避免后台裁判/工具调用抢占事件循环，导致 /api/eval 本身迟迟不返回。
+            await asyncio.sleep(0.05)
+            await run_eval(task, runtime_cfg)
+
+        execution = asyncio.create_task(_start_later())
+        action = "created"
+        item_indices = list(range(len(task.items)))
+    else:
+        task = append_task
+        merge_preview = _build_append_merge_preview(task, req.items)
+        public_preview = {
+            key: value
+            for key, value in merge_preview.items()
+            if not key.startswith("_")
+        }
+        if req.conflict_policy == "preview":
+            return {
+                "task_id": task.id,
+                "action": "preview",
+                "dataset_size": len(task.items),
+                "merge_preview": public_preview,
+            }
+
+        conflicts = merge_preview["conflicts"]
+        if req.conflict_policy == "reject" and conflicts:
+            labels = [str(row["key"]) for row in conflicts]
+            raise HTTPException(
+                409,
+                "追加数据包含历史重复题目："
+                + "、".join(labels[:10])
+                + (" 等" if len(labels) > 10 else ""),
+            )
+        resolutions: dict[str, str] = {}
+        if req.conflict_policy == "smart":
+            unresolved = [
+                row for row in conflicts if row["recommended_action"] is None
+            ]
+            if unresolved:
+                labels = "、".join(str(row["key"]) for row in unresolved[:10])
+                raise HTTPException(
+                    409,
+                    f"以下重复题目的 Query 不一致，需要人工选择：{labels}",
+                )
+            resolutions = {
+                str(row["key"]): str(row["recommended_action"])
+                for row in conflicts
+            }
+        elif req.conflict_policy == "resolve":
+            missing_resolutions = [
+                str(row["key"])
+                for row in conflicts
+                if str(row["key"]) not in req.conflict_resolutions
+            ]
+            if missing_resolutions:
+                raise HTTPException(
+                    422,
+                    "以下重复题目尚未选择保留策略："
+                    + "、".join(missing_resolutions[:10]),
+                )
+            resolutions = dict(req.conflict_resolutions)
+
+        segment_no = len(task.append_history) + 2
+        source_dataset_name = req.dataset_name.strip() or f"追加批次{segment_no}"
+        previous_state = {
+            "items": list(task.items),
+            "results": list(task.results),
+            "item_progress": dict(task.item_progress),
+            "progress_events": dict(task.progress_events),
+            "done_total": task.done_total,
+            "summary": task.summary,
+            "options": task.options,
+            "status": task.status,
+            "error": task.error,
+            "finished_at": task.finished_at,
+        }
+        item_indices: list[int] = []
+        inserted_indices: list[int] = []
+        replaced_indices: list[int] = []
+        skipped_keys: list[str] = []
+        for entry in merge_preview["_entries"]:
+            position = int(entry["incoming_position"])
+            incoming = {
+                **req.items[position],
+                "evaluation_segment_no": segment_no,
+                "evaluation_source_dataset": source_dataset_name,
+            }
+            existing_index = entry["existing_index"]
+            if existing_index is None:
+                new_index = len(task.items)
+                task.items.append(incoming)
+                inserted_indices.append(new_index)
+                item_indices.append(new_index)
+                continue
+            action = resolutions.get(str(entry["key"]), "keep_existing")
+            if action == "keep_existing":
+                skipped_keys.append(str(entry["key"]))
+                continue
+            task.items[existing_index] = incoming
+            replaced_indices.append(existing_index)
+            item_indices.append(existing_index)
+
+        replaced_set = set(replaced_indices)
+        if replaced_set:
+            task.results = [
+                row for row in task.results
+                if _web_result_index(row) not in replaced_set
+            ]
+            for index in replaced_set:
+                task.item_progress.pop(str(index), None)
+                task.item_progress.pop(index, None)
+                task.progress_events.pop(str(index), None)
+                task.progress_events.pop(index, None)
+            task.done_total = len({
+                result_index for row in task.results
+                if (result_index := _web_result_index(row)) is not None
+            })
+
+        merge_summary = {
+            "incoming_count": len(req.items),
+            "inserted_count": len(inserted_indices),
+            "replaced_count": len(replaced_indices),
+            "skipped_count": len(skipped_keys),
+            "conflict_count": len(conflicts),
+        }
+        append_id = f"append-{uuid.uuid4().hex[:8]}"
+        if not item_indices:
+            finished_at = datetime.now().timestamp()
+            completed_attempt = {
+                "append_id": append_id,
+                "segment_no": segment_no,
+                "source_dataset_name": source_dataset_name,
+                "item_indices": [],
+                "inserted_item_indices": [],
+                "replaced_item_indices": [],
+                "skipped_item_keys": skipped_keys,
+                "total": 0,
+                "done": 0,
+                "status": "done",
+                "started_at": finished_at,
+                "finished_at": finished_at,
+                "duration_s": 0.0,
+                **merge_summary,
+            }
+            task.append_history.append(completed_attempt)
+            if not save_task(task):
+                task.append_history.pop()
+                raise HTTPException(500, "追加记录写入历史快照失败")
+            return {
+                "task_id": task.id,
+                "action": "skipped",
+                "item_indices": [],
+                "dataset_size": len(task.items),
+                "append_id": append_id,
+                "merge_summary": merge_summary,
+            }
+
+        task.options = task_options
+        task.status = "running"
+        task.error = None
+        task.finished_at = None
+        task.summary = {}
+        task.active_append = {
+            "append_id": append_id,
+            "segment_no": segment_no,
+            "source_dataset_name": source_dataset_name,
+            "item_indices": item_indices,
+            "inserted_item_indices": inserted_indices,
+            "replaced_item_indices": replaced_indices,
+            "skipped_item_keys": skipped_keys,
+            "total": len(item_indices),
+            "done": 0,
+            "status": "starting",
+            "started_at": datetime.now().timestamp(),
+            "base_duration_s": float(task.duration_s or 0.0),
+            "base_status": previous_state["status"],
+            "base_error": previous_state["error"],
+            "judge_backend": dict(task_options.get("judge_backend") or {}),
+            "concurrency": task_options.get("concurrency"),
+            "eval_timeout_s": (
+                task_options.get("eval_timeout_s")
+                or task_options.get("eval_timeout")
+            ),
+            **merge_summary,
+        }
+        if not save_task(task):
+            task.items = previous_state["items"]
+            task.results = previous_state["results"]
+            task.item_progress = previous_state["item_progress"]
+            task.progress_events = previous_state["progress_events"]
+            task.done_total = previous_state["done_total"]
+            task.summary = previous_state["summary"]
+            task.active_append = None
+            task.options = previous_state["options"]
+            task.status = previous_state["status"]
+            task.error = previous_state["error"]
+            task.finished_at = previous_state["finished_at"]
+            raise HTTPException(500, "追加数据写入历史快照失败，未启动评估")
+        execution = asyncio.create_task(run_append(task, runtime_cfg, item_indices))
+        action = "appended"
     task.execution = execution
 
     def clear_execution(finished: asyncio.Task) -> None:
@@ -753,7 +1149,14 @@ async def api_eval(req: EvalReq):
             task.execution = None
 
     execution.add_done_callback(clear_execution)
-    return {"task_id": task.id}
+    return {
+        "task_id": task.id,
+        "action": action,
+        "item_indices": item_indices,
+        "dataset_size": len(task.items),
+        "append_id": (task.active_append or {}).get("append_id"),
+        "merge_summary": merge_summary if append_task is not None else None,
+    }
 
 
 @app.post("/api/eval/single", status_code=202)
@@ -1078,7 +1481,12 @@ async def api_stream(
                     "duration_s": task.elapsed_s(),
                     "error": task.error,
                     "active_rerun": task.active_rerun,
-                    "run_kind": "rerun" if task.status == "rerunning" else "initial",
+                    "active_append": task.active_append,
+                    "run_kind": (
+                        "rerun" if task.status == "rerunning"
+                        else "append" if task.active_append
+                        else "initial"
+                    ),
                     "rerun_progress": (task.active_rerun or {}).get("done"),
                     "rerun_total": (task.active_rerun or {}).get("total"),
                 },
@@ -1211,6 +1619,8 @@ def api_history(
             "error": live.error,
             "active_rerun": live.active_rerun,
             "rerun_count": len(live.rerun_history),
+            "active_append": live.active_append,
+            "append_count": len(live.append_history),
         })
     return {
         "items": rows,
@@ -1420,6 +1830,54 @@ async def api_eval_cancel(task_id: str):
     task = get_live_task(task_id)
     if task is None:
         raise HTTPException(404, "当前服务中没有这个运行任务")
+    if task.active_append:
+        execution = task.execution
+        if execution is not None and not execution.done():
+            execution.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(execution), timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        # 极短窗口内取消时，run_append 可能尚未进入 finally；这里兜底落盘。
+        if task.active_append:
+            attempt = dict(task.active_append)
+            finished_at = datetime.now().timestamp()
+            attempt.update({
+                "status": "cancelled",
+                "error": "用户手动中断追加评估",
+                "finished_at": finished_at,
+            })
+            started_at = float(attempt.get("started_at") or finished_at)
+            attempt["duration_s"] = round(max(0.0, finished_at - started_at), 3)
+            base_duration_s = float(
+                attempt.pop("base_duration_s", task.duration_s or 0.0)
+            )
+            task.duration_s = round(base_duration_s + attempt["duration_s"], 3)
+            task.finished_at = finished_at
+            task.append_history.append(attempt)
+            task.active_append = None
+            task.status = "cancelled"
+            task.error = attempt["error"]
+            for index in attempt.get("item_indices") or []:
+                previous = task.item_progress.get(str(index)) or {}
+                if previous.get("status") in {"done", "error", "cancelled"}:
+                    continue
+                task.item_progress[str(index)] = {
+                    **previous,
+                    "item_index": index,
+                    "item_id": task.items[index].get("id") or f"q{index}",
+                    "status": "cancelled",
+                    "percent": previous.get("percent", 0),
+                    "message": "追加评估已中断",
+                    "finished_at": finished_at,
+                }
+            await task.publish("cancelled", {
+                "message": task.error,
+                "duration_s": task.duration_s,
+                "append": attempt,
+            })
+            save_task(task)
+        return {"ok": True, "task_id": task.id, "status": task.status}
     if task.status == "rerunning":
         execution = task.execution
         if execution is not None and not execution.done():

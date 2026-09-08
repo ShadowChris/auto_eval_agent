@@ -231,12 +231,19 @@ async def test_multi_group_judge_sends_all_images_once_and_returns_group_scores(
     assert "3. 【逐组最终映射】" in client.calls[0][0]
     assert "不得合并组间证据" in client.calls[0][0]
     assert "身份验证或敏感操作环节，不得判 ok" in client.calls[0][0]
+    assert "【执行链路识别（独立观察字段）】" not in client.calls[0][0]
+    assert '"execution_routes"' not in client.calls[0][0]
+    assert '"route_evidence"' not in client.calls[0][0]
+    assert '"route_rationale"' not in client.calls[0][0]
+    assert '"route_status"' not in client.calls[0][0]
     assert "【实验组 组1】" in client.calls[0][1]
     assert "【实验组 A】" not in client.calls[0][1]
     assert "【实验组 B】" not in client.calls[0][1]
     assert scores["a"].correctness == "ok"
     assert scores["b"].correctness == "nok"
     assert scores["b"].issue_types == ["应执行目标未执行"]
+    assert scores["a"].execution_routes == []
+    assert scores["b"].execution_routes == []
 
 
 def test_multi_group_exports_horizontal_and_long_views(tmp_path: Path) -> None:

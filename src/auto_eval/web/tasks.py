@@ -55,6 +55,8 @@ class Task:
     error: str | None = None
     active_rerun: dict[str, Any] | None = None
     rerun_history: list[dict[str, Any]] = field(default_factory=list)
+    active_append: dict[str, Any] | None = None
+    append_history: list[dict[str, Any]] = field(default_factory=list)
     event_cursor: int = 0
     event_log: list[dict] = field(default_factory=list, repr=False)
     last_persist_at: float = field(default=0.0, repr=False)
@@ -115,6 +117,16 @@ class Task:
 
     def elapsed_s(self, now: float | None = None) -> float | None:
         """返回已结束或运行中的批跑墙钟耗时。"""
+        if self.active_append:
+            base = float(
+                self.active_append.get("base_duration_s")
+                or self.duration_s
+                or 0.0
+            )
+            started = self.active_append.get("started_at")
+            if started is not None:
+                current = time.time() if now is None else now
+                return round(base + max(0.0, current - float(started)), 3)
         if self.duration_s is not None:
             return self.duration_s
         if self.started_at is None:
@@ -235,7 +247,20 @@ def get_task(task_id: str, *, cache: bool = True) -> Task | None:
     error = snapshot.get("error")
     active_rerun = snapshot.get("active_rerun")
     rerun_history = list(snapshot.get("rerun_history") or [])
+    active_append = snapshot.get("active_append")
+    append_history = list(snapshot.get("append_history") or [])
+    stored_duration_s = (
+        float(snapshot["duration_s"])
+        if snapshot.get("duration_s") is not None
+        else None
+    )
+    stored_finished_at = (
+        float(snapshot["finished_at"])
+        if snapshot.get("finished_at") is not None
+        else None
+    )
     recovered_rerun = False
+    recovered_append = False
     if status == "rerunning":
         recovered_rerun = True
         attempt = dict(active_rerun or {})
@@ -255,8 +280,35 @@ def get_task(task_id: str, *, cache: bool = True) -> Task | None:
             status = "done"
         active_rerun = None
     elif status in {"pending", "running"}:
-        status = "error"
-        error = error or "服务中断，已保留中断前完成的评估结果"
+        if active_append:
+            recovered_append = True
+            attempt = dict(active_append)
+            finished_at = time.time()
+            attempt.update({
+                "status": "interrupted",
+                "finished_at": finished_at,
+                "error": attempt.get("error") or "服务中断，追加评估已停止；已完成结果予以保留",
+            })
+            started_at = attempt.get("started_at")
+            if started_at is not None:
+                attempt["duration_s"] = round(
+                    max(0.0, finished_at - float(started_at)), 3,
+                )
+            base_duration_s = float(
+                attempt.pop("base_duration_s", stored_duration_s or 0.0)
+            )
+            stored_duration_s = round(
+                base_duration_s + float(attempt.get("duration_s") or 0.0),
+                3,
+            )
+            stored_finished_at = finished_at
+            append_history.append(attempt)
+            active_append = None
+            status = "cancelled"
+            error = attempt["error"]
+        else:
+            status = "error"
+            error = error or "服务中断，已保留中断前完成的评估结果"
     task = Task(
         id=snapshot.get("task_id") or task_id,
         mode=snapshot.get("mode") or "single",
@@ -277,27 +329,33 @@ def get_task(task_id: str, *, cache: bool = True) -> Task | None:
             if snapshot.get("started_at") is not None
             else None
         ),
-        finished_at=(
-            float(snapshot["finished_at"])
-            if snapshot.get("finished_at") is not None
-            else None
-        ),
-        duration_s=(
-            float(snapshot["duration_s"])
-            if snapshot.get("duration_s") is not None
-            else None
-        ),
+        finished_at=stored_finished_at,
+        duration_s=stored_duration_s,
         done_total=int(snapshot.get("done_total") or len(snapshot.get("results") or [])),
         error=error,
         active_rerun=active_rerun,
         rerun_history=rerun_history,
+        active_append=active_append,
+        append_history=append_history,
         event_cursor=int(snapshot.get("event_cursor") or 0),
     )
+    if recovered_append:
+        for index in attempt.get("item_indices") or []:
+            progress = task.item_progress.get(str(index)) or {}
+            if progress.get("status") in {"done", "error", "cancelled"}:
+                continue
+            task.item_progress[str(index)] = {
+                **progress,
+                "item_index": index,
+                "status": "cancelled",
+                "message": "服务中断，追加评估已停止",
+                "finished_at": stored_finished_at,
+            }
     task.touch()
     if cache:
         TASKS[task.id] = task
         prune_task_cache(keep_task_ids={task.id})
-    if recovered_rerun:
+    if recovered_rerun or recovered_append:
         save_task(task)
     return task
 
