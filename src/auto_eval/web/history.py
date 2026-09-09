@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import time
 import uuid
 import zipfile
@@ -28,6 +29,12 @@ from ..judges.trace_storage import (
     trace_path_reference,
 )
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from .dataset_revision import (
+    active_result_count,
+    active_success_count,
+    active_total,
+    is_item_active,
+)
 
 
 HISTORY_DIR = RUNS_DIR / "web_history"
@@ -90,6 +97,8 @@ def task_to_snapshot(task) -> dict:
         "rerun_history": getattr(task, "rerun_history", []),
         "active_append": getattr(task, "active_append", None),
         "append_history": getattr(task, "append_history", []),
+        "dataset_batches": getattr(task, "dataset_batches", []),
+        "dataset_change_log": getattr(task, "dataset_change_log", []),
         "judge_trace_path": judge_trace_reference,
     }
 
@@ -127,6 +136,113 @@ def save_task(task, *, max_attempts: int = 3) -> bool:
         last_error,
     )
     return False
+
+
+def _dataset_history_dir(task_id: str, session_name: str = "") -> Path:
+    snapshot_path = _task_path(task_id, session_name)
+    return snapshot_path.with_name(f"{snapshot_path.stem}_datasets")
+
+
+def _dataset_artifact_reference(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except (OSError, ValueError):
+        return str(path.resolve())
+
+
+def _write_dataset_artifact(path: Path, content: str) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return _dataset_artifact_reference(path)
+
+
+def save_dataset_batch_snapshot(
+    task,
+    *,
+    batch_id: str,
+    batch_no: int,
+    kind: str,
+    source_name: str,
+    items: list[dict],
+) -> str:
+    """把一次实际导入的规范化输入独立保存为 JSONL。"""
+    source_stem = _safe_name(Path(source_name or "dataset").stem).strip("_")
+    source_stem = source_stem[:60] or "dataset"
+    filename = (
+        f"{max(1, int(batch_no)):04d}_{_safe_name(kind) or 'import'}_"
+        f"{source_stem}_{_safe_name(batch_id)}.jsonl"
+    )
+    content = "".join(
+        json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n"
+        for item in items
+    )
+    return _write_dataset_artifact(
+        _dataset_history_dir(task.id, task.session_name) / filename,
+        content,
+    )
+
+
+def save_dataset_rollback_snapshot(
+    task,
+    *,
+    batch_id: str,
+    payload: dict,
+) -> str:
+    """保存追加覆盖前的旧题、旧结果和进度，供整批回滚。"""
+    filename = f"rollback_{_safe_name(batch_id)}.json"
+    return _write_dataset_artifact(
+        _dataset_history_dir(task.id, task.session_name) / filename,
+        json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2),
+    )
+
+
+def load_dataset_artifact(reference: str) -> dict | list[dict] | None:
+    """读取系统生成的数据集归档，并限制路径必须位于 web_history。"""
+    if not reference:
+        return None
+    path = Path(reference)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(HISTORY_DIR.resolve())
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    try:
+        if resolved.suffix.lower() == ".jsonl":
+            return [
+                json.loads(line)
+                for line in resolved.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        return json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def dataset_artifact_path(reference: str) -> Path | None:
+    """返回可下载的数据集归档路径，拒绝越出历史目录的引用。"""
+    if not reference:
+        return None
+    path = Path(reference)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(HISTORY_DIR.resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved if resolved.is_file() else None
 
 
 def load_snapshot(task_id: str) -> dict | None:
@@ -171,10 +287,16 @@ def delete_snapshot(task_id: str) -> bool:
     if not path.exists():
         return False
     try:
+        dataset_dir = path.with_name(f"{path.stem}_datasets")
         path.unlink()
-        return True
     except Exception:
         return False
+    if dataset_dir.is_dir():
+        try:
+            shutil.rmtree(dataset_dir)
+        except OSError:
+            logger.warning("删除数据集版本目录失败: %s", dataset_dir, exc_info=True)
+    return True
 
 
 def list_snapshots(limit: int = 50) -> list[dict]:
@@ -207,8 +329,10 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "mode": data.get("mode"),
             "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
             "status": status,
-            "total": len(data.get("items") or []),
-            "done": len([r for r in (data.get("results") or []) if "error" not in r]),
+            "total": active_total(data.get("items") or []),
+            "done": active_success_count(
+                data.get("items") or [], data.get("results") or [],
+            ),
             "created_at": created_at,
             "updated_at": data.get("updated_at") or data.get("created_at"),
             **_stored_timing(data),
@@ -217,6 +341,10 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "rerun_count": len(data.get("rerun_history") or []),
             "active_append": data.get("active_append"),
             "append_count": len(data.get("append_history") or []),
+            "excluded_count": sum(
+                not is_item_active(item) for item in (data.get("items") or [])
+            ),
+            "dataset_batch_count": len(data.get("dataset_batches") or []),
             **_judge_backend_summary(data),
             "preview": _preview(data),
         })
@@ -279,11 +407,10 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             "mode": data.get("mode"),
             "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
             "status": status,
-            "total": len(data.get("items") or []),
-            "done": len([
-                result for result in (data.get("results") or [])
-                if "error" not in result
-            ]),
+            "total": active_total(data.get("items") or []),
+            "done": active_success_count(
+                data.get("items") or [], data.get("results") or [],
+            ),
             "created_at": created_at,
             "updated_at": data.get("updated_at") or created_at,
             **_stored_timing(data),
@@ -292,6 +419,10 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             "rerun_count": len(data.get("rerun_history") or []),
             "active_append": data.get("active_append"),
             "append_count": len(data.get("append_history") or []),
+            "excluded_count": sum(
+                not is_item_active(item) for item in (data.get("items") or [])
+            ),
+            "dataset_batch_count": len(data.get("dataset_batches") or []),
             **_judge_backend_summary(data),
             "preview": _preview(data),
         })
@@ -301,7 +432,8 @@ def _preview(data: dict) -> str:
     items = data.get("items") or []
     if not items:
         return ""
-    q = str(items[0].get("query") or "")
+    first = next((item for item in items if is_item_active(item)), items[0])
+    q = str(first.get("query") or "")
     return q[:80] + ("…" if len(q) > 80 else "")
 
 
@@ -326,6 +458,8 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
             "query_images",
             "case_id", "evaluation_strategy", "alignment_status",
             "alignment_warnings", "group_variants", "image_input",
+            "dataset_status", "dataset_revision", "dataset_source_batch_id",
+            "evaluation_segment_no", "evaluation_source_dataset",
         }
         items = [
             {key: value for key, value in item.items() if key in item_fields}
@@ -340,7 +474,21 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         saved_done_total = int(data.get("done_total") or 0)
     except (TypeError, ValueError):
         saved_done_total = 0
-    done_total = max(saved_done_total, len(results))
+    has_excluded = any(not is_item_active(item) for item in items)
+    visible_results = (
+        [
+            row for row in results
+            if (
+                str(row.get("index", "")).isdigit()
+                and 0 <= int(row["index"]) < len(items)
+                and is_item_active(items[int(row["index"])])
+            )
+        ]
+        if has_excluded else results
+    )
+    done_total = active_result_count(items, results)
+    if not has_excluded:
+        done_total = max(saved_done_total, len(results), done_total)
     return {
         "task_id": data.get("task_id"),
         "session_name": data.get("session_name"),
@@ -350,7 +498,7 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         "items": items,
         "options": data.get("options") or {},
         "status": data.get("status"),
-        "results": results,
+        "results": visible_results,
         "item_progress": data.get("item_progress") or {},
         "progress_events": progress_events,
         "summary": data.get("summary") or {},
@@ -359,13 +507,16 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         **_stored_timing(data),
         # 总进度作为历史详情的显式契约，供新标签页直接恢复。
         "done_total": done_total,
-        "total": len(items),
+        "total": active_total(items),
         "event_cursor": int(data.get("event_cursor") or 0),
         "error": data.get("error"),
         "active_rerun": data.get("active_rerun"),
         "rerun_history": data.get("rerun_history") or [],
         "active_append": data.get("active_append"),
         "append_history": data.get("append_history") or [],
+        "dataset_batches": data.get("dataset_batches") or [],
+        "dataset_change_log": data.get("dataset_change_log") or [],
+        "excluded_count": sum(not is_item_active(item) for item in items),
     }
 
 
@@ -428,6 +579,7 @@ _LEGACY_SEQUENCE_RE = re.compile(
 
 def _jsonl_eval_run(snapshot: dict) -> dict:
     options = snapshot.get("options") or {}
+    items = snapshot.get("items") or []
     return {
         "task_id": snapshot.get("task_id"),
         "session_name": snapshot.get("session_name") or "",
@@ -444,6 +596,8 @@ def _jsonl_eval_run(snapshot: dict) -> dict:
         "eval_timeout_s": options.get("eval_timeout_s"),
         "rerun_count": len(snapshot.get("rerun_history") or []),
         "append_count": len(snapshot.get("append_history") or []),
+        "dataset_batch_count": len(snapshot.get("dataset_batches") or []),
+        "excluded_count": len(items) - active_total(items),
     }
 
 
@@ -526,6 +680,8 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
     item_progress = snapshot.get("item_progress") or {}
     rows: list[dict] = []
     for index, item in enumerate(items):
+        if not is_item_active(item):
+            continue
         source = _source_data_for_item(item)
         conflicts = sorted(_JSONL_RESERVED_SOURCE_FIELDS.intersection(source))
         if conflicts:
@@ -571,6 +727,8 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
                     or snapshot.get("dataset_name")
                     or ""
                 ),
+                "dataset_revision": int(item.get("dataset_revision") or 1),
+                "source_batch_id": item.get("dataset_source_batch_id") or "",
             },
         })
         rows.append(row)
@@ -667,7 +825,20 @@ def _with_operation_compat(data: dict) -> dict:
         results.append(row)
     normalized["results"] = results
     summary = dict(data.get("summary") or {})
-    judged = [row for row in results if "error" not in row and row.get("correctness")]
+    current_results = [
+        row for row in results
+        if (
+            str(row.get("index", "")).isdigit()
+            and 0 <= int(row["index"]) < len(data.get("items") or [])
+            and is_item_active((data.get("items") or [])[int(row["index"])])
+        )
+    ] if any(
+        not is_item_active(item) for item in (data.get("items") or [])
+    ) else results
+    judged = [
+        row for row in current_results
+        if "error" not in row and row.get("correctness")
+    ]
     if judged:
         ok_count = sum(row.get("correctness") == "ok" for row in judged)
         summary.pop("right_count", None)
@@ -677,8 +848,8 @@ def _with_operation_compat(data: dict) -> dict:
         summary["completion_rate"] = round(ok_count / len(judged), 3)
     if (data.get("options") or {}).get("operation_layout") != "multi_group":
         summary["operation_statistics"] = summarize_operation_results(
-            results,
-            total_cases=len(data.get("items") or []),
+            current_results,
+            total_cases=active_total(data.get("items") or []),
         )
     normalized["summary"] = summary
     return normalized
@@ -745,6 +916,12 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     append_rows = _append_record_rows(snapshot)
     if append_rows:
         rows["追加记录"] = append_rows
+    dataset_batch_rows = _dataset_batch_rows(snapshot)
+    if dataset_batch_rows:
+        rows["导入批次"] = dataset_batch_rows
+    dataset_change_rows = _dataset_change_rows(snapshot)
+    if dataset_change_rows:
+        rows["数据变更记录"] = dataset_change_rows
     if mode == "operation":
         # 任务类只有一个固定垂域，不再生成重复的按垂域拆分表、
         # 失败表和通用垂域统计表。失败与告警仍在“逐题结果”原行展示。
@@ -783,6 +960,8 @@ def _results_with_identity(snapshot: dict) -> list[dict]:
         except (TypeError, ValueError):
             index = position
         item = items[index] if 0 <= index < len(items) else {}
+        if item and not is_item_active(item):
+            continue
         if not row.get("item_id"):
             row["item_id"] = item.get("id") or f"q{index}"
         if not row.get("query"):
@@ -814,6 +993,8 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
     aligned: list[dict] = []
     progress = snapshot.get("item_progress") or {}
     for index, item in enumerate(items):
+        if not is_item_active(item):
+            continue
         item_id = str(item.get("id") or f"q{index}")
         result = by_index.get(index) or by_item_id.get(item_id)
         if result is not None:
@@ -850,6 +1031,9 @@ _RUNTIME_ITEM_FIELDS = {
     "video_name",
     "duration",
     "source_data",
+    "dataset_status",
+    "dataset_revision",
+    "dataset_source_batch_id",
 }
 
 # 任务类“逐题结果”只保留分析和定位问题所需的字段。
@@ -865,6 +1049,8 @@ _OPERATION_EXPORT_COLUMNS = (
     "分享链接",
     "评估分段",
     "分段来源数据集",
+    "数据版本",
+    "来源批次ID",
     "query_images",
     "query_image_count",
     "context",
@@ -938,7 +1124,12 @@ def _operation_export_rows(
     """
     export: list[dict] = []
     for position, result in enumerate(results):
-        item = items[position] if position < len(items) else {}
+        raw_index = result.get("index", position)
+        try:
+            item_index = int(raw_index)
+        except (TypeError, ValueError):
+            item_index = position
+        item = items[item_index] if 0 <= item_index < len(items) else {}
         source = _source_data_for_item(item)
         item_id = result.get("item_id") or item.get("id") or f"q{position}"
         source_video_path = source.get("video_path")
@@ -957,6 +1148,8 @@ def _operation_export_rows(
             "分段来源数据集": (
                 item.get("evaluation_source_dataset") or dataset_name
             ),
+            "数据版本": int(item.get("dataset_revision") or 1),
+            "来源批次ID": item.get("dataset_source_batch_id") or "",
             "item_id": item_id,
             "index": (
                 source.get("index")
@@ -1297,6 +1490,8 @@ def _source_data_for_item(item: dict) -> dict:
 def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
     rows: list[dict] = []
     for index, item in enumerate(snapshot.get("items") or []):
+        if not is_item_active(item):
+            continue
         source = _source_data_for_item(item)
         row: dict[str, Any] = {
             "数据集序号": index + 1,
@@ -1306,6 +1501,9 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
                 or snapshot.get("dataset_name")
                 or ""
             ),
+            "数据状态": item.get("dataset_status") or "active",
+            "数据版本": int(item.get("dataset_revision") or 1),
+            "来源批次ID": item.get("dataset_source_batch_id") or "",
             "source_line": item.get("source_line") or index + 1,
             "id": item.get("id") or f"q{index}",
             "query": item.get("query") or item.get("question") or "",
@@ -1377,6 +1575,8 @@ def _frame_manifest_rows(
         and (snapshot.get("options") or {}).get("operation_layout") == "multi_group"
     )
     for item_index, case in enumerate(snapshot.get("items") or []):
+        if not multi_operation and not is_item_active(case):
+            continue
         if multi_operation:
             for variant in case.get("group_variants") or []:
                 item = variant.get("item")
@@ -1555,6 +1755,60 @@ def _append_record_rows(snapshot: dict) -> list[dict]:
     return rows
 
 
+def _dataset_batch_rows(snapshot: dict) -> list[dict]:
+    rows: list[dict] = []
+    for batch in snapshot.get("dataset_batches") or []:
+        rows.append({
+            "批次序号": batch.get("batch_no", ""),
+            "batch_id": batch.get("batch_id", ""),
+            "类型": "初始导入" if batch.get("kind") == "initial" else "追加导入",
+            "来源数据集": batch.get("source_dataset_name", ""),
+            "导入时间": _format_ts(batch.get("imported_at")),
+            "原始行数": batch.get("row_count", 0),
+            "实际新增": batch.get("inserted_count", 0),
+            "覆盖修订": batch.get("replaced_count", 0),
+            "保留旧数据": batch.get("skipped_count", 0),
+            "当前状态": batch.get("status", "active"),
+            "回滚时间": _format_ts(batch.get("rolled_back_at")),
+            "回滚原因": batch.get("rollback_reason", ""),
+            "标准化快照": batch.get("snapshot_path", ""),
+            "快照错误": batch.get("snapshot_error", ""),
+        })
+    return rows
+
+
+def _dataset_change_rows(snapshot: dict) -> list[dict]:
+    action_labels = {
+        "add": "新增",
+        "replace": "替换",
+        "exclude": "排除",
+        "restore": "恢复",
+        "rollback_batch": "回滚批次",
+    }
+    rows: list[dict] = []
+    for change in snapshot.get("dataset_change_log") or []:
+        rows.append({
+            "change_id": change.get("change_id", ""),
+            "变更时间": _format_ts(change.get("changed_at")),
+            "动作": action_labels.get(change.get("action"), change.get("action", "")),
+            "batch_id": change.get("batch_id", ""),
+            "数据集索引": (
+                int(change["item_index"]) + 1
+                if change.get("item_index") is not None else ""
+            ),
+            "题目标识": change.get("item_key", ""),
+            "item_id": change.get("item_id", ""),
+            "变更前状态": change.get("before_status", ""),
+            "变更后状态": change.get("after_status", ""),
+            "变更前版本": change.get("before_revision", ""),
+            "变更后版本": change.get("after_revision", ""),
+            "新增数量": change.get("inserted_count", ""),
+            "恢复替换数量": change.get("replaced_count", ""),
+            "原因": change.get("reason", ""),
+        })
+    return rows
+
+
 def _operation_run_summary(snapshot: dict) -> dict:
     """任务类单行运行汇总。
 
@@ -1564,10 +1818,20 @@ def _operation_run_summary(snapshot: dict) -> dict:
     summary = snapshot.get("summary") or {}
     options = snapshot.get("options") or {}
     distribution = summary.get("correctness_dist") or {}
-    results = snapshot.get("results") or []
+    items = snapshot.get("items") or []
+    results = [
+        row for row in (snapshot.get("results") or [])
+        if (
+            str(row.get("index", "")).isdigit()
+            and 0 <= int(row["index"]) < len(items)
+            and is_item_active(items[int(row["index"])])
+        )
+    ] if any(not is_item_active(item) for item in items) else (
+        snapshot.get("results") or []
+    )
     done = len([row for row in results if "error" not in row])
     failed = len([row for row in results if "error" in row])
-    total = len(snapshot.get("items") or [])
+    total = active_total(items)
     judges = options.get("judges") or []
     if isinstance(judges, list):
         judges = "；".join(str(judge) for judge in judges)
@@ -1584,6 +1848,8 @@ def _operation_run_summary(snapshot: dict) -> dict:
         "duration_s": _stored_timing(snapshot)["duration_s"],
         "rerun_count": len(snapshot.get("rerun_history") or []),
         "append_count": len(snapshot.get("append_history") or []),
+        "dataset_batch_count": len(snapshot.get("dataset_batches") or []),
+        "excluded_count": len(items) - active_total(items),
         "judges": judges,
         "model": options.get("model") or "",
         **_judge_backend_summary(snapshot),
@@ -1621,7 +1887,7 @@ def operation_statistics_payload(snapshot: dict) -> dict:
         "mode": "operation",
         "statistics": summarize_operation_results(
             aligned,
-            total_cases=len(normalized.get("items") or []),
+            total_cases=active_total(normalized.get("items") or []),
         ),
     }
 
@@ -1641,14 +1907,26 @@ def operation_comparison_batch(snapshot: dict) -> dict:
         items,
         dataset_name=str(normalized.get("dataset_name") or ""),
     )
+    aligned_by_index = {
+        int(row["index"]): row
+        for row in aligned
+        if str(row.get("index", "")).isdigit()
+    }
+    export_by_index = {
+        int(row["数据集序号"]) - 1: row
+        for row in export_rows
+        if str(row.get("数据集序号", "")).isdigit()
+    }
     rows = []
     for position, item in enumerate(items):
+        if not is_item_active(item):
+            continue
         source = _source_data_for_item(item)
         match_index = (
             source.get("index")
             if "index" in source else item.get("index", "")
         )
-        export_row = dict(export_rows[position]) if position < len(export_rows) else {}
+        export_row = dict(export_by_index.get(position) or {})
         export_row["index"] = match_index
         export_row["case_id"] = item.get("case_id") or source.get("case_id") or ""
         for key in ("video_url_domain", "video_url_ip"):
@@ -1663,7 +1941,7 @@ def operation_comparison_batch(snapshot: dict) -> dict:
             "item_id": item.get("id") or f"q{position}",
             "case_id": item.get("case_id") or source.get("case_id") or "",
             "query": item.get("query") or item.get("question") or "",
-            "result": aligned[position] if position < len(aligned) else {},
+            "result": aligned_by_index.get(position) or {},
             "export": export_row,
         })
     backend = _judge_backend_summary(normalized)
@@ -1921,6 +2199,8 @@ def write_frames_zip(
     )
     items: list[dict] = []
     for source_index, source_item in enumerate(source_items):
+        if not multi_operation and not is_item_active(source_item):
+            continue
         if multi_operation:
             for variant in source_item.get("group_variants") or []:
                 group_item = variant.get("item")

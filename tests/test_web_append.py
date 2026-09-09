@@ -276,6 +276,11 @@ async def test_append_preview_recommends_keep_replace_and_requires_query_choice(
             {
                 "id": "incoming_004",
                 "query": "打开相机",
+                "context": "测试机已解锁",
+                "video_path": "/datasets/videos/simple_004.mp4",
+                "query_images": ["/datasets/images/simple_004.png"],
+                "task_start_time": 1.5,
+                "task_end_time": 8,
                 "source_data": {"index": "simple_004"},
             },
         ],
@@ -289,6 +294,18 @@ async def test_append_preview_recommends_keep_replace_and_requires_query_choice(
     assert preview["recommended_keep_count"] == 1
     assert preview["recommended_replace_count"] == 1
     assert preview["unresolved_count"] == 1
+    assert preview["new_items"] == [{
+        "incoming_position": 3,
+        "incoming_no": 4,
+        "key": "simple_004",
+        "incoming_id": "incoming_004",
+        "query": "打开相机",
+        "context": "测试机已解锁",
+        "video_path": "/datasets/videos/simple_004.mp4",
+        "query_images": ["/datasets/images/simple_004.png"],
+        "task_start_time": 1.5,
+        "task_end_time": 8,
+    }]
     by_key = {row["key"]: row for row in preview["conflicts"]}
     # correctness=nok 是有效评测结果，不属于技术失败。
     assert by_key["simple_001"]["existing_evaluation_status"] == "succeeded"
@@ -569,6 +586,19 @@ def test_frontend_exposes_append_target_and_same_task_submission():
     assert "正在自动预检数据冲突" in html
     assert "确认追加并评估" in html
     assert "合并预检" in html
+    assert "新增数据预览" in html
+    assert "冲突预检" in html
+    assert "新增数据（{{ appendMergePreview.new_count || 0 }}）" in html
+    assert "冲突数据（{{ appendMergePreview.conflict_count || 0 }}）" in html
+    assert "appendPreviewTab==='new'" in html
+    assert "appendPreviewTab==='conflicts'" in html
+    assert "pagedAppendNewPreviewItems" in js
+    assert "setAppendNewPreviewPage" in js
+    assert "取消勾选的数据不会追加，也不会参与评估" in html
+    assert "setAllAppendNewSelections" in html
+    assert "appendNewSelections" in js
+    assert "items: submittedItems" in js
+    assert 'const opPageSize = 2;' in js
     assert "全部保留旧数据" in html
     assert "全部使用新数据" in html
     assert "确认追加并评估" in html

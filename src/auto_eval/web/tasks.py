@@ -8,7 +8,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .history import load_snapshot, make_session_name, save_task
+from .dataset_revision import tracked_item
+from .history import (
+    load_snapshot,
+    make_session_name,
+    save_dataset_batch_snapshot,
+    save_task,
+)
 
 
 def _nonnegative_env_number(name: str, default: str, cast):
@@ -57,6 +63,8 @@ class Task:
     rerun_history: list[dict[str, Any]] = field(default_factory=list)
     active_append: dict[str, Any] | None = None
     append_history: list[dict[str, Any]] = field(default_factory=list)
+    dataset_batches: list[dict[str, Any]] = field(default_factory=list)
+    dataset_change_log: list[dict[str, Any]] = field(default_factory=list)
     event_cursor: int = 0
     event_log: list[dict] = field(default_factory=list, repr=False)
     last_persist_at: float = field(default=0.0, repr=False)
@@ -221,15 +229,49 @@ def new_task(
     prune_task_cache()
     task_id = task_id or uuid.uuid4().hex[:12]
     created_at = time.time()
+    dataset_batches: list[dict[str, Any]] = []
+    tracked_items = items
+    if mode == "operation" and options.get("operation_layout") != "multi_group":
+        batch_id = f"batch-{uuid.uuid4().hex[:8]}"
+        tracked_items = [
+            tracked_item(item, batch_id=batch_id)
+            for item in items
+        ]
+        dataset_batches = [{
+            "batch_id": batch_id,
+            "batch_no": 1,
+            "kind": "initial",
+            "source_dataset_name": dataset_name or "初始数据集",
+            "imported_at": created_at,
+            "row_count": len(items),
+            "inserted_count": len(items),
+            "replaced_count": 0,
+            "skipped_count": 0,
+            "status": "active",
+        }]
     t = Task(
         id=task_id,
         mode=mode,
-        items=items,
+        items=tracked_items,
         options=options,
         dataset_name=dataset_name,
         session_name=make_session_name(created_at, mode, task_id),
         created_at=created_at,
+        dataset_batches=dataset_batches,
     )
+    if dataset_batches:
+        batch = dataset_batches[0]
+        try:
+            batch["snapshot_path"] = save_dataset_batch_snapshot(
+                t,
+                batch_id=batch["batch_id"],
+                batch_no=1,
+                kind="initial",
+                source_name=batch["source_dataset_name"],
+                items=tracked_items,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            batch["snapshot_error"] = f"{type(exc).__name__}: {exc}"
     TASKS[task_id] = t
     save_task(t)
     return t
@@ -249,6 +291,8 @@ def get_task(task_id: str, *, cache: bool = True) -> Task | None:
     rerun_history = list(snapshot.get("rerun_history") or [])
     active_append = snapshot.get("active_append")
     append_history = list(snapshot.get("append_history") or [])
+    dataset_batches = list(snapshot.get("dataset_batches") or [])
+    dataset_change_log = list(snapshot.get("dataset_change_log") or [])
     stored_duration_s = (
         float(snapshot["duration_s"])
         if snapshot.get("duration_s") is not None
@@ -337,6 +381,8 @@ def get_task(task_id: str, *, cache: bool = True) -> Task | None:
         rerun_history=rerun_history,
         active_append=active_append,
         append_history=append_history,
+        dataset_batches=dataset_batches,
+        dataset_change_log=dataset_change_log,
         event_cursor=int(snapshot.get("event_cursor") or 0),
     )
     if recovered_append:

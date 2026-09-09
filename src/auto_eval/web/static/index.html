@@ -80,6 +80,7 @@
               <div>{{ h.dataset_name || '未记录' }}</div>
               <div class="history-task-id" :title="h.task_id">task_id: {{ h.task_id }}</div>
               <div v-if="h.append_count" class="history-append-count">已追加 {{ h.append_count }} 次</div>
+              <div v-if="h.excluded_count" class="history-task-id">已排除 {{ h.excluded_count }} 条</div>
             </td>
             <td>{{ historyModeLabel(h) }}</td>
             <td>
@@ -189,7 +190,71 @@
           <span>建议保留 {{ appendMergePreview.recommended_keep_count || 0 }} 条</span>
           <span>建议覆盖重跑 {{ appendMergePreview.recommended_replace_count || 0 }} 条</span>
         </div>
-        <template v-if="appendMergePreview.conflict_count">
+        <div class="append-preview-tabs" role="tablist" aria-label="合并预检数据分类">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="appendPreviewTab==='new'"
+            :class="{active:appendPreviewTab==='new'}"
+            :disabled="!appendMergePreview.new_items?.length"
+            @click="appendPreviewTab='new'"
+          >新增数据（{{ appendMergePreview.new_count || 0 }}）</button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="appendPreviewTab==='conflicts'"
+            :class="{active:appendPreviewTab==='conflicts'}"
+            :disabled="!appendMergePreview.conflict_count"
+            @click="appendPreviewTab='conflicts'"
+          >冲突数据（{{ appendMergePreview.conflict_count || 0 }}）</button>
+        </div>
+        <section v-if="appendPreviewTab==='new' && appendMergePreview.new_items?.length" class="append-preview-section append-new-preview" role="tabpanel">
+          <div class="append-preview-heading">
+            <strong>新增数据预览</strong>
+            <span>已选 {{ selectedAppendNewCount }}/{{ appendMergePreview.new_items.length }} 条；取消勾选的数据不会追加，也不会参与评估。</span>
+            <button type="button" @click="setAllAppendNewSelections(true)" :disabled="allAppendNewSelected">全选</button>
+            <button type="button" @click="setAllAppendNewSelections(false)" :disabled="selectedAppendNewCount===0">取消全选</button>
+          </div>
+          <div class="table-scroll append-new-table-wrap">
+            <table class="grid append-new-table">
+              <thead>
+                <tr>
+                  <th class="append-select-column"><input type="checkbox" :checked="allAppendNewSelected" @change="setAllAppendNewSelections($event.target.checked)" title="全选或取消全选新增数据"></th>
+                  <th>导入序号</th><th>题目标识</th><th>Query</th><th>Context</th><th>视频路径</th><th>用户图片</th><th>任务时间范围</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in pagedAppendNewPreviewItems" :key="'append-new-'+row.incoming_position">
+                  <td class="append-select-column"><input type="checkbox" v-model="appendNewSelections[String(row.incoming_position)]" :aria-label="'选择新增数据 '+row.key"></td>
+                  <td>{{ row.incoming_no }}</td>
+                  <td>
+                    <strong>{{ row.key }}</strong>
+                    <small v-if="row.incoming_id && row.incoming_id !== row.key">id: {{ row.incoming_id }}</small>
+                  </td>
+                  <td><div class="append-preview-cell" :title="row.query">{{ row.query || '—' }}</div></td>
+                  <td><div class="append-preview-cell" :title="row.context">{{ row.context || '未提供' }}</div></td>
+                  <td><div class="append-preview-cell append-path-cell" :title="row.video_path">{{ row.video_path || '未提供' }}</div></td>
+                  <td><div class="append-preview-cell append-path-cell" :title="formatAppendPreviewImages(row.query_images)">{{ formatAppendPreviewImages(row.query_images) }}</div></td>
+                  <td>{{ formatAppendPreviewTimeRange(row) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="appendNewPreviewPageCount>1" class="pagination append-new-pagination">
+            <button type="button" @click="setAppendNewPreviewPage(appendNewPreviewPage-1)" :disabled="appendNewPreviewPage<=1">上一页</button>
+            <template v-for="page in paginationPages(appendNewPreviewPage, appendNewPreviewPageCount)" :key="'append-new-page-'+page">
+              <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
+              <button v-else type="button" class="page-number" :class="{active:page===appendNewPreviewPage}" @click="setAppendNewPreviewPage(page)">{{ page }}</button>
+            </template>
+            <button type="button" @click="setAppendNewPreviewPage(appendNewPreviewPage+1)" :disabled="appendNewPreviewPage>=appendNewPreviewPageCount">下一页</button>
+            <span class="page-size-fixed">每页 {{ appendNewPreviewPageSize }} 条</span>
+          </div>
+        </section>
+        <section v-if="appendPreviewTab==='conflicts' && appendMergePreview.conflict_count" class="append-preview-section append-conflict-section" role="tabpanel">
+          <div class="append-preview-heading">
+            <strong>冲突预检</strong>
+            <span>以下 {{ appendMergePreview.conflict_count }} 条需要确认保留旧数据或使用新数据。</span>
+          </div>
           <div class="append-conflict-actions">
             <button type="button" @click="setAllAppendConflictResolutions('keep_existing')">全部保留旧数据</button>
             <button type="button" @click="setAllAppendConflictResolutions('replace_and_rerun')">全部使用新数据</button>
@@ -221,9 +286,9 @@
               </tbody>
             </table>
           </div>
-        </template>
+        </section>
         <div class="append-conflict-confirm">
-          <button type="button" class="primary" @click="confirmAppendMerge" :disabled="running || unresolvedAppendConflictCount>0">确认追加并评估</button>
+          <button type="button" class="primary" @click="confirmAppendMerge" :disabled="running || unresolvedAppendConflictCount>0 || (selectedAppendNewCount===0 && !appendMergePreview.conflict_count)">确认追加并评估</button>
           <button type="button" @click="clearAppendConflictPreview" :disabled="running">取消</button>
         </div>
       </div>
@@ -642,6 +707,104 @@
       <span v-if="summary.solved_ok_rate!=null">OK率 {{ (summary.solved_ok_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
     </div>
+    <details
+      v-if="mode==='operation' && !isMultiGroupMode && taskId"
+      class="dataset-maintenance"
+      @toggle="$event.target.open && loadDatasetMaintenance(false)"
+    >
+      <summary>🗂️ 数据集维护</summary>
+      <p class="hint">追加遗漏数据请继续使用“追加到历史评估集”；误传数据可排除，排除后不参与统计和默认导出，但历史记录仍会保留。</p>
+      <div v-if="datasetMaintenanceLoading" class="hint">正在加载数据集版本…</div>
+      <div v-if="datasetMaintenanceError" class="err">{{ datasetMaintenanceError }}</div>
+      <template v-if="datasetMaintenance">
+        <div class="summary dataset-maintenance-summary">
+          <span>当前有效 {{ datasetMaintenance.active_count }}</span>
+          <span>已排除 {{ datasetMaintenance.excluded_count }}</span>
+          <span>历史存储 {{ datasetMaintenance.stored_count }}</span>
+          <span>导入批次 {{ datasetMaintenance.batches.length }}</span>
+        </div>
+
+        <h3>导入批次</h3>
+        <div class="table-scroll">
+          <table class="grid auto-table dataset-batch-table">
+            <thead><tr><th>批次</th><th>来源数据集</th><th>导入时间</th><th>原始行数</th><th>新增 / 替换 / 跳过</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr v-for="batch in datasetMaintenance.batches" :key="batch.batch_id">
+                <td>#{{ batch.batch_no }} · {{ batch.kind==='initial' ? '初始导入' : '追加导入' }}</td>
+                <td>{{ batch.source_dataset_name || '未命名数据集' }}</td>
+                <td>{{ formatTime(batch.imported_at) }}</td>
+                <td>{{ batch.row_count || 0 }}</td>
+                <td>{{ batch.inserted_count || 0 }} / {{ batch.replaced_count || 0 }} / {{ batch.skipped_count || 0 }}</td>
+                <td>{{ datasetBatchStatusLabel(batch.status) }}</td>
+                <td class="dataset-maintenance-actions">
+                  <a v-if="datasetBatchExportUrl(batch)" :href="datasetBatchExportUrl(batch)" class="row-export-link">下载快照</a>
+                  <a
+                    v-if="batch.rollback_allowed && !running"
+                    href="#"
+                    class="row-export-link danger-link"
+                    @click.prevent="rollbackDatasetBatch(batch)"
+                  >回滚</a>
+                  <span v-else-if="batch.kind==='append' && batch.status==='active'" class="hint">需从最新批次开始回滚</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="dataset-maintenance-toolbar">
+          <input v-model="datasetMaintenanceQuery" @input="datasetMaintenancePage=1" placeholder="搜索题目标识、ID 或 Query">
+          <select v-model="datasetMaintenanceStatus" @change="datasetMaintenancePage=1">
+            <option value="">全部状态</option>
+            <option value="active">有效</option>
+            <option value="excluded">已排除</option>
+          </select>
+          <button
+            @click="changeDatasetItemStatus('exclude')"
+            :disabled="running || datasetMaintenanceLoading || !selectedDatasetActiveCount"
+          >排除选中项（{{ selectedDatasetActiveCount }}）</button>
+          <button
+            @click="changeDatasetItemStatus('restore')"
+            :disabled="running || datasetMaintenanceLoading || !selectedDatasetExcludedCount"
+          >恢复选中项（{{ selectedDatasetExcludedCount }}）</button>
+          <button @click="clearDatasetMaintenanceSelection" :disabled="!datasetMaintenanceSelected.size">清空选择</button>
+        </div>
+        <div class="table-scroll">
+          <table class="grid auto-table dataset-item-table">
+            <thead><tr><th><input type="checkbox" @change="togglePagedDatasetMaintenanceSelection($event.target.checked)"></th><th>数据集序号</th><th>题目标识</th><th>Query</th><th>数据状态</th><th>评估状态</th><th>版本</th><th>来源批次</th></tr></thead>
+            <tbody>
+              <tr v-for="item in pagedDatasetMaintenanceItems" :key="item.item_index" :class="{'dataset-item-excluded':item.dataset_status==='excluded'}">
+                <td><input type="checkbox" :checked="isDatasetMaintenanceSelected(item)" @change="setDatasetMaintenanceSelected(item,$event.target.checked)"></td>
+                <td>{{ item.item_index + 1 }}</td>
+                <td>{{ item.item_key }}</td>
+                <td class="dataset-query-cell">{{ item.query }}</td>
+                <td>{{ datasetStatusLabel(item.dataset_status) }}</td>
+                <td>{{ datasetEvaluationStatusLabel(item.evaluation_status) }}</td>
+                <td>v{{ item.dataset_revision }}</td>
+                <td>{{ item.source_batch_id || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination" v-if="filteredDatasetMaintenanceItems.length">
+          <span class="page-size">每页 <select v-model.number="datasetMaintenancePageSize" @change="datasetMaintenancePage=1"><option :value="10">10</option><option :value="20">20</option><option :value="50">50</option></select> 条</span>
+          <button @click="changeDatasetMaintenancePage(-1)" :disabled="datasetMaintenancePage<=1">上一页</button>
+          <span>{{ datasetMaintenancePage }}/{{ datasetMaintenancePageCount }}</span>
+          <button @click="changeDatasetMaintenancePage(1)" :disabled="datasetMaintenancePage>=datasetMaintenancePageCount">下一页</button>
+        </div>
+
+        <details v-if="datasetMaintenance.changes.length" class="dataset-change-history">
+          <summary>查看数据变更记录（最近 {{ datasetMaintenance.changes.length }} 条）</summary>
+          <div class="table-scroll">
+            <table class="grid auto-table">
+              <thead><tr><th>时间</th><th>动作</th><th>题目标识</th><th>批次</th><th>原因</th></tr></thead>
+              <tbody><tr v-for="change in [...datasetMaintenance.changes].reverse()" :key="change.change_id">
+                <td>{{ formatTime(change.changed_at) }}</td><td>{{ datasetChangeActionLabel(change.action) }}</td><td>{{ change.item_key || '—' }}</td><td>{{ change.batch_id || '—' }}</td><td>{{ change.reason || '—' }}</td>
+              </tr></tbody>
+            </table>
+          </div>
+        </details>
+      </template>
+    </details>
     <details
       v-if="operationStatistics"
       class="operation-statistics"
