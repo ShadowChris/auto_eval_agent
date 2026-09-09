@@ -332,8 +332,9 @@
         <div class="op-import-row">
           <label class="op-upload-btn">
             <input type="file" accept=".jsonl,.csv,.xlsx,.xls,.xlsm,application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" @change="onOpManifestFile" hidden>
-            导入{{ mode==='operation' ? '任务类' : '垂域视觉评测' }}数据集
+            {{ datasetImportSummary ? '重新导入' : '导入' }}{{ mode==='operation' ? '任务类' : '垂域视觉评测' }}数据集
           </label>
+          <button v-if="hasImportedOperationDataset" type="button" @click="clearImportedOperationDataset">清空导入数据</button>
           <span v-if="opPreparing" class="running">正在解析数据集…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
           <span v-if="datasetName" class="hint">数据集：{{ datasetName }}</span>
@@ -353,6 +354,49 @@
         <details v-if="datasetImportWarnings.length"><summary>导入警告（{{ datasetImportWarnings.length }} 行）</summary><div class="hint">涉及 ID：{{ importWarningIds(datasetImportWarnings) }}<template v-if="datasetImportWarnings.length>10"> 等，另有 {{ datasetImportWarnings.length-10 }} 行</template></div></details>
         <details v-if="errors.length"><summary>导入错误明细</summary><pre>{{ errors.join('\n') }}</pre></details>
       </div>
+      <section v-if="hasImportedOperationDataset && !appendMergePreview" class="dataset-import-preview">
+        <div class="append-preview-heading">
+          <strong>新增数据预览</strong>
+          <span>已选 {{ selectedImportedDatasetCount }}/{{ importedDatasetPreviewRows.length }} 条；取消勾选的数据不会提交评估。</span>
+          <button type="button" @click="setAllImportedDatasetSelections(true)" :disabled="allImportedDatasetSelected">全选</button>
+          <button type="button" @click="setAllImportedDatasetSelections(false)" :disabled="selectedImportedDatasetCount===0">取消全选</button>
+        </div>
+        <div class="table-scroll append-new-table-wrap">
+          <table class="grid append-new-table">
+            <thead>
+              <tr>
+                <th class="append-select-column"><input type="checkbox" :checked="allImportedDatasetSelected" @change="setAllImportedDatasetSelections($event.target.checked)" title="全选或取消全选导入数据"></th>
+                <th>导入序号</th><th>题目标识</th><th>Query</th><th>Context</th><th>视频路径</th><th>用户图片</th><th>任务时间范围</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in pagedImportedDatasetPreviewRows" :key="'import-preview-'+row.incoming_position">
+                <td class="append-select-column"><input type="checkbox" v-model="importedDatasetSelections[String(row.incoming_position)]" :aria-label="'选择导入数据 '+row.key"></td>
+                <td>{{ row.incoming_no }}</td>
+                <td>
+                  <strong>{{ row.key }}</strong>
+                  <small v-if="row.incoming_id && row.incoming_id !== row.key">id: {{ row.incoming_id }}</small>
+                </td>
+                <td><div class="append-preview-cell" :title="row.query">{{ row.query || '—' }}</div></td>
+                <td><div class="append-preview-cell" :title="row.context">{{ row.context || '未提供' }}</div></td>
+                <td><div class="append-preview-cell append-path-cell" :title="row.video_path">{{ row.video_path || '未提供' }}</div></td>
+                <td><div class="append-preview-cell append-path-cell" :title="formatAppendPreviewImages(row.query_images)">{{ formatAppendPreviewImages(row.query_images) }}</div></td>
+                <td>{{ formatAppendPreviewTimeRange(row) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="importedPreviewPageCount>1" class="pagination append-new-pagination">
+          <button type="button" @click="setImportedPreviewPage(importedPreviewPage-1)" :disabled="importedPreviewPage<=1">上一页</button>
+          <template v-for="page in paginationPages(importedPreviewPage, importedPreviewPageCount)" :key="'import-preview-page-'+page">
+            <span v-if="typeof page === 'string'" class="page-ellipsis">…</span>
+            <button v-else type="button" class="page-number" :class="{active:page===importedPreviewPage}" @click="setImportedPreviewPage(page)">{{ page }}</button>
+          </template>
+          <button type="button" @click="setImportedPreviewPage(importedPreviewPage+1)" :disabled="importedPreviewPage>=importedPreviewPageCount">下一页</button>
+          <span class="page-size-fixed">每页 {{ importedPreviewPageSize }} 条</span>
+        </div>
+      </section>
+      <template v-if="!hasImportedOperationDataset">
       <div v-for="entry in pagedOpItems" :key="entry.item._uiKey" class="op-card"
            @dragover.prevent @drop="onOpDrop($event, entry.index)">
         <div class="op-card-head">
@@ -414,6 +458,7 @@
         </span>
       </div>
       <button @click="addOpItem" class="op-add">+ 添加题目</button>
+      </template>
     </div>
 
     <div v-else>

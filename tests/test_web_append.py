@@ -599,6 +599,11 @@ def test_frontend_exposes_append_target_and_same_task_submission():
     assert "appendNewSelections" in js
     assert "items: submittedItems" in js
     assert 'const opPageSize = 2;' in js
+    assert "清空导入数据" in html
+    assert "取消勾选的数据不会提交评估" in html
+    assert 'v-if="!hasImportedOperationDataset"' in html
+    assert "pagedImportedDatasetPreviewRows" in js
+    assert "setAllImportedDatasetSelections" in js
     assert "全部保留旧数据" in html
     assert "全部使用新数据" in html
     assert "确认追加并评估" in html

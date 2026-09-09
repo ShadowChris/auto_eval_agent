@@ -86,6 +86,9 @@ createApp({
     const opPreparing = ref(false);
     const datasetImportSummary = ref(null);
     const datasetImportWarnings = ref([]);
+    const importedDatasetSelections = ref({});
+    const importedPreviewPage = ref(1);
+    const importedPreviewPageSize = 10;
     let operationGroupSequence = 0;
     function newOperationGroup(role = "experiment") {
       const sequence = ++operationGroupSequence;
@@ -341,6 +344,55 @@ createApp({
         index: start + offset,
       }));
     });
+    const hasImportedOperationDataset = computed(() => (
+      mode.value === "operation"
+      && Boolean(datasetImportSummary.value)
+      && opItems.value.length > 0
+    ));
+    function importedPreviewKey(item, index) {
+      const source = item?.sourceData && typeof item.sourceData === "object"
+        ? item.sourceData
+        : {};
+      const candidates = [source.index, source["序号"], source.id, item?.id];
+      const value = candidates.find(
+        (candidate) => candidate !== null
+          && candidate !== undefined
+          && String(candidate).trim(),
+      );
+      return value === undefined ? `第${index + 1}条` : String(value);
+    }
+    const importedDatasetPreviewRows = computed(() => opItems.value.map((item, index) => ({
+      incoming_position: index,
+      incoming_no: index + 1,
+      key: importedPreviewKey(item, index),
+      incoming_id: String(item.id || `第${index + 1}条`),
+      query: item.query || "",
+      context: item.context || "",
+      video_path: item.videoPath || "",
+      query_images: (item.queryImages || []).length
+        ? [...item.queryImages]
+        : (item.attachmentPath ? [item.attachmentPath] : []),
+      task_start_time: item.taskStartTime,
+      task_end_time: item.taskEndTime,
+    })));
+    const importedPreviewPageCount = computed(() => Math.max(
+      1,
+      Math.ceil(importedDatasetPreviewRows.value.length / importedPreviewPageSize),
+    ));
+    const pagedImportedDatasetPreviewRows = computed(() => {
+      const page = Math.min(importedPreviewPage.value, importedPreviewPageCount.value);
+      const start = (page - 1) * importedPreviewPageSize;
+      return importedDatasetPreviewRows.value.slice(start, start + importedPreviewPageSize);
+    });
+    const selectedImportedDatasetCount = computed(() => (
+      importedDatasetPreviewRows.value.filter(
+        (row) => importedDatasetSelections.value[String(row.incoming_position)] !== false,
+      ).length
+    ));
+    const allImportedDatasetSelected = computed(() => (
+      importedDatasetPreviewRows.value.length > 0
+      && selectedImportedDatasetCount.value === importedDatasetPreviewRows.value.length
+    ));
     const previewPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
     const pagedPreviewItems = computed(() => {
       const page = Math.min(previewPage.value, previewPageCount.value);
@@ -1349,6 +1401,8 @@ createApp({
       datasetName.value = "";
       datasetImportSummary.value = null;
       datasetImportWarnings.value = [];
+      importedDatasetSelections.value = {};
+      importedPreviewPage.value = 1;
       groupAlignment.value = null;
       submitMode.value = "create";
       appendTargetTaskId.value = "";
@@ -1528,6 +1582,8 @@ createApp({
       errors.value = [];
       datasetImportSummary.value = null;
       datasetImportWarnings.value = [];
+      importedDatasetSelections.value = {};
+      importedPreviewPage.value = 1;
       items.value = [];
       releaseAllQueryImagePreviews();
       opItems.value = [newOpItem()];
@@ -1570,6 +1626,10 @@ createApp({
               sourceData: item.source_data || null,
             };
           });
+          importedDatasetSelections.value = Object.fromEntries(
+            opItems.value.map((item, index) => [String(index), true]),
+          );
+          importedPreviewPage.value = 1;
           opPage.value = 1;
           importedSuccessfully = true;
         }
@@ -1586,6 +1646,38 @@ createApp({
       ) {
         await submit(false, true);
       }
+    }
+
+    function setImportedPreviewPage(requestedPage) {
+      const page = Math.trunc(Number(requestedPage));
+      if (!Number.isFinite(page)) return;
+      importedPreviewPage.value = Math.min(
+        importedPreviewPageCount.value,
+        Math.max(1, page),
+      );
+    }
+
+    function setAllImportedDatasetSelections(selected) {
+      importedDatasetSelections.value = Object.fromEntries(
+        importedDatasetPreviewRows.value.map(
+          (row) => [String(row.incoming_position), Boolean(selected)],
+        ),
+      );
+    }
+
+    function clearImportedOperationDataset() {
+      resetEvaluationView();
+      releaseAllQueryImagePreviews();
+      items.value = [];
+      opItems.value = [newOpItem()];
+      datasetName.value = "";
+      datasetImportSummary.value = null;
+      datasetImportWarnings.value = [];
+      importedDatasetSelections.value = {};
+      importedPreviewPage.value = 1;
+      opPage.value = 1;
+      opJumpPage.value = "";
+      errors.value = [];
     }
 
     function operationDatasetStem(filename) {
@@ -1735,7 +1827,12 @@ createApp({
       }
       if (isVideoMode.value)
         return !opPreparing.value && opItems.value.some(
-          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
+          (it, index) => it.query.trim()
+            && ((it.frames || []).length || it.videoPath)
+            && (
+              !hasImportedOperationDataset.value
+              || importedDatasetSelections.value[String(index)] !== false
+            ),
         );
       return !!text.value;
     });
@@ -1769,16 +1866,25 @@ createApp({
           return;
         }
       } else if (isVideoMode.value) {
-        const valid = opItems.value.filter(
-          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
+        const valid = opItems.value.map((it, sourceIndex) => ({ it, sourceIndex })).filter(
+          ({ it, sourceIndex }) => it.query.trim()
+            && ((it.frames || []).length || it.videoPath)
+            && (
+              !hasImportedOperationDataset.value
+              || importedDatasetSelections.value[String(sourceIndex)] !== false
+            ),
         );
         if (!valid.length) {
+          if (hasImportedOperationDataset.value && selectedImportedDatasetCount.value === 0) {
+            runError.value = "没有需要评估的数据，请至少勾选一条导入数据。";
+            return;
+          }
           alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
           return;
         }
-        items.value = valid.map((it, idx) => {
+        items.value = valid.map(({ it, sourceIndex }) => {
           const item = {
-            id: it.id || `${mode.value === "operation" ? "op" : "rich"}${idx + 1}`,
+            id: it.id || `${mode.value === "operation" ? "op" : "rich"}${sourceIndex + 1}`,
             query: it.query.trim(),
             context: (it.context || "").trim(),
             video_path: it.videoPath,
@@ -1838,9 +1944,9 @@ createApp({
       total.value = isAppendSubmit
         ? Number(selectedAppendTarget.value?.total || 0)
           + (isConfirmedAppend ? selectedAppendNewCount.value : items.value.length)
-        : items.value.length;
+        : submittedItems.length;
       itemProgress.value = isAppendSubmit ? {} : Object.fromEntries(
-        items.value.map((item, index) => [
+        submittedItems.map((item, index) => [
           index,
           {
             item_index: index,
@@ -3613,6 +3719,10 @@ createApp({
       filteredDatasetMaintenanceItems, pagedDatasetMaintenanceItems,
       selectedDatasetActiveCount, selectedDatasetExcludedCount,
       opPage, opPageSize, opPageCount, opJumpPage,
+      hasImportedOperationDataset, importedDatasetSelections,
+      importedDatasetPreviewRows, pagedImportedDatasetPreviewRows,
+      selectedImportedDatasetCount, allImportedDatasetSelected,
+      importedPreviewPage, importedPreviewPageSize, importedPreviewPageCount,
       previewPage, previewPageCount, previewJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
@@ -3621,7 +3731,9 @@ createApp({
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       operationGroups, groupAlignment, groupAligning, multiGroupColumns, multiGroupResult, displayArray, groupRoleLabel,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit, formatOptionalTaskTime, formatAttachmentPath,
-      trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, resultQueryImageCount, queryImagePreviewUrl, resultQueryImageFilename, openQueryImagePreview, closeQueryImagePreview, moveResultQueryImagePreview, addOpItem, removeOpItem, onOpVideo, onQueryImage, removeQueryImage, onOpDrop,
+      trunc, switchMode, onFile, onOpManifestFile, clearImportedOperationDataset,
+      setAllImportedDatasetSelections, setImportedPreviewPage,
+      onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, resultQueryImageCount, queryImagePreviewUrl, resultQueryImageFilename, openQueryImagePreview, closeQueryImagePreview, moveResultQueryImagePreview, addOpItem, removeOpItem, onOpVideo, onQueryImage, removeQueryImage, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       loadDatasetMaintenance, datasetStatusLabel, datasetEvaluationStatusLabel,
       datasetBatchStatusLabel, datasetChangeActionLabel, isDatasetMaintenanceSelected,

@@ -232,7 +232,7 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
   color: #475569; font-size: 13px;
 }
 .append-preview-heading strong { color: #1f2937; font-size: 14px; }
-.append-new-table-wrap { max-height: 440px; margin-top: 8px; }
+.append-new-table-wrap { margin-top: 8px; }
 .append-new-table { min-width: 1370px; table-layout: fixed; }
 .append-new-table th:nth-child(1) { width: 46px; }
 .append-new-table th:nth-child(2) { width: 78px; }
@@ -252,6 +252,10 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
 }
 .append-path-cell { color: #475569; font-family: Consolas, monospace; font-size: 12px; }
 .append-new-pagination { margin-top: 8px; }
+.dataset-import-preview {
+  margin-top: 12px; padding: 12px; border: 1px solid #bfdbfe;
+  border-radius: 8px; background: #f8fbff;
+}
 .append-conflict-actions { margin-top: 9px; }
 .append-conflict-table-wrap { max-height: 360px; margin-top: 8px; }
 .append-conflict-table { min-width: 980px; }
