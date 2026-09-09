@@ -209,6 +209,53 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
   display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap;
 }
 .append-conflict-summary { color: #475569; font-size: 13px; }
+.append-preview-tabs {
+  display: flex; align-items: flex-end; gap: 4px; margin-top: 12px;
+  border-bottom: 1px solid #fcd34d;
+}
+.append-preview-tabs button {
+  margin-bottom: -1px; padding: 7px 14px; border: 1px solid transparent;
+  border-bottom-color: #fcd34d; border-radius: 7px 7px 0 0;
+  color: #64748b; background: transparent;
+}
+.append-preview-tabs button:hover:not(:disabled) { color: #92400e; background: #fffbeb; }
+.append-preview-tabs button.active {
+  border-color: #fcd34d #fcd34d #fffdf5; color: #92400e;
+  background: #fffdf5; font-weight: 600;
+}
+.append-preview-tabs button:disabled { color: #cbd5e1; cursor: not-allowed; }
+.append-preview-section {
+  padding-top: 10px;
+}
+.append-preview-heading {
+  display: flex; align-items: baseline; gap: 8px 14px; flex-wrap: wrap;
+  color: #475569; font-size: 13px;
+}
+.append-preview-heading strong { color: #1f2937; font-size: 14px; }
+.append-new-table-wrap { margin-top: 8px; }
+.append-new-table { min-width: 1370px; table-layout: fixed; }
+.append-new-table th:nth-child(1) { width: 46px; }
+.append-new-table th:nth-child(2) { width: 78px; }
+.append-new-table th:nth-child(3) { width: 130px; }
+.append-new-table th:nth-child(4) { width: 230px; }
+.append-new-table th:nth-child(5) { width: 220px; }
+.append-new-table th:nth-child(6) { width: 250px; }
+.append-new-table th:nth-child(7) { width: 250px; }
+.append-new-table th:nth-child(8) { width: 150px; }
+.append-select-column { text-align: center !important; vertical-align: middle !important; }
+.append-select-column input { width: 15px; height: 15px; cursor: pointer; }
+.append-new-table small { display: block; margin-top: 3px; color: #94a3b8; }
+.append-preview-cell {
+  display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3; line-clamp: 3; max-height: 58px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.append-path-cell { color: #475569; font-family: Consolas, monospace; font-size: 12px; }
+.append-new-pagination { margin-top: 8px; }
+.dataset-import-preview {
+  margin-top: 12px; padding: 12px; border: 1px solid #bfdbfe;
+  border-radius: 8px; background: #f8fbff;
+}
 .append-conflict-actions { margin-top: 9px; }
 .append-conflict-table-wrap { max-height: 360px; margin-top: 8px; }
 .append-conflict-table { min-width: 980px; }
@@ -566,6 +613,22 @@ tr.result-warning-detail td {
 .row-export-cell { text-align: center; white-space: nowrap; }
 .row-export-link { color: #2563eb; text-decoration: underline; font-size: 13px; }
 .row-export-link:hover { color: #1d4ed8; }
+.dataset-maintenance { margin: 14px 0; border: 1px solid #dbe4f0; border-radius: 10px; padding: 10px 12px; background: #f8fafc; }
+.dataset-maintenance > summary { cursor: pointer; font-weight: 600; }
+.dataset-maintenance h3 { margin: 14px 0 8px; font-size: 15px; }
+.dataset-maintenance-summary { margin: 10px 0; }
+.dataset-maintenance-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 0 8px; }
+.dataset-maintenance-toolbar input { min-width: 280px; flex: 1 1 320px; }
+.dataset-maintenance-actions { white-space: nowrap; }
+.dataset-maintenance-actions > * + * { margin-left: 10px; }
+.dataset-batch-table td, .dataset-item-table td { vertical-align: top; }
+.dataset-query-cell { min-width: 260px; max-width: 520px; white-space: normal; }
+.dataset-item-excluded { color: #64748b; background: #f1f5f9; }
+.dataset-item-excluded .dataset-query-cell { text-decoration: line-through; }
+.danger-link { color: #dc2626; }
+.danger-link:hover { color: #b91c1c; }
+.dataset-change-history { margin-top: 12px; }
+.dataset-change-history > summary { cursor: pointer; color: #475569; }
 .history-note-cell { width: 300px; min-width: 300px !important; max-width: 300px !important; }
 .history-status { white-space: nowrap; }
 .history-status-pending, .history-status-running { color: #1d4ed8; }

@@ -46,6 +46,12 @@ from ..observability import (
 from ..runners import build_runner
 from ..schema import EvalItem
 from .history import save_task
+from .dataset_revision import (
+    active_item_indices,
+    active_result_count,
+    active_results,
+    active_total,
+)
 from .operation_media import (
     prepare_operation_query_images,
     prepare_session_operation_item,
@@ -145,7 +151,7 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
 
 async def run_eval(task: Task, cfg: AppConfig) -> None:
     task.mark_started()
-    await task.publish("start", {"total": len(task.items), "mode": task.mode})
+    await task.publish("start", {"total": active_total(task.items), "mode": task.mode})
     task.status = "running"
     _persist_task(task, force=True)
     try:
@@ -158,7 +164,7 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             "done",
             {
                 "summary": task.summary,
-                "total": len(task.items),
+                "total": active_total(task.items),
                 "duration_s": task.duration_s,
             },
         )
@@ -202,10 +208,7 @@ def _upsert_result(task: Task, result: dict) -> dict | None:
             _result_index(row) if _result_index(row) is not None else len(task.items),
         ),
     )
-    task.done_total = len({
-        value for row in task.results
-        if (value := _result_index(row)) is not None
-    })
+    task.done_total = active_result_count(task.items, task.results)
     return previous
 
 
@@ -308,11 +311,8 @@ async def run_rerun(
         task.rerun_history.append(dict(attempt))
         task.active_rerun = None
         task.summary = _summarize(task, cfg)
-        unique_count = len({
-            value for row in task.results
-            if (value := _result_index(row)) is not None
-        })
-        task.status = "done" if unique_count >= len(task.items) else base_status
+        unique_count = active_result_count(task.items, task.results)
+        task.status = "done" if unique_count >= active_total(task.items) else base_status
         if task.status not in {"done", "error", "cancelled"}:
             task.status = "done"
         task.error = None if task.status == "done" else base_error
@@ -324,7 +324,7 @@ async def run_rerun(
                 "summary": task.summary,
                 "status": task.status,
                 "progress": task.done_total,
-                "total": len(task.items),
+                "total": active_total(task.items),
             },
         )
         prune_task_cache(keep_task_ids={task.id})
@@ -385,11 +385,8 @@ async def run_append(
             evaluation_timestamp=started_at,
         )
         attempt["status"] = "done"
-        unique_count = len({
-            value for row in task.results
-            if (value := _result_index(row)) is not None
-        })
-        task.status = "done" if unique_count >= len(task.items) else base_status
+        unique_count = active_result_count(task.items, task.results)
+        task.status = "done" if unique_count >= active_total(task.items) else base_status
         if task.status not in {"done", "error", "cancelled"}:
             task.status = "error"
         task.error = None if task.status == "done" else base_error
@@ -437,7 +434,7 @@ async def run_append(
         _persist_task(task, force=True)
         payload = {
             "summary": task.summary,
-            "total": len(task.items),
+            "total": active_total(task.items),
             "progress": task.done_total,
             "duration_s": task.duration_s,
             "append": attempt,
@@ -480,7 +477,7 @@ async def run_single_api_item(
         "attempt_no": int((rerun or {}).get("attempt_no") or 0),
     })
     _persist_task(task, force=True)
-    await task.publish("start", {"total": len(task.items), "mode": task.mode})
+    await task.publish("start", {"total": active_total(task.items), "mode": task.mode})
 
     try:
         async with semaphore:
@@ -536,7 +533,7 @@ async def run_single_api_item(
                 "done",
                 {
                     "summary": task.summary,
-                    "total": len(task.items),
+                    "total": active_total(task.items),
                     "duration_s": task.duration_s,
                 },
             )
@@ -1063,7 +1060,7 @@ async def _run(
                 "result",
                 {
                     "progress": task.done_total,
-                    "total": len(task.items),
+                    "total": active_total(task.items),
                     "result": res,
                     "rerun": rerun is not None,
                     "rerun_progress": (rerun or {}).get("done"),
@@ -1076,7 +1073,7 @@ async def _run(
             )
             _persist_task(task)
 
-    indices = list(range(len(task.items))) if item_indices is None else list(item_indices)
+    indices = active_item_indices(task.items) if item_indices is None else list(item_indices)
     await asyncio.gather(*[one(index, task.items[index]) for index in indices])
 
 
@@ -1795,6 +1792,13 @@ def _summarize(task: Task, cfg: AppConfig) -> dict:
     return summary
 
 
+def refresh_task_summary(task: Task, cfg: AppConfig) -> dict:
+    """数据集修订后按当前有效题目重新计算汇总。"""
+    task.summary = _summarize(task, cfg)
+    task.done_total = active_result_count(task.items, task.results)
+    return task.summary
+
+
 def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
     if task.options.get("operation_layout") == "multi_group":
         results = task.results
@@ -1856,7 +1860,7 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
             ),
             "case_duration_stats": _duration_stats(results, "duration_s"),
         }
-    results = task.results
+    results = active_results(task.items, task.results)
     completed = [row for row in results if "error" not in row]
     judged = [row for row in completed if row.get("correctness") is not None]
     ok_count = sum(row.get("correctness") == "ok" for row in judged)
@@ -1869,7 +1873,7 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
     )
     statistics = summarize_operation_results(
         results,
-        total_cases=len(task.items),
+        total_cases=active_total(task.items),
     )
     return {
         "total": len(results),

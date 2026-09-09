@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -45,11 +46,13 @@ from .history import (
     build_operation_comparison_xlsx,
     build_xlsx,
     delete_snapshot,
+    dataset_artifact_path,
     export_rows,
     jsonl_export_rows,
     list_snapshots,
     list_snapshots_page,
     load_item_judge_calls,
+    load_dataset_artifact,
     load_snapshot,
     operation_item_result_row,
     operation_comparison_batch,
@@ -57,9 +60,19 @@ from .history import (
     rows_to_csv,
     rows_to_jsonl,
     save_task,
+    save_dataset_batch_snapshot,
+    save_dataset_rollback_snapshot,
     snapshot_payload,
     task_to_snapshot,
     write_frames_zip,
+)
+from .dataset_revision import (
+    ACTIVE as DATASET_ACTIVE,
+    EXCLUDED as DATASET_EXCLUDED,
+    active_result_count,
+    active_total,
+    is_item_active,
+    tracked_item,
 )
 from .operation_media import (
     MAX_QUERY_IMAGE_BYTES,
@@ -77,7 +90,13 @@ from .operation_comparison_import import (
     validate_uploaded_comparison_source,
 )
 from .llm_providers import LLMProviderPayload, LLMProviderStore
-from .runner import run_append, run_eval, run_rerun, run_single_api_item
+from .runner import (
+    refresh_task_summary,
+    run_append,
+    run_eval,
+    run_rerun,
+    run_single_api_item,
+)
 from .tasks import (
     get_live_task,
     get_task,
@@ -207,6 +226,15 @@ class OperationComparisonAnalyzeReq(BaseModel):
 class RerunReq(BaseModel):
     item_indices: list[int]
     judge_backend: dict | None = None
+
+
+class DatasetItemsActionReq(BaseModel):
+    item_indices: list[int]
+    reason: str = ""
+
+
+class DatasetBatchRollbackReq(BaseModel):
+    reason: str = ""
 
 
 class ProviderTestReq(BaseModel):
@@ -427,6 +455,183 @@ def _normalized_query(value) -> str:
     return " ".join(str(value or "").split())
 
 
+def _append_preview_value(item: dict, *fields: str):
+    """从标准字段或原始表格字段中读取追加预览值。"""
+    source = item.get("source_data")
+    source = source if isinstance(source, dict) else {}
+    for field in fields:
+        for container in (item, source):
+            value = container.get(field)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value
+    return None
+
+
+def _append_new_item_preview(item: dict, position: int, key: str) -> dict:
+    """返回可安全展示的新增题目摘要，避免把整份 source_data 原样回传。"""
+    raw_images = _append_preview_value(
+        item,
+        "query_images",
+        "query_image_path",
+        "attachment_path",
+    )
+    if isinstance(raw_images, (list, tuple)):
+        query_images = [str(value) for value in raw_images if str(value or "").strip()]
+    elif raw_images is None:
+        query_images = []
+    else:
+        query_images = [str(raw_images)]
+    return {
+        "incoming_position": position,
+        "incoming_no": position + 1,
+        "key": key,
+        "incoming_id": str(item.get("id") or f"第{position + 1}条"),
+        "query": str(_append_preview_value(item, "query", "question") or ""),
+        "context": str(_append_preview_value(item, "context") or ""),
+        "video_path": str(_append_preview_value(item, "video_path") or ""),
+        "query_images": query_images,
+        "task_start_time": _append_preview_value(item, "task_start_time"),
+        "task_end_time": _append_preview_value(item, "task_end_time"),
+    }
+
+
+def _ensure_dataset_tracking(task) -> None:
+    """为旧任务补齐一份可维护的基线批次，不改变题目索引。"""
+    if task.mode != "operation":
+        return
+    if (task.options or {}).get("operation_layout") == "multi_group":
+        return
+    if task.dataset_batches:
+        for item in task.items:
+            item.setdefault("dataset_status", DATASET_ACTIVE)
+            item.setdefault("dataset_revision", 1)
+            item.setdefault(
+                "dataset_source_batch_id",
+                task.dataset_batches[0].get("batch_id") or "batch-legacy",
+            )
+        return
+
+    batch_id = f"batch-legacy-{uuid.uuid4().hex[:8]}"
+    for index, item in enumerate(task.items):
+        task.items[index] = tracked_item(item, batch_id=batch_id)
+    batch = {
+        "batch_id": batch_id,
+        "batch_no": 1,
+        "kind": "initial",
+        "source_dataset_name": task.dataset_name or "历史基线数据集",
+        "imported_at": task.created_at,
+        "row_count": len(task.items),
+        "inserted_count": len(task.items),
+        "replaced_count": 0,
+        "skipped_count": 0,
+        "status": "active",
+        "migrated_from_legacy": True,
+    }
+    try:
+        batch["snapshot_path"] = save_dataset_batch_snapshot(
+            task,
+            batch_id=batch_id,
+            batch_no=1,
+            kind="initial",
+            source_name=batch["source_dataset_name"],
+            items=task.items,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        batch["snapshot_error"] = f"{type(exc).__name__}: {exc}"
+    task.dataset_batches.append(batch)
+
+
+def _assert_dataset_maintenance_available(task) -> None:
+    if task.mode != "operation":
+        raise HTTPException(422, "目前仅任务类（录屏）支持数据集维护")
+    if (task.options or {}).get("operation_layout") == "multi_group":
+        raise HTTPException(409, "任务类多组评估暂不支持数据集维护")
+    if task.status in {"pending", "running", "rerunning"}:
+        raise HTTPException(409, "评估运行期间不能修改数据集")
+    if task.execution is not None and not task.execution.done():
+        raise HTTPException(409, "当前任务仍有执行中的操作")
+    if any(not execution.done() for execution in task.item_executions.values()):
+        raise HTTPException(409, "当前任务仍有单题评估在执行")
+
+
+def _dataset_change(
+    task,
+    *,
+    action: str,
+    item_index: int | None = None,
+    batch_id: str = "",
+    reason: str = "",
+    details: dict | None = None,
+) -> dict:
+    item = (
+        task.items[item_index]
+        if item_index is not None and 0 <= item_index < len(task.items)
+        else {}
+    )
+    row = {
+        "change_id": f"change-{uuid.uuid4().hex[:10]}",
+        "changed_at": time.time(),
+        "action": action,
+        "item_index": item_index,
+        "item_key": _dataset_item_key(item) if item else "",
+        "item_id": item.get("id") or "",
+        "batch_id": batch_id,
+        "reason": reason.strip(),
+    }
+    if details:
+        row.update(details)
+    task.dataset_change_log.append(row)
+    return row
+
+
+def _dataset_maintenance_payload(task) -> dict:
+    active_append_batches = [
+        batch for batch in task.dataset_batches
+        if batch.get("kind") == "append" and batch.get("status") == "active"
+    ]
+    latest_rollbackable = (
+        active_append_batches[-1].get("batch_id")
+        if active_append_batches else None
+    )
+    batches = []
+    for batch in task.dataset_batches:
+        batches.append({
+            key: value for key, value in batch.items()
+            if key not in {"rollback_path"}
+        } | {
+            "downloadable": bool(dataset_artifact_path(batch.get("snapshot_path") or "")),
+            "rollback_allowed": (
+                batch.get("batch_id") == latest_rollbackable
+                and batch.get("kind") == "append"
+            ),
+        })
+    items = []
+    for index, item in enumerate(task.items):
+        items.append({
+            "item_index": index,
+            "item_id": item.get("id") or f"q{index}",
+            "item_key": _dataset_item_key(item) or item.get("id") or f"q{index}",
+            "query": item.get("query") or item.get("question") or "",
+            "dataset_status": item.get("dataset_status") or DATASET_ACTIVE,
+            "dataset_revision": int(item.get("dataset_revision") or 1),
+            "source_batch_id": item.get("dataset_source_batch_id") or "",
+            "evaluation_status": _append_item_evaluation_status(task, index),
+        })
+    return {
+        "task_id": task.id,
+        "dataset_name": task.dataset_name,
+        "active_count": active_total(task.items),
+        "excluded_count": len(task.items) - active_total(task.items),
+        "stored_count": len(task.items),
+        "items": items,
+        "batches": batches,
+        "changes": task.dataset_change_log[-500:],
+    }
+
+
 def _append_item_evaluation_status(task, item_index: int) -> str:
     result = next(
         (
@@ -453,6 +658,7 @@ def _build_append_merge_preview(task, incoming_items: list[dict]) -> dict:
     missing_labels: list[str] = []
     entries: list[dict] = []
     conflicts: list[dict] = []
+    new_items: list[dict] = []
     for position, item in enumerate(incoming_items):
         identities = _dataset_item_keys(item)
         key = _dataset_item_key(item)
@@ -481,6 +687,7 @@ def _build_append_merge_preview(task, incoming_items: list[dict]) -> dict:
         }
         entries.append(entry)
         if existing_index is None:
+            new_items.append(_append_new_item_preview(item, position, key))
             continue
 
         existing_item = task.items[existing_index]
@@ -490,9 +697,13 @@ def _build_append_merge_preview(task, incoming_items: list[dict]) -> dict:
         incoming_query = str(item.get("query") or item.get("question") or "")
         query_match = _normalized_query(existing_query) == _normalized_query(incoming_query)
         evaluation_status = _append_item_evaluation_status(task, existing_index)
+        dataset_status = str(existing_item.get("dataset_status") or DATASET_ACTIVE)
         recommended_action = None
         recommendation_reason = "Query 不一致，需要人工确认保留哪一条"
-        if query_match and evaluation_status in {"failed", "missing"}:
+        if query_match and dataset_status == DATASET_EXCLUDED:
+            recommended_action = "replace_and_rerun"
+            recommendation_reason = "旧题已被排除，建议使用新数据恢复并重新评估"
+        elif query_match and evaluation_status in {"failed", "missing"}:
             recommended_action = "replace_and_rerun"
             recommendation_reason = "旧数据评测调用失败或没有结果，建议使用新数据重跑"
         elif query_match:
@@ -507,6 +718,7 @@ def _build_append_merge_preview(task, incoming_items: list[dict]) -> dict:
             "incoming_query": incoming_query,
             "query_match": query_match,
             "existing_evaluation_status": evaluation_status,
+            "existing_dataset_status": dataset_status,
             "recommended_action": recommended_action,
             "recommendation_reason": recommendation_reason,
         }
@@ -539,6 +751,7 @@ def _build_append_merge_preview(task, incoming_items: list[dict]) -> dict:
         "unresolved_count": sum(
             row["recommended_action"] is None for row in conflicts
         ),
+        "new_items": new_items,
         "conflicts": conflicts,
         "_entries": entries,
     }
@@ -962,7 +1175,7 @@ async def api_eval(req: EvalReq):
             return {
                 "task_id": task.id,
                 "action": "preview",
-                "dataset_size": len(task.items),
+                "dataset_size": active_total(task.items),
                 "merge_preview": public_preview,
             }
 
@@ -1004,8 +1217,15 @@ async def api_eval(req: EvalReq):
                 )
             resolutions = dict(req.conflict_resolutions)
 
-        segment_no = len(task.append_history) + 2
+        _ensure_dataset_tracking(task)
+        batch_no = max(
+            [int(batch.get("batch_no") or 0) for batch in task.dataset_batches],
+            default=0,
+        ) + 1
+        segment_no = batch_no
         source_dataset_name = req.dataset_name.strip() or f"追加批次{segment_no}"
+        batch_id = f"batch-{uuid.uuid4().hex[:8]}"
+        append_id = f"append-{uuid.uuid4().hex[:8]}"
         previous_state = {
             "items": list(task.items),
             "results": list(task.results),
@@ -1017,32 +1237,80 @@ async def api_eval(req: EvalReq):
             "status": task.status,
             "error": task.error,
             "finished_at": task.finished_at,
+            "dataset_batches": list(task.dataset_batches),
+            "dataset_change_log": list(task.dataset_change_log),
         }
         item_indices: list[int] = []
         inserted_indices: list[int] = []
         replaced_indices: list[int] = []
         skipped_keys: list[str] = []
+        replacement_backups: list[dict] = []
         for entry in merge_preview["_entries"]:
             position = int(entry["incoming_position"])
-            incoming = {
-                **req.items[position],
-                "evaluation_segment_no": segment_no,
-                "evaluation_source_dataset": source_dataset_name,
-            }
             existing_index = entry["existing_index"]
+            previous_revision = (
+                int(task.items[existing_index].get("dataset_revision") or 1)
+                if existing_index is not None else 0
+            )
+            incoming = tracked_item(
+                {
+                    **req.items[position],
+                    "evaluation_segment_no": segment_no,
+                    "evaluation_source_dataset": source_dataset_name,
+                },
+                batch_id=batch_id,
+                revision=previous_revision + 1,
+            )
             if existing_index is None:
                 new_index = len(task.items)
                 task.items.append(incoming)
                 inserted_indices.append(new_index)
                 item_indices.append(new_index)
+                _dataset_change(
+                    task,
+                    action="add",
+                    item_index=new_index,
+                    batch_id=batch_id,
+                )
                 continue
             action = resolutions.get(str(entry["key"]), "keep_existing")
             if action == "keep_existing":
                 skipped_keys.append(str(entry["key"]))
                 continue
+            previous_result = next(
+                (
+                    deepcopy(row) for row in task.results
+                    if _web_result_index(row) == existing_index
+                ),
+                None,
+            )
+            replacement_backups.append({
+                "item_index": existing_index,
+                "before_item": deepcopy(task.items[existing_index]),
+                "before_result": previous_result,
+                "before_progress": deepcopy(
+                    task.item_progress.get(str(existing_index))
+                    or task.item_progress.get(existing_index)
+                ),
+                "before_progress_events": deepcopy(
+                    task.progress_events.get(str(existing_index))
+                    or task.progress_events.get(existing_index)
+                    or []
+                ),
+            })
             task.items[existing_index] = incoming
             replaced_indices.append(existing_index)
             item_indices.append(existing_index)
+            _dataset_change(
+                task,
+                action="replace",
+                item_index=existing_index,
+                batch_id=batch_id,
+                details={
+                    "before_revision": previous_revision,
+                    "after_revision": previous_revision + 1,
+                },
+            )
 
         replaced_set = set(replaced_indices)
         if replaced_set:
@@ -1055,10 +1323,7 @@ async def api_eval(req: EvalReq):
                 task.item_progress.pop(index, None)
                 task.progress_events.pop(str(index), None)
                 task.progress_events.pop(index, None)
-            task.done_total = len({
-                result_index for row in task.results
-                if (result_index := _web_result_index(row)) is not None
-            })
+            task.done_total = active_result_count(task.items, task.results)
 
         merge_summary = {
             "incoming_count": len(req.items),
@@ -1067,13 +1332,68 @@ async def api_eval(req: EvalReq):
             "skipped_count": len(skipped_keys),
             "conflict_count": len(conflicts),
         }
-        append_id = f"append-{uuid.uuid4().hex[:8]}"
+        batch_record = {
+            "batch_id": batch_id,
+            "batch_no": batch_no,
+            "kind": "append",
+            "append_id": append_id,
+            "source_dataset_name": source_dataset_name,
+            "imported_at": time.time(),
+            "row_count": len(req.items),
+            "inserted_count": len(inserted_indices),
+            "replaced_count": len(replaced_indices),
+            "skipped_count": len(skipped_keys),
+            "inserted_item_indices": inserted_indices,
+            "replaced_item_indices": replaced_indices,
+            "skipped_item_keys": skipped_keys,
+            "status": "active",
+            "base_status": previous_state["status"],
+            "base_error": previous_state["error"],
+        }
+        artifact_references: list[str] = []
+        try:
+            batch_record["snapshot_path"] = save_dataset_batch_snapshot(
+                task,
+                batch_id=batch_id,
+                batch_no=batch_no,
+                kind="append",
+                source_name=source_dataset_name,
+                items=req.items,
+            )
+            artifact_references.append(batch_record["snapshot_path"])
+            if inserted_indices or replacement_backups:
+                batch_record["rollback_path"] = save_dataset_rollback_snapshot(
+                    task,
+                    batch_id=batch_id,
+                    payload={
+                        "schema_version": 1,
+                        "task_id": task.id,
+                        "batch_id": batch_id,
+                        "inserted_item_indices": inserted_indices,
+                        "replacements": replacement_backups,
+                    },
+                )
+                artifact_references.append(batch_record["rollback_path"])
+        except (OSError, TypeError, ValueError) as exc:
+            task.items = previous_state["items"]
+            task.results = previous_state["results"]
+            task.item_progress = previous_state["item_progress"]
+            task.progress_events = previous_state["progress_events"]
+            task.done_total = previous_state["done_total"]
+            task.dataset_batches = previous_state["dataset_batches"]
+            task.dataset_change_log = previous_state["dataset_change_log"]
+            raise HTTPException(
+                500,
+                f"追加数据归档失败，未修改历史评估集：{type(exc).__name__}: {exc}",
+            ) from exc
+        task.dataset_batches.append(batch_record)
         if not item_indices:
             finished_at = datetime.now().timestamp()
             completed_attempt = {
                 "append_id": append_id,
                 "segment_no": segment_no,
                 "source_dataset_name": source_dataset_name,
+                "batch_id": batch_id,
                 "item_indices": [],
                 "inserted_item_indices": [],
                 "replaced_item_indices": [],
@@ -1089,12 +1409,18 @@ async def api_eval(req: EvalReq):
             task.append_history.append(completed_attempt)
             if not save_task(task):
                 task.append_history.pop()
+                task.dataset_batches = previous_state["dataset_batches"]
+                task.dataset_change_log = previous_state["dataset_change_log"]
+                for reference in artifact_references:
+                    path = dataset_artifact_path(reference)
+                    if path:
+                        path.unlink(missing_ok=True)
                 raise HTTPException(500, "追加记录写入历史快照失败")
             return {
                 "task_id": task.id,
                 "action": "skipped",
                 "item_indices": [],
-                "dataset_size": len(task.items),
+                "dataset_size": active_total(task.items),
                 "append_id": append_id,
                 "merge_summary": merge_summary,
             }
@@ -1106,6 +1432,7 @@ async def api_eval(req: EvalReq):
         task.summary = {}
         task.active_append = {
             "append_id": append_id,
+            "batch_id": batch_id,
             "segment_no": segment_no,
             "source_dataset_name": source_dataset_name,
             "item_indices": item_indices,
@@ -1139,6 +1466,12 @@ async def api_eval(req: EvalReq):
             task.status = previous_state["status"]
             task.error = previous_state["error"]
             task.finished_at = previous_state["finished_at"]
+            task.dataset_batches = previous_state["dataset_batches"]
+            task.dataset_change_log = previous_state["dataset_change_log"]
+            for reference in artifact_references:
+                path = dataset_artifact_path(reference)
+                if path:
+                    path.unlink(missing_ok=True)
             raise HTTPException(500, "追加数据写入历史快照失败，未启动评估")
         execution = asyncio.create_task(run_append(task, runtime_cfg, item_indices))
         action = "appended"
@@ -1153,7 +1486,7 @@ async def api_eval(req: EvalReq):
         "task_id": task.id,
         "action": action,
         "item_indices": item_indices,
-        "dataset_size": len(task.items),
+        "dataset_size": active_total(task.items),
         "append_id": (task.active_append or {}).get("append_id"),
         "merge_summary": merge_summary if append_task is not None else None,
     }
@@ -1296,7 +1629,7 @@ async def api_eval_single(req: SingleEvalReq):
         "status": "success",
         "evaluation_status": task.status,
         "action": action,
-        "dataset_size": len(task.items),
+        "dataset_size": active_total(task.items),
     }
 
 
@@ -1474,8 +1807,8 @@ async def api_stream(
                 "task_state",
                 {
                     "status": task.status,
-                    "progress": max(task.done_total, len(task.results)),
-                    "total": len(task.items),
+                    "progress": active_result_count(task.items, task.results),
+                    "total": active_total(task.items),
                     "started_at": task.started_at,
                     "finished_at": task.finished_at,
                     "duration_s": task.elapsed_s(),
@@ -1497,15 +1830,36 @@ async def api_stream(
                 # 兼容旧客户端：没有事件游标时仍回放完整页面状态。
                 for item_events in list(task.progress_events.values()):
                     for progress_event in item_events:
+                        progress_index = _web_result_index(progress_event)
+                        if (
+                            progress_index is not None
+                            and 0 <= progress_index < len(task.items)
+                            and not is_item_active(task.items[progress_index])
+                        ):
+                            continue
                         yield _sse("progress_event", progress_event)
                 for progress_item in list(task.item_progress.values()):
+                    progress_index = _web_result_index(progress_item)
+                    if (
+                        progress_index is not None
+                        and 0 <= progress_index < len(task.items)
+                        and not is_item_active(task.items[progress_index])
+                    ):
+                        continue
                     yield _sse("item_progress", progress_item)
                 for result in list(task.results):
+                    result_index = _web_result_index(result)
+                    if (
+                        result_index is not None
+                        and 0 <= result_index < len(task.items)
+                        and not is_item_active(task.items[result_index])
+                    ):
+                        continue
                     yield _sse(
                         "result",
                         {
-                            "progress": max(task.done_total, len(task.results)),
-                            "total": len(task.items),
+                            "progress": active_result_count(task.items, task.results),
+                            "total": active_total(task.items),
                             "result": result,
                         },
                     )
@@ -1533,7 +1887,7 @@ async def api_stream(
                             "done",
                             {
                                 "summary": task.summary,
-                                "total": len(task.items),
+                                "total": active_total(task.items),
                                 "duration_s": task.duration_s,
                             },
                             event_id=task.event_cursor or None,
@@ -1611,8 +1965,11 @@ def api_history(
             continue
         row.update({
             "status": live.status,
-            "total": len(live.items),
-            "done": max(live.done_total, len(live.results)),
+            "total": active_total(live.items),
+            "done": max(
+                live.done_total,
+                active_result_count(live.items, live.results),
+            ),
             "started_at": live.started_at,
             "finished_at": live.finished_at,
             "duration_s": live.elapsed_s(),
@@ -1621,6 +1978,8 @@ def api_history(
             "rerun_count": len(live.rerun_history),
             "active_append": live.active_append,
             "append_count": len(live.append_history),
+            "excluded_count": len(live.items) - active_total(live.items),
+            "dataset_batch_count": len(live.dataset_batches),
         })
     return {
         "items": rows,
@@ -1825,6 +2184,255 @@ def api_history_delete(task_id: str):
     return {"ok": True}
 
 
+@app.get("/api/eval/{task_id}/dataset")
+def api_dataset_maintenance(task_id: str):
+    task = get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "task not found")
+    if task.mode != "operation":
+        raise HTTPException(422, "目前仅任务类（录屏）支持数据集维护")
+    if (task.options or {}).get("operation_layout") == "multi_group":
+        raise HTTPException(409, "任务类多组评估暂不支持数据集维护")
+    had_batches = bool(task.dataset_batches)
+    _ensure_dataset_tracking(task)
+    if not had_batches and not save_task(task):
+        raise HTTPException(500, "旧任务数据集版本初始化失败")
+    return _dataset_maintenance_payload(task)
+
+
+def _set_dataset_item_status(
+    task_id: str,
+    req: DatasetItemsActionReq,
+    *,
+    status: str,
+) -> dict:
+    task = get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "task not found")
+    _assert_dataset_maintenance_available(task)
+    _ensure_dataset_tracking(task)
+    indices = list(dict.fromkeys(req.item_indices))
+    if not indices:
+        raise HTTPException(400, "item_indices 为空")
+    invalid = [index for index in indices if index < 0 or index >= len(task.items)]
+    if invalid:
+        raise HTTPException(422, f"无效的数据集索引：{invalid[:10]}")
+    if status == DATASET_ACTIVE:
+        rolled_back_batch_ids = {
+            str(batch.get("batch_id") or "")
+            for batch in task.dataset_batches
+            if batch.get("status") == "rolled_back"
+        }
+        blocked = [
+            index for index in indices
+            if str(task.items[index].get("dataset_source_batch_id") or "")
+            in rolled_back_batch_ids
+        ]
+        if blocked:
+            raise HTTPException(
+                409,
+                "来自已回滚批次的题目不能直接恢复，请重新追加修正后的数据",
+            )
+
+    previous_statuses = {
+        index: task.items[index].get("dataset_status") or DATASET_ACTIVE
+        for index in indices
+    }
+    previous_log_size = len(task.dataset_change_log)
+    previous_summary = task.summary
+    previous_done_total = task.done_total
+    changed_indices: list[int] = []
+    action = "restore" if status == DATASET_ACTIVE else "exclude"
+    for index in indices:
+        if previous_statuses[index] == status:
+            continue
+        task.items[index]["dataset_status"] = status
+        changed_indices.append(index)
+        _dataset_change(
+            task,
+            action=action,
+            item_index=index,
+            reason=req.reason,
+            details={
+                "before_status": previous_statuses[index],
+                "after_status": status,
+            },
+        )
+    if not changed_indices:
+        return _dataset_maintenance_payload(task)
+
+    refresh_task_summary(task, cfg())
+    if not save_task(task):
+        for index, previous in previous_statuses.items():
+            task.items[index]["dataset_status"] = previous
+        del task.dataset_change_log[previous_log_size:]
+        task.summary = previous_summary
+        task.done_total = previous_done_total
+        raise HTTPException(500, "数据集修订保存失败，已撤销本次操作")
+    task.publish_nowait("dataset_changed", {
+        "action": action,
+        "item_indices": changed_indices,
+        "active_count": active_total(task.items),
+        "excluded_count": len(task.items) - active_total(task.items),
+    })
+    return _dataset_maintenance_payload(task)
+
+
+@app.post("/api/eval/{task_id}/dataset/items/exclude")
+def api_dataset_items_exclude(task_id: str, req: DatasetItemsActionReq):
+    return _set_dataset_item_status(task_id, req, status=DATASET_EXCLUDED)
+
+
+@app.post("/api/eval/{task_id}/dataset/items/restore")
+def api_dataset_items_restore(task_id: str, req: DatasetItemsActionReq):
+    return _set_dataset_item_status(task_id, req, status=DATASET_ACTIVE)
+
+
+@app.post("/api/eval/{task_id}/dataset/batches/{batch_id}/rollback")
+def api_dataset_batch_rollback(
+    task_id: str,
+    batch_id: str,
+    req: DatasetBatchRollbackReq,
+):
+    task = get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "task not found")
+    _assert_dataset_maintenance_available(task)
+    _ensure_dataset_tracking(task)
+    batch = next(
+        (row for row in task.dataset_batches if row.get("batch_id") == batch_id),
+        None,
+    )
+    if batch is None:
+        raise HTTPException(404, "追加批次不存在")
+    if batch.get("kind") != "append":
+        raise HTTPException(409, "初始数据集不能整批回滚")
+    if batch.get("status") != "active":
+        raise HTTPException(409, "该追加批次已经回滚")
+    active_append_batches = [
+        row for row in task.dataset_batches
+        if row.get("kind") == "append" and row.get("status") == "active"
+    ]
+    if not active_append_batches or active_append_batches[-1] is not batch:
+        raise HTTPException(409, "为避免覆盖后续修订，请从最后一个有效追加批次开始回滚")
+
+    inserted_indices = [int(value) for value in batch.get("inserted_item_indices") or []]
+    rollback_data = load_dataset_artifact(batch.get("rollback_path") or "")
+    replacements = (
+        rollback_data.get("replacements") or []
+        if isinstance(rollback_data, dict) else []
+    )
+    if (inserted_indices or batch.get("replaced_item_indices")) and not isinstance(
+        rollback_data, dict,
+    ):
+        raise HTTPException(409, "该批次缺少回滚资料，未修改当前数据集")
+
+    previous_state = {
+        "items": deepcopy(task.items),
+        "results": deepcopy(task.results),
+        "item_progress": deepcopy(task.item_progress),
+        "progress_events": deepcopy(task.progress_events),
+        "dataset_batches": deepcopy(task.dataset_batches),
+        "dataset_change_log": deepcopy(task.dataset_change_log),
+        "summary": deepcopy(task.summary),
+        "done_total": task.done_total,
+        "status": task.status,
+        "error": task.error,
+    }
+    rolled_back_at = time.time()
+    for index in inserted_indices:
+        if 0 <= index < len(task.items):
+            task.items[index]["dataset_status"] = DATASET_EXCLUDED
+    for backup in replacements:
+        index = int(backup.get("item_index", -1))
+        before_item = backup.get("before_item")
+        if not (0 <= index < len(task.items) and isinstance(before_item, dict)):
+            continue
+        task.items[index] = before_item
+        task.results = [
+            row for row in task.results if _web_result_index(row) != index
+        ]
+        before_result = backup.get("before_result")
+        if isinstance(before_result, dict):
+            task.results.append(before_result)
+        before_progress = backup.get("before_progress")
+        if isinstance(before_progress, dict):
+            task.item_progress[str(index)] = before_progress
+        else:
+            task.item_progress.pop(str(index), None)
+            task.item_progress.pop(index, None)
+        before_events = backup.get("before_progress_events")
+        if isinstance(before_events, list) and before_events:
+            task.progress_events[str(index)] = before_events
+        else:
+            task.progress_events.pop(str(index), None)
+            task.progress_events.pop(index, None)
+    task.results.sort(key=lambda row: (_web_result_index(row) is None, _web_result_index(row) or 0))
+    batch["status"] = "rolled_back"
+    batch["rolled_back_at"] = rolled_back_at
+    batch["rollback_reason"] = req.reason.strip()
+    for attempt in task.append_history:
+        if (
+            attempt.get("batch_id") == batch_id
+            or attempt.get("append_id") == batch.get("append_id")
+        ):
+            attempt["dataset_batch_status"] = "rolled_back"
+            attempt["dataset_rolled_back_at"] = rolled_back_at
+    _dataset_change(
+        task,
+        action="rollback_batch",
+        batch_id=batch_id,
+        reason=req.reason,
+        details={
+            "inserted_count": len(inserted_indices),
+            "replaced_count": len(replacements),
+        },
+    )
+    refresh_task_summary(task, cfg())
+    base_status = str(batch.get("base_status") or task.status)
+    if base_status in {"done", "error", "cancelled"}:
+        task.status = base_status
+        task.error = batch.get("base_error")
+    if not save_task(task):
+        task.items = previous_state["items"]
+        task.results = previous_state["results"]
+        task.item_progress = previous_state["item_progress"]
+        task.progress_events = previous_state["progress_events"]
+        task.dataset_batches = previous_state["dataset_batches"]
+        task.dataset_change_log = previous_state["dataset_change_log"]
+        task.summary = previous_state["summary"]
+        task.done_total = previous_state["done_total"]
+        task.status = previous_state["status"]
+        task.error = previous_state["error"]
+        raise HTTPException(500, "追加批次回滚保存失败，已撤销本次操作")
+    task.publish_nowait("dataset_changed", {
+        "action": "rollback_batch",
+        "batch_id": batch_id,
+        "active_count": active_total(task.items),
+        "excluded_count": len(task.items) - active_total(task.items),
+    })
+    return _dataset_maintenance_payload(task)
+
+
+@app.get("/api/eval/{task_id}/dataset/batches/{batch_id}/export")
+def api_dataset_batch_export(task_id: str, batch_id: str):
+    task = get_task(task_id, cache=False)
+    if task is None:
+        raise HTTPException(404, "task not found")
+    batch = next(
+        (row for row in task.dataset_batches if row.get("batch_id") == batch_id),
+        None,
+    )
+    if batch is None:
+        raise HTTPException(404, "数据集批次不存在")
+    path = dataset_artifact_path(batch.get("snapshot_path") or "")
+    if path is None:
+        raise HTTPException(404, "该批次没有可下载的数据快照")
+    source_stem = Path(str(batch.get("source_dataset_name") or "dataset")).stem
+    filename = f"{int(batch.get('batch_no') or 0):04d}_{source_stem}.jsonl"
+    return FileResponse(path, media_type="application/x-ndjson", filename=filename)
+
+
 @app.post("/api/eval/{task_id}/cancel")
 async def api_eval_cancel(task_id: str):
     task = get_live_task(task_id)
@@ -1906,7 +2514,7 @@ async def api_eval_cancel(task_id: str):
                 "summary": task.summary,
                 "status": task.status,
                 "progress": task.done_total,
-                "total": len(task.items),
+                "total": active_total(task.items),
             })
             save_task(task)
         return {"ok": True, "task_id": task.id, "status": task.status}
@@ -1970,6 +2578,9 @@ async def api_eval_rerun(task_id: str, req: RerunReq):
     invalid = [index for index in indices if index < 0 or index >= len(task.items)]
     if invalid:
         raise HTTPException(422, f"无效的数据集索引：{invalid[:10]}")
+    excluded = [index for index in indices if not is_item_active(task.items[index])]
+    if excluded:
+        raise HTTPException(409, f"已排除题目不能重跑：{excluded[:10]}")
 
     rerun_options = dict(task.options)
     # 新前端会显式提交当前选择；旧客户端未提交时继续沿用原任务配置。

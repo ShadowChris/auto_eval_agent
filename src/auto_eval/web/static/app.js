@@ -86,6 +86,9 @@ createApp({
     const opPreparing = ref(false);
     const datasetImportSummary = ref(null);
     const datasetImportWarnings = ref([]);
+    const importedDatasetSelections = ref({});
+    const importedPreviewPage = ref(1);
+    const importedPreviewPageSize = 10;
     let operationGroupSequence = 0;
     function newOperationGroup(role = "experiment") {
       const sequence = ++operationGroupSequence;
@@ -147,6 +150,10 @@ createApp({
     const appendTargetMeta = ref(null);
     const appendMergePreview = ref(null);
     const appendConflictResolutions = ref({});
+    const appendNewSelections = ref({});
+    const appendPreviewTab = ref("new");
+    const appendNewPreviewPage = ref(1);
+    const appendNewPreviewPageSize = 10;
     const appendPreviewing = ref(false);
     const loadedTaskOptions = ref({});
     const runError = ref("");
@@ -208,6 +215,14 @@ createApp({
     const historyPage = ref(1);
     const historyPageSize = ref(10);
     const historyJumpPage = ref("");
+    const datasetMaintenance = ref(null);
+    const datasetMaintenanceLoading = ref(false);
+    const datasetMaintenanceError = ref("");
+    const datasetMaintenanceSelected = ref(new Set());
+    const datasetMaintenanceQuery = ref("");
+    const datasetMaintenanceStatus = ref("");
+    const datasetMaintenancePage = ref(1);
+    const datasetMaintenancePageSize = ref(20);
     const knowledgePublished = ref(null);
     const knowledgeDraft = ref({ name: "任务类专家经验", description: "", version: 1, categories: [] });
     const knowledgeCategoryKey = ref("");
@@ -222,7 +237,7 @@ createApp({
     let historyTaskLoadController = null;
     const eventCursor = ref(0);
     const pageSize = 10;
-    const opPageSize = 10;
+    const opPageSize = 2;
     const progressStages = ["排队", "分类", "模型/裁判", "聚合", "完成"];
 
     function emptyProviderForm() {
@@ -329,6 +344,55 @@ createApp({
         index: start + offset,
       }));
     });
+    const hasImportedOperationDataset = computed(() => (
+      mode.value === "operation"
+      && Boolean(datasetImportSummary.value)
+      && opItems.value.length > 0
+    ));
+    function importedPreviewKey(item, index) {
+      const source = item?.sourceData && typeof item.sourceData === "object"
+        ? item.sourceData
+        : {};
+      const candidates = [source.index, source["序号"], source.id, item?.id];
+      const value = candidates.find(
+        (candidate) => candidate !== null
+          && candidate !== undefined
+          && String(candidate).trim(),
+      );
+      return value === undefined ? `第${index + 1}条` : String(value);
+    }
+    const importedDatasetPreviewRows = computed(() => opItems.value.map((item, index) => ({
+      incoming_position: index,
+      incoming_no: index + 1,
+      key: importedPreviewKey(item, index),
+      incoming_id: String(item.id || `第${index + 1}条`),
+      query: item.query || "",
+      context: item.context || "",
+      video_path: item.videoPath || "",
+      query_images: (item.queryImages || []).length
+        ? [...item.queryImages]
+        : (item.attachmentPath ? [item.attachmentPath] : []),
+      task_start_time: item.taskStartTime,
+      task_end_time: item.taskEndTime,
+    })));
+    const importedPreviewPageCount = computed(() => Math.max(
+      1,
+      Math.ceil(importedDatasetPreviewRows.value.length / importedPreviewPageSize),
+    ));
+    const pagedImportedDatasetPreviewRows = computed(() => {
+      const page = Math.min(importedPreviewPage.value, importedPreviewPageCount.value);
+      const start = (page - 1) * importedPreviewPageSize;
+      return importedDatasetPreviewRows.value.slice(start, start + importedPreviewPageSize);
+    });
+    const selectedImportedDatasetCount = computed(() => (
+      importedDatasetPreviewRows.value.filter(
+        (row) => importedDatasetSelections.value[String(row.incoming_position)] !== false,
+      ).length
+    ));
+    const allImportedDatasetSelected = computed(() => (
+      importedDatasetPreviewRows.value.length > 0
+      && selectedImportedDatasetCount.value === importedDatasetPreviewRows.value.length
+    ));
     const previewPageCount = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)));
     const pagedPreviewItems = computed(() => {
       const page = Math.min(previewPage.value, previewPageCount.value);
@@ -383,7 +447,7 @@ createApp({
           events,
           latestEvents: events.slice(-2),
         };
-      });
+      }).filter((row) => items.value[row.index]?.dataset_status !== "excluded");
       return isSingleApiDataset.value
         ? rows.sort((left, right) => compareItemIds(left.itemId, right.itemId))
         : rows;
@@ -407,6 +471,34 @@ createApp({
       () => Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value)),
     );
     const pagedHistoryItems = computed(() => historyItems.value);
+    const filteredDatasetMaintenanceItems = computed(() => {
+      const query = datasetMaintenanceQuery.value.trim().toLowerCase();
+      return (datasetMaintenance.value?.items || []).filter((item) => {
+        if (datasetMaintenanceStatus.value && item.dataset_status !== datasetMaintenanceStatus.value) return false;
+        if (!query) return true;
+        return `${item.item_key || ""} ${item.item_id || ""} ${item.query || ""}`.toLowerCase().includes(query);
+      });
+    });
+    const datasetMaintenancePageCount = computed(() => Math.max(
+      1,
+      Math.ceil(filteredDatasetMaintenanceItems.value.length / datasetMaintenancePageSize.value),
+    ));
+    const pagedDatasetMaintenanceItems = computed(() => {
+      const page = Math.min(datasetMaintenancePage.value, datasetMaintenancePageCount.value);
+      const start = (page - 1) * datasetMaintenancePageSize.value;
+      return filteredDatasetMaintenanceItems.value.slice(start, start + datasetMaintenancePageSize.value);
+    });
+    const selectedDatasetMaintenanceItems = computed(() => (
+      (datasetMaintenance.value?.items || []).filter(
+        (item) => datasetMaintenanceSelected.value.has(Number(item.item_index)),
+      )
+    ));
+    const selectedDatasetActiveCount = computed(() => selectedDatasetMaintenanceItems.value.filter(
+      (item) => item.dataset_status !== "excluded",
+    ).length);
+    const selectedDatasetExcludedCount = computed(() => selectedDatasetMaintenanceItems.value.filter(
+      (item) => item.dataset_status === "excluded",
+    ).length);
     const appendTargetCandidates = computed(() => {
       const candidates = historyItems.value.filter(canAppendHistoryItem);
       const selected = appendTargetMeta.value;
@@ -425,6 +517,29 @@ createApp({
         (conflict) => !appendConflictResolutions.value[String(conflict.key)],
       ).length
     ));
+    const appendNewPreviewPageCount = computed(() => Math.max(
+      1,
+      Math.ceil(
+        (appendMergePreview.value?.new_items || []).length / appendNewPreviewPageSize,
+      ),
+    ));
+    const pagedAppendNewPreviewItems = computed(() => {
+      const page = Math.min(appendNewPreviewPage.value, appendNewPreviewPageCount.value);
+      const start = (page - 1) * appendNewPreviewPageSize;
+      return (appendMergePreview.value?.new_items || []).slice(
+        start,
+        start + appendNewPreviewPageSize,
+      );
+    });
+    const selectedAppendNewCount = computed(() => (
+      (appendMergePreview.value?.new_items || []).filter(
+        (row) => appendNewSelections.value[String(row.incoming_position)] !== false,
+      ).length
+    ));
+    const allAppendNewSelected = computed(() => {
+      const rows = appendMergePreview.value?.new_items || [];
+      return rows.length > 0 && selectedAppendNewCount.value === rows.length;
+    });
     watch(opItems, () => {
       if (appendMergePreview.value) clearAppendConflictPreview();
     }, { deep: true });
@@ -1286,6 +1401,8 @@ createApp({
       datasetName.value = "";
       datasetImportSummary.value = null;
       datasetImportWarnings.value = [];
+      importedDatasetSelections.value = {};
+      importedPreviewPage.value = 1;
       groupAlignment.value = null;
       submitMode.value = "create";
       appendTargetTaskId.value = "";
@@ -1465,6 +1582,8 @@ createApp({
       errors.value = [];
       datasetImportSummary.value = null;
       datasetImportWarnings.value = [];
+      importedDatasetSelections.value = {};
+      importedPreviewPage.value = 1;
       items.value = [];
       releaseAllQueryImagePreviews();
       opItems.value = [newOpItem()];
@@ -1507,6 +1626,10 @@ createApp({
               sourceData: item.source_data || null,
             };
           });
+          importedDatasetSelections.value = Object.fromEntries(
+            opItems.value.map((item, index) => [String(index), true]),
+          );
+          importedPreviewPage.value = 1;
           opPage.value = 1;
           importedSuccessfully = true;
         }
@@ -1523,6 +1646,38 @@ createApp({
       ) {
         await submit(false, true);
       }
+    }
+
+    function setImportedPreviewPage(requestedPage) {
+      const page = Math.trunc(Number(requestedPage));
+      if (!Number.isFinite(page)) return;
+      importedPreviewPage.value = Math.min(
+        importedPreviewPageCount.value,
+        Math.max(1, page),
+      );
+    }
+
+    function setAllImportedDatasetSelections(selected) {
+      importedDatasetSelections.value = Object.fromEntries(
+        importedDatasetPreviewRows.value.map(
+          (row) => [String(row.incoming_position), Boolean(selected)],
+        ),
+      );
+    }
+
+    function clearImportedOperationDataset() {
+      resetEvaluationView();
+      releaseAllQueryImagePreviews();
+      items.value = [];
+      opItems.value = [newOpItem()];
+      datasetName.value = "";
+      datasetImportSummary.value = null;
+      datasetImportWarnings.value = [];
+      importedDatasetSelections.value = {};
+      importedPreviewPage.value = 1;
+      opPage.value = 1;
+      opJumpPage.value = "";
+      errors.value = [];
     }
 
     function operationDatasetStem(filename) {
@@ -1672,7 +1827,12 @@ createApp({
       }
       if (isVideoMode.value)
         return !opPreparing.value && opItems.value.some(
-          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
+          (it, index) => it.query.trim()
+            && ((it.frames || []).length || it.videoPath)
+            && (
+              !hasImportedOperationDataset.value
+              || importedDatasetSelections.value[String(index)] !== false
+            ),
         );
       return !!text.value;
     });
@@ -1706,16 +1866,25 @@ createApp({
           return;
         }
       } else if (isVideoMode.value) {
-        const valid = opItems.value.filter(
-          (it) => it.query.trim() && ((it.frames || []).length || it.videoPath)
+        const valid = opItems.value.map((it, sourceIndex) => ({ it, sourceIndex })).filter(
+          ({ it, sourceIndex }) => it.query.trim()
+            && ((it.frames || []).length || it.videoPath)
+            && (
+              !hasImportedOperationDataset.value
+              || importedDatasetSelections.value[String(sourceIndex)] !== false
+            ),
         );
         if (!valid.length) {
+          if (hasImportedOperationDataset.value && selectedImportedDatasetCount.value === 0) {
+            runError.value = "没有需要评估的数据，请至少勾选一条导入数据。";
+            return;
+          }
           alert("请为每题填写 query，并提供视频路径或上传视频后再评估。");
           return;
         }
-        items.value = valid.map((it, idx) => {
+        items.value = valid.map(({ it, sourceIndex }) => {
           const item = {
-            id: it.id || `${mode.value === "operation" ? "op" : "rich"}${idx + 1}`,
+            id: it.id || `${mode.value === "operation" ? "op" : "rich"}${sourceIndex + 1}`,
             query: it.query.trim(),
             context: (it.context || "").trim(),
             video_path: it.videoPath,
@@ -1750,6 +1919,18 @@ createApp({
           return;
         }
       }
+      const submittedItems = isConfirmedAppend
+        ? items.value.filter((item, index) => {
+            const newRow = (appendMergePreview.value?.new_items || []).find(
+              (row) => Number(row.incoming_position) === index,
+            );
+            return !newRow || appendNewSelections.value[String(index)] !== false;
+          })
+        : items.value;
+      if (isConfirmedAppend && !submittedItems.length) {
+        runError.value = "没有需要追加的数据，请至少勾选一条新增数据。";
+        return;
+      }
       results.value = [];
       summary.value = null;
       progressEvents.value = {};
@@ -1761,10 +1942,11 @@ createApp({
       resultPage.value = 1;
       progress.value = 0;
       total.value = isAppendSubmit
-        ? Number(selectedAppendTarget.value?.total || 0) + items.value.length
-        : items.value.length;
+        ? Number(selectedAppendTarget.value?.total || 0)
+          + (isConfirmedAppend ? selectedAppendNewCount.value : items.value.length)
+        : submittedItems.length;
       itemProgress.value = isAppendSubmit ? {} : Object.fromEntries(
-        items.value.map((item, index) => [
+        submittedItems.map((item, index) => [
           index,
           {
             item_index: index,
@@ -1783,7 +1965,7 @@ createApp({
       progressView.value = "all";
       const body = {
         mode: isMultiGroupMode.value ? "operation" : mode.value,
-        items: items.value,
+        items: submittedItems,
         dataset_name: datasetName.value || (isVideoMode.value ? "手动录入" : (isJsonl.value ? "未命名数据集.jsonl" : "文本输入")),
         submit_mode: isAppendSubmit ? "append" : "create",
         task_id: isAppendSubmit ? appendTargetTaskId.value : "",
@@ -1843,10 +2025,20 @@ createApp({
         itemProgress.value = {};
         appendMergePreview.value = d.merge_preview || {
           conflicts: [],
+          new_items: [],
           incoming_total: items.value.length,
           new_count: items.value.length,
           conflict_count: 0,
         };
+        appendPreviewTab.value = (appendMergePreview.value.new_items || []).length
+          ? "new"
+          : "conflicts";
+        appendNewSelections.value = Object.fromEntries(
+          (appendMergePreview.value.new_items || []).map(
+            (row) => [String(row.incoming_position), true],
+          ),
+        );
+        appendNewPreviewPage.value = 1;
         appendConflictResolutions.value = Object.fromEntries(
           (appendMergePreview.value.conflicts || [])
             .filter((conflict) => conflict.recommended_action)
@@ -2287,6 +2479,154 @@ createApp({
       return parts.join("");
     }
 
+    function datasetStatusLabel(status) {
+      return status === "excluded" ? "已排除" : "有效";
+    }
+
+    function datasetEvaluationStatusLabel(status) {
+      return ({ succeeded: "已完成", failed: "评估失败", missing: "待评估" }[status] || status || "—");
+    }
+
+    function datasetBatchStatusLabel(status) {
+      return status === "rolled_back" ? "已回滚" : "有效";
+    }
+
+    function datasetChangeActionLabel(action) {
+      return ({
+        add: "新增",
+        replace: "替换",
+        exclude: "排除",
+        restore: "恢复",
+        rollback_batch: "回滚批次",
+      }[action] || action || "—");
+    }
+
+    async function loadDatasetMaintenance(showError = true) {
+      if (!taskId.value || mode.value !== "operation" || isMultiGroupMode.value) {
+        datasetMaintenance.value = null;
+        return;
+      }
+      datasetMaintenanceLoading.value = true;
+      datasetMaintenanceError.value = "";
+      try {
+        const response = await fetch(`/api/eval/${encodeURIComponent(taskId.value)}/dataset`);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        datasetMaintenance.value = data;
+        datasetMaintenanceSelected.value = new Set();
+        datasetMaintenancePage.value = Math.min(
+          datasetMaintenancePage.value,
+          Math.max(1, Math.ceil((data.items || []).length / datasetMaintenancePageSize.value)),
+        );
+      } catch (error) {
+        datasetMaintenanceError.value = error?.message || "数据集维护信息加载失败";
+        if (showError) alert(`数据集维护信息加载失败：${datasetMaintenanceError.value}`);
+      } finally {
+        datasetMaintenanceLoading.value = false;
+      }
+    }
+
+    function isDatasetMaintenanceSelected(item) {
+      return datasetMaintenanceSelected.value.has(Number(item.item_index));
+    }
+
+    function setDatasetMaintenanceSelected(item, selected) {
+      const next = new Set(datasetMaintenanceSelected.value);
+      const index = Number(item.item_index);
+      if (selected) next.add(index);
+      else next.delete(index);
+      datasetMaintenanceSelected.value = next;
+    }
+
+    function togglePagedDatasetMaintenanceSelection(selected) {
+      const next = new Set(datasetMaintenanceSelected.value);
+      pagedDatasetMaintenanceItems.value.forEach((item) => {
+        const index = Number(item.item_index);
+        if (selected) next.add(index);
+        else next.delete(index);
+      });
+      datasetMaintenanceSelected.value = next;
+    }
+
+    function clearDatasetMaintenanceSelection() {
+      datasetMaintenanceSelected.value = new Set();
+    }
+
+    async function changeDatasetItemStatus(action) {
+      const expectedStatus = action === "exclude" ? "active" : "excluded";
+      const indices = selectedDatasetMaintenanceItems.value
+        .filter((item) => (
+          expectedStatus === "active"
+            ? item.dataset_status !== "excluded"
+            : item.dataset_status === "excluded"
+        ))
+        .map((item) => Number(item.item_index));
+      if (!indices.length) return;
+      const actionLabel = action === "exclude" ? "排除" : "恢复";
+      if (!confirm(`确认${actionLabel}选中的 ${indices.length} 条数据？`)) return;
+      const reason = prompt(`${actionLabel}原因（可选）`, "") || "";
+      datasetMaintenanceLoading.value = true;
+      try {
+        const response = await fetch(
+          `/api/eval/${encodeURIComponent(taskId.value)}/dataset/items/${action}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ item_indices: indices, reason }),
+          },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        datasetMaintenance.value = data;
+        datasetMaintenanceSelected.value = new Set();
+        await loadHistoryTask(taskId.value, false);
+        await loadHistory();
+      } catch (error) {
+        alert(`${actionLabel}失败：${error?.message || "未知错误"}`);
+      } finally {
+        datasetMaintenanceLoading.value = false;
+      }
+    }
+
+    async function rollbackDatasetBatch(batch) {
+      if (!batch?.rollback_allowed) return;
+      if (!confirm(`确认回滚追加批次「${batch.source_dataset_name || batch.batch_id}」？新增题目将被排除，覆盖题目将恢复旧版本。`)) return;
+      const reason = prompt("回滚原因（可选）", "") || "";
+      datasetMaintenanceLoading.value = true;
+      try {
+        const response = await fetch(
+          `/api/eval/${encodeURIComponent(taskId.value)}/dataset/batches/${encodeURIComponent(batch.batch_id)}/rollback`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason }),
+          },
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        datasetMaintenance.value = data;
+        datasetMaintenanceSelected.value = new Set();
+        await loadHistoryTask(taskId.value, false);
+        await loadHistory();
+      } catch (error) {
+        alert(`批次回滚失败：${error?.message || "未知错误"}`);
+      } finally {
+        datasetMaintenanceLoading.value = false;
+      }
+    }
+
+    function datasetBatchExportUrl(batch) {
+      if (!taskId.value || !batch?.batch_id || !batch.downloadable) return "";
+      return `/api/eval/${encodeURIComponent(taskId.value)}/dataset/batches/${encodeURIComponent(batch.batch_id)}/export`;
+    }
+
+    function changeDatasetMaintenancePage(offset) {
+      datasetMaintenancePage.value = Math.min(
+        datasetMaintenancePageCount.value,
+        Math.max(1, datasetMaintenancePage.value + offset),
+      );
+    }
+
     async function loadHistory() {
       loadingHistory.value = true;
       try {
@@ -2442,7 +2782,40 @@ createApp({
     function clearAppendConflictPreview() {
       appendMergePreview.value = null;
       appendConflictResolutions.value = {};
+      appendNewSelections.value = {};
+      appendPreviewTab.value = "new";
+      appendNewPreviewPage.value = 1;
       appendPreviewing.value = false;
+    }
+
+    function setAppendNewPreviewPage(requestedPage) {
+      const page = Math.trunc(Number(requestedPage));
+      if (!Number.isFinite(page)) return;
+      appendNewPreviewPage.value = Math.min(
+        appendNewPreviewPageCount.value,
+        Math.max(1, page),
+      );
+    }
+
+    function setAllAppendNewSelections(selected) {
+      appendNewSelections.value = Object.fromEntries(
+        (appendMergePreview.value?.new_items || []).map(
+          (row) => [String(row.incoming_position), Boolean(selected)],
+        ),
+      );
+    }
+
+    function formatAppendPreviewImages(paths) {
+      return Array.isArray(paths) && paths.length ? paths.join("；") : "未提供";
+    }
+
+    function formatAppendPreviewTimeRange(row) {
+      const start = row?.task_start_time;
+      const end = row?.task_end_time;
+      const hasStart = start !== null && start !== undefined && String(start).trim() !== "";
+      const hasEnd = end !== null && end !== undefined && String(end).trim() !== "";
+      if (!hasStart && !hasEnd) return "使用默认起止时间";
+      return `${hasStart ? start : "默认"} 秒 → ${hasEnd ? end : "默认"} 秒`;
     }
 
     function setAllAppendConflictResolutions(action) {
@@ -2920,6 +3293,11 @@ createApp({
         const judgeBackend = options.judge_backend || {};
         selectedProviderId.value = judgeBackend.provider_id || "";
         selectedProviderModel.value = judgeBackend.model || "";
+        if (mode.value === "operation" && !isMultiGroupMode.value) {
+          await loadDatasetMaintenance(false);
+        } else {
+          datasetMaintenance.value = null;
+        }
         if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
         renderCharts();
         if (running.value) connectSSE();
@@ -3321,6 +3699,9 @@ createApp({
       concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
       submitMode, appendTargetTaskId, appendTargetMeta, appendTargetCandidates, selectedAppendTarget,
       appendMergePreview, appendConflictResolutions, unresolvedAppendConflictCount, appendPreviewing,
+      appendNewSelections, selectedAppendNewCount, allAppendNewSelected, appendPreviewTab,
+      appendNewPreviewPage, appendNewPreviewPageSize, appendNewPreviewPageCount,
+      pagedAppendNewPreviewItems,
       operationStatistics, visibleOperationIssueStats, issueStatsExpanded,
       runKind, rerunProgress, rerunTotal, rerunProgressIndices, progressView,
       hasRerunProgress, visibleProgressRows, selectedRerunIndices,
@@ -3332,7 +3713,16 @@ createApp({
       comparisonImporting, comparisonImportError, comparisonCanGenerate,
       historyComparison, historyComparisonLoading, historyComparisonError,
       historyPage, historyPageSize, historyPageCount, historyJumpPage,
+      datasetMaintenance, datasetMaintenanceLoading, datasetMaintenanceError,
+      datasetMaintenanceSelected, datasetMaintenanceQuery, datasetMaintenanceStatus,
+      datasetMaintenancePage, datasetMaintenancePageSize, datasetMaintenancePageCount,
+      filteredDatasetMaintenanceItems, pagedDatasetMaintenanceItems,
+      selectedDatasetActiveCount, selectedDatasetExcludedCount,
       opPage, opPageSize, opPageCount, opJumpPage,
+      hasImportedOperationDataset, importedDatasetSelections,
+      importedDatasetPreviewRows, pagedImportedDatasetPreviewRows,
+      selectedImportedDatasetCount, allImportedDatasetSelected,
+      importedPreviewPage, importedPreviewPageSize, importedPreviewPageCount,
       previewPage, previewPageCount, previewJumpPage,
       progressPage, progressPageCount, progressJumpPage,
       resultJumpPage,
@@ -3341,11 +3731,20 @@ createApp({
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
       operationGroups, groupAlignment, groupAligning, multiGroupColumns, multiGroupResult, displayArray, groupRoleLabel,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit, formatOptionalTaskTime, formatAttachmentPath,
-      trunc, switchMode, onFile, onOpManifestFile, onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, resultQueryImageCount, queryImagePreviewUrl, resultQueryImageFilename, openQueryImagePreview, closeQueryImagePreview, moveResultQueryImagePreview, addOpItem, removeOpItem, onOpVideo, onQueryImage, removeQueryImage, onOpDrop,
+      trunc, switchMode, onFile, onOpManifestFile, clearImportedOperationDataset,
+      setAllImportedDatasetSelections, setImportedPreviewPage,
+      onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, resultQueryImageCount, queryImagePreviewUrl, resultQueryImageFilename, openQueryImagePreview, closeQueryImagePreview, moveResultQueryImagePreview, addOpItem, removeOpItem, onOpVideo, onQueryImage, removeQueryImage, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
+      loadDatasetMaintenance, datasetStatusLabel, datasetEvaluationStatusLabel,
+      datasetBatchStatusLabel, datasetChangeActionLabel, isDatasetMaintenanceSelected,
+      setDatasetMaintenanceSelected, togglePagedDatasetMaintenanceSelection,
+      clearDatasetMaintenanceSelection, changeDatasetItemStatus,
+      rollbackDatasetBatch, datasetBatchExportUrl, changeDatasetMaintenancePage,
       canAppendHistoryItem, selectAppendTarget, onAppendTargetChange, clearAppendTarget,
       onSubmitModeChange,
       clearAppendConflictPreview, setAllAppendConflictResolutions,
+      setAllAppendNewSelections, setAppendNewPreviewPage,
+      formatAppendPreviewImages, formatAppendPreviewTimeRange,
       appendEvaluationStatusLabel, confirmAppendMerge,
       canCompareHistoryItem, isHistoryComparisonSelected, toggleHistoryComparisonItem,
       clearHistoryComparisonSelection, addSelectedHistoryComparisonSources,
