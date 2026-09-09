@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260907_rerun_progress">
+  <link rel="stylesheet" href="/static/style.css?v=20260909_factual_conflict">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -287,6 +287,7 @@
       <span v-if="summary.solved_review!=null">需复查 {{ summary.solved_review }} 条</span>
       <span v-if="summary.solved_ok_rate!=null">OK率 {{ (summary.solved_ok_rate*100).toFixed(0) }}%</span>
       <span v-if="summary.needs_review_count">需人工复核 {{ summary.needs_review_count }} 条</span>
+      <span v-if="summary.factual_conflict_yes">事实冲突 {{ summary.factual_conflict_yes }} 条</span>
     </div>
     <div ref="resultBrowser" class="result-browser">
       <div v-if="mode!=='compare'" class="skill-tabs">
@@ -393,7 +394,7 @@
                 >
                   <div
                     class="cell-clamp"
-                    :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
+                    :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','factual_conflict','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
@@ -448,6 +449,6 @@
   </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260907_rerun_progress"></script>
+  <script type="module" src="/static/app.js?v=20260909_factual_conflict"></script>
 </body>
 </html>

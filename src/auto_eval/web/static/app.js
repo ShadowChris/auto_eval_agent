@@ -74,7 +74,7 @@ createApp({
       () =>
         ({
           compare: "逐题导入 JSONL：id(可选)、query、context(可选)、video1、video2、context1/context2(可选)、answer1/answer2(可选)、task_start_time/task_end_time(可选，单位秒)",
-          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。",
+          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、reference_answer(可选，事实参考答案，仅用于事实冲突判定，不代表正确答案)、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。CSV 导入对应列名「事实参考答案」（或英文列头 reference_answer）。",
         }[mode.value])
     );
 
@@ -465,6 +465,7 @@ createApp({
         { key: "problem_solved", label: "Correctness" },
         { key: "problem_solved_reason", label: "评价原因" },
         { key: "answer_issues", label: "error_type" },
+        { key: "factual_conflict", label: "事实冲突" },
         { key: "rationale", label: "识别结论" },
         { key: "latency_s", label: "耗时" },
       ];
@@ -665,8 +666,9 @@ createApp({
     }
 
     // —— 视频评测：逐题卡片（query + 可选 context + 视频上传 + 可选 answer_text）——
+    // referenceAnswer：事实参考答案（CSV/JSONL 导入带出，无录入框，仅随提交隐形透传）
     function newOpItem() {
-      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
+      return { _uiKey: ++opItemSequence, id: "", query: "", context: "", category: "", videoName: "", videoPath: "", frames: [], frameCount: 0, duration: 0, answer: "", referenceAnswer: "", taskStartTime: null, taskEndTime: null, sourceLine: null, sourceData: null, sessionGroup: null, turnIndex: null, uploading: false, uploadError: "" };
     }
     function addOpItem() {
       opItems.value.push(newOpItem());
@@ -761,6 +763,7 @@ createApp({
             video2Path: item.video2 || "",
             taskStartTime: item.task_start_time ?? null,
             taskEndTime: item.task_end_time ?? null,
+            referenceAnswer: item.reference_answer || "",
             sourceLine: item.source_line ?? null,
             sourceData: item.source_data || null,
             sessionGroup: item.session_group ?? null,
@@ -896,6 +899,8 @@ createApp({
           item.video_path = it.videoPath;
           item.category = (it.category || "").trim() || "default";
           item.answer_text = (it.answer || "").trim();
+          // 事实参考答案：无录入框，导入时带出、提交时隐形透传（仅 rich_content）
+          item.reference_answer = (it.referenceAnswer || "").trim();
         }
         if ((it.frames || []).length) {
           item.media = [it.videoPath];
@@ -1127,6 +1132,9 @@ createApp({
       }
       if (c.key === "problem_solved") {
         return ({ ok: "OK", nok: "NOK", need_review: "需复查" }[v] || v) || "";
+      }
+      if (c.key === "factual_conflict") {
+        return ({ yes: "是", no: "否" }[v] || v) || "";
       }
       if (c.key === "answer_coverage") {
         return ({ complete: "完整", partial: "部分", unclear: "不确定" }[v] || v) || "";

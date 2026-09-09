@@ -946,12 +946,16 @@ async def _eval_one(
         answer_text = str(item_dict.get("answer_text") or "").strip()
         if answer_text:
             out["answer_text"] = answer_text
+        # 事实参考答案（仅用于 factual_conflict 判定，不代表正确答案；
+        # 空值时裁判侧省略该维度，结果归一为 no）
+        reference_answer = str(item_dict.get("reference_answer") or "").strip()
         # 视觉事实列表不做多裁判模糊合并；使用用户选择顺序中的第一位裁判，
         # 保证 presence/count/items 始终来自同一份自洽观察。
         visual = await rich_judges[0].evaluate(
             question=item.question,
             context=(item.context or "").strip(),
             answer_text=answer_text,
+            reference_answer=reference_answer,
             frames=frames,
         )
         out.update(visual)
@@ -1063,6 +1067,10 @@ def _summarize_rich_content(task: Task) -> dict:
     solved_ok = [row for row in ok if row.get("problem_solved") == "ok"]
     solved_nok = [row for row in ok if row.get("problem_solved") == "nok"]
     solved_review = [row for row in ok if row.get("problem_solved") == "need_review"]
+    # 事实冲突（仅与 reference_answer 比对；无参考答案的行归一为 no，不计入）
+    factual_conflict_yes = [
+        row for row in ok if row.get("factual_conflict") == "yes"
+    ]
     both = [
         row for row in ok
         if row.get("card_presence") == "present"
@@ -1120,6 +1128,7 @@ def _summarize_rich_content(task: Task) -> dict:
         "solved_ok": len(solved_ok),
         "solved_nok": len(solved_nok),
         "solved_review": len(solved_review),
+        "factual_conflict_yes": len(factual_conflict_yes),
         "solved_ok_rate": (
             round(len(solved_ok) / len(ok), 3) if ok else None
         ),

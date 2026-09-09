@@ -65,6 +65,11 @@ def rich_content_result_fields(
         observation.needs_review or coverage != "complete"
     )
 
+    # 事实冲突归一：裁判侧稀疏（仅冲突时输出 yes），此处归一为密集 yes/no——
+    # 省略/no/否/unclear/垃圾值一律 "no"（保守二元）
+    factual_raw = (observation.factual_conflict or "").strip().lower()
+    factual_conflict = "yes" if factual_raw in {"yes", "是", "有冲突"} else "no"
+
     # 导出字段
     base = {
         "turn_summary": observation.turn_summary or "",
@@ -88,6 +93,7 @@ def rich_content_result_fields(
         "problem_solved": problem_solved,
         "problem_solved_reason": problem_solved_reason,
         "answer_issues": answer_issues,
+        "factual_conflict": factual_conflict,
         "rationale": observation.rationale,
     }
 
@@ -110,6 +116,7 @@ class RichContentJudge:
         context: str,
         answer_text: str,
         frames: list[str],
+        reference_answer: str = "",
         stream_callback=None,
     ) -> dict[str, Any]:
         extraction = self.profile.extraction
@@ -121,6 +128,7 @@ class RichContentJudge:
             question=question,
             context=context,
             answer_text=answer_text,
+            reference_answer=reference_answer,
             frame_count=len(frames),
         )
         user_images = [
@@ -166,6 +174,11 @@ class RichContentJudge:
                 judge=self.client.cfg.name,
                 model=self.client.model,
             ) from exc
+
+        if not reference_answer.strip():
+            # 未提供参考答案：事实冲突字段强制省略（防裁判幻觉输出 yes），
+            # 归一化后为 "no"。此处在 trace/result/汇总扩散之前改写，全下游生效。
+            observation.factual_conflict = ""
 
         result = rich_content_result_fields(observation)
         result.update({

@@ -41,9 +41,10 @@ RICH_CONTENT_SYSTEM = Template(
     """{{ persona }}
 
 你正在检查一段问答产品录屏。用户消息中附带了按时间顺序排列的关键帧；第一张图片是第1帧，依次编号。
-你的任务分为两部分：
+你的任务分为三部分：
   Part 1：纯客观描述识别到的挂卡和 Superlink。
   Part 2：整体评价回答是否解决了用户的问题（query）。
+  Part 3：若用户消息提供了「事实参考答案」，判断产品回答与它是否存在事实冲突。
 
 【背景信息】
 - 用户 query：{{ question }}
@@ -164,6 +165,17 @@ context 中自动记录的用户位置时间仅在用户没有提及时间地点
 【第 3 步：评价原因（problem_solved_reason）】
 简明扼要地说明为何得出该 problem_solved。必须呼应第 1 步在 answer_issues 中查出的关键问题（或说明为何确认无问题），点出关键证据，不得与 answer_issues 矛盾。
 
+【事实冲突判定（factual_conflict，稀疏输出）】
+仅当用户消息中提供了「事实参考答案 reference_answer」时才做此判定，且只有判定为冲突时才在 JSON 中输出 factual_conflict: "yes"；以下情形一律**省略该字段（不输出）**：
+- 用户消息未提供事实参考答案；
+- 产品回答与参考答案讨论的根本不是同一件事（各说各的，无从比对）；
+- 二者结论一致、互补或不矛盾。
+判定标准："yes" 仅指产品回答与参考答案在说同一件事（同一实体、同一问题点、同一数据口径），但给出的结论或关键事实完全不同、相互矛盾。
+纪律：
+1. 参考答案仅供参考、不一定正确——本字段只记录「是否事实冲突」，绝不判断谁对谁错；
+2. 参考答案不是评分标准：不得让它影响 problem_solved / answer_issues / card_suitability 等其他字段的判定；
+3. 省略该字段即视为「无冲突」。
+
 【人工复核】
 出现用户query和画面中用户query严重不符、画面模糊、内容被遮挡、回答覆盖不完整、跨帧无法可靠去重、卡片类型或蓝字归属不确定时，needs_review=true 并说明原因。
 
@@ -176,10 +188,11 @@ context 中自动记录的用户位置时间仅在用户没有提及时间地点
 4. Part 1：纯客观视觉描述（撰写 visual_description 的思考过程）。
 5. 按问题标签逐项核查：对每一个【可能适用】的标签逐一判断“有此问题/无此问题”，并写下具体的画面或文字证据。这一步是后续判定的基础，必须逐项过一遍，不得只挑最显眼的问题、也不得凭整体印象跳过候选标签（此步的“有此问题”结论即 answer_issues 的来源）。
 6. 综合判定：基于第 5 步查出的问题，得出 card_suitability / problem_solved，再写 problem_solved_reason——结论必须呼应第 5 步发现（或说明为何确认无问题），不得与第 5 步矛盾。
-7. 撰写本轮 turn_summary（≤120字）：客观压缩这一轮发生了什么——用户意图、助手给出的核心结果与关键实体（含挂卡/Superlink里的具体信息）、是否闭环；只做事实性压缩，不评价好坏。
-8. 不确定项和人工复核原因。
+7. 事实冲突比对（仅当提供了事实参考答案）：先判断产品回答与参考答案是否在说同一件事，再比较结论是否矛盾；仅判定冲突时在 JSON 中输出 factual_conflict:"yes"，其余情况省略该字段。未提供参考答案则跳过此步。
+8. 撰写本轮 turn_summary（≤120字）：客观压缩这一轮发生了什么——用户意图、助手给出的核心结果与关键实体（含挂卡/Superlink里的具体信息）、是否闭环；只做事实性压缩，不评价好坏。
+9. 不确定项和人工复核原因。
 </analysis>
-{"visual_description":"<Part 1：纯客观描述文本，不得包含评价性语言>","turn_summary":"<本轮≤120字总结：用户意图+核心结果/关键实体+是否闭环>","answer_coverage":"complete|partial|unclear","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","card_suitability":"<ok|nok|空>","card_suitability_reason":"<原因>","problem_solved":"<ok|nok|need_review>","problem_solved_reason":"<评价的原因>","answer_issues":"<问题标签：具体描述，无问题填空字符串>","rationale":"<一句话总结发现>"}
+{"visual_description":"<Part 1：纯客观描述文本，不得包含评价性语言>","turn_summary":"<本轮≤120字总结：用户意图+核心结果/关键实体+是否闭环>","answer_coverage":"complete|partial|unclear","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","card_suitability":"<ok|nok|空>","card_suitability_reason":"<原因>","problem_solved":"<ok|nok|need_review>","problem_solved_reason":"<评价的原因>","answer_issues":"<问题标签：具体描述，无问题填空字符串>","factual_conflict":"<仅事实冲突时输出yes，其余情况整个字段省略>","rationale":"<一句话总结发现>"}
 """
 )
 
@@ -193,6 +206,10 @@ RICH_CONTENT_USER = Template(
 {% if answer_text %}
 复制的回答文本answer_text（只帮助理解语义；它不能证明画面中存在挂卡、蓝色文字或可点击样式）：
 {{ answer_text }}
+{% endif %}
+{% if reference_answer %}
+事实参考答案reference_answer（仅供参考、不一定正确；仅用于 factual_conflict 事实冲突比对，不作为其他评分的标准）：
+{{ reference_answer }}
 {% endif %}
 
 请检查随后按时间顺序排列的 {{ frame_count }} 张关键帧，只统计当前 assistant 回答区域中的挂卡和蓝色 Superlink。"""
