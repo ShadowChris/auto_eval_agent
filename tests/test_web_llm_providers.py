@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from auto_eval.config import AppConfig, EvalOptions, JudgeConfig
 from auto_eval.web import server
 from auto_eval.web.history import jsonl_export_rows
@@ -51,11 +53,15 @@ def test_provider_store_encrypts_key_and_never_returns_it(tmp_path: Path):
     assert "api_key" not in public
     assert public["base_url"] == "https://api.example.test/v1"
     assert public["has_api_key"] is True
+    assert public["rate_limit_requests"] == 9
+    assert public["rate_limit_window_s"] == 1.0
     assert store.key_path.is_file()
 
     resolved = store.resolve("kimi", "", _cfg())
     assert resolved.api_key == "secret-key-value"
     assert resolved.model == "kimi-model"
+    assert resolved.rate_limit_requests == 9
+    assert resolved.rate_limit_window_s == 1.0
 
 
 def test_provider_update_with_empty_key_keeps_existing_secret(tmp_path: Path):
@@ -144,12 +150,20 @@ def test_task_runtime_provider_binding_is_sanitized_and_isolated(
     assert runtime1.judges[0].base_url == "https://one.test/v1"
     assert runtime1.judges[0].model == "m1"
     assert runtime1.judges[0].api_key() == "key-1"
+    assert runtime1.judges[0].rate_limit_requests == 9
+    assert runtime1.judges[0].rate_limit_window_s == 1.0
+    assert runtime1.judges[0].rate_limit_key == "provider:p1"
     assert runtime1.eval_options.classify_model == "m1"
     assert runtime2.judges[0].base_url == "https://two.test/v1"
     assert runtime2.judges[0].model == "m2"
     assert runtime2.judges[0].api_key() == "key-2"
     assert "key-1" not in json.dumps(options1, ensure_ascii=False)
     assert "key-2" not in json.dumps(options2, ensure_ascii=False)
+    assert options1["request_rate_limit"] == {
+        "max_requests": 9,
+        "window_seconds": 1.0,
+        "strategy": "smooth",
+    }
     assert options1["judge_backend"] == {
         "provider_id": "p1",
         "provider_name": "P1",
@@ -173,6 +187,8 @@ def test_frontend_exposes_provider_switch_and_management():
     assert "providerModelOptions" in js
     assert "providerApiErrorText" in js
     assert "Provider ID 仅支持" in js
+    assert "模型请求限速" in html
+    assert "request_rate_limit" in js
 
 
 def test_jsonl_export_records_provider_without_secret():
@@ -198,4 +214,48 @@ def test_jsonl_export_records_provider_without_secret():
     assert eval_run["judge_provider_id"] == "p1"
     assert eval_run["judge_model"] == "m1"
     assert eval_run["judge_provider_revision"] == "rev-1"
+    assert eval_run["rate_limit_requests"] == ""
+    assert eval_run["rate_limit_window_s"] == ""
     assert "api_key" not in json.dumps(rows, ensure_ascii=False)
+
+
+def test_provider_rate_limit_can_be_overridden_per_task(tmp_path: Path, monkeypatch):
+    store = LLMProviderStore(tmp_path / "settings")
+    store.create(LLMProviderPayload(
+        id="p1",
+        name="Provider One",
+        base_url="https://one.test/v1",
+        models=["m1"],
+        default_model="m1",
+        api_key="key-1",
+        rate_limit_requests=10,
+        rate_limit_window_s=2.0,
+    ))
+    monkeypatch.setattr(server, "_llm_provider_store", lambda: store)
+
+    options, runtime = server._normalize_eval_options(
+        _cfg(),
+        {
+            "judge_backend": {"provider_id": "p1", "model": "m1"},
+            "request_rate_limit": {
+                "max_requests": 7,
+                "window_seconds": 1.5,
+            },
+        },
+    )
+
+    assert options["request_rate_limit"] == {
+        "max_requests": 7,
+        "window_seconds": 1.5,
+        "strategy": "smooth",
+    }
+    assert runtime.judges[0].rate_limit_requests == 7
+    assert runtime.judges[0].rate_limit_window_s == 1.5
+
+
+def test_request_rate_limit_rejects_fractional_request_count():
+    with pytest.raises(ValueError, match="必须是整数"):
+        server._normalize_request_rate_limit({
+            "max_requests": 9.5,
+            "window_seconds": 1,
+        })

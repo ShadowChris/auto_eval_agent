@@ -564,6 +564,7 @@
             <strong>{{ provider.name }}</strong>
             <small>{{ provider.id }} · {{ provider.default_model || '未设置模型' }}</small>
             <small>{{ provider.has_api_key ? 'Key 已配置' : 'Key 未配置' }}{{ provider.builtin ? ' · 内置只读' : '' }}</small>
+            <small>默认限速：{{ provider.rate_limit_requests || 9 }} 次 / {{ provider.rate_limit_window_s || 1 }} 秒</small>
           </div>
           <span v-if="!provider.builtin">
             <button type="button" @click="editProvider(provider)">编辑</button>
@@ -579,10 +580,12 @@
         <label>模型列表<textarea v-model="providerForm.models_text" rows="3" placeholder="每行一个模型，也支持逗号分隔"></textarea></label>
         <label>默认模型<input v-model.trim="providerForm.default_model" placeholder="model-name"></label>
         <label>API Key<input v-model.trim="providerForm.api_key" type="password" autocomplete="new-password" :placeholder="providerForm.editing ? '留空表示保留原 Key' : 'sk-...' "></label>
+        <label>每个窗口最多请求数<input v-model.number="providerForm.rate_limit_requests" type="number" min="1" max="10000" step="1"></label>
+        <label>窗口时长（秒）<input v-model.number="providerForm.rate_limit_window_s" type="number" min="0.1" max="3600" step="0.1"></label>
         <label class="provider-enabled"><input v-model="providerForm.enabled" type="checkbox"> 启用</label>
         <div class="provider-form-actions">
           <button type="button" class="primary" @click="saveProvider" :disabled="providerBusy">保存</button>
-          <button type="button" @click="providerForm={id:'',name:'',base_url:'',models_text:'',default_model:'',api_key:'',enabled:true,editing:false}">清空</button>
+          <button type="button" @click="newProvider">清空</button>
         </div>
       </div>
       <p v-if="providerMessage" class="provider-message" :class="{err:providerError,ok:!providerError}">{{ providerMessage }}</p>
@@ -590,8 +593,17 @@
     </template>
     <div class="row">
       <span class="lbl">并发：</span>
-      <input type="number" min="1" max="16" v-model.number="concurrency" style="width:70px">
-      <span class="hint">（裁判 agent loop 含联网查证，过高易触发限流）</span>
+      <input type="number" min="1" max="64" v-model.number="concurrency" style="width:70px">
+      <span class="hint">（同时处理的题目数，主要影响本地抽帧和任务调度）</span>
+    </div>
+    <div class="row">
+      <span class="lbl">模型请求限速：</span>
+      <span>每</span>
+      <input type="number" min="0.1" max="3600" step="0.1" v-model.number="rateLimitWindowSeconds" style="width:76px">
+      <span>秒最多启动</span>
+      <input type="number" min="1" max="10000" step="1" v-model.number="rateLimitRequests" style="width:76px">
+      <span>次请求</span>
+      <span class="hint">（平滑发送；接口硬限制 10 次/秒时建议填 9）</span>
     </div>
     <div class="row">
       <span class="lbl">单题超时：</span>

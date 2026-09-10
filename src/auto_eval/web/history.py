@@ -447,6 +447,14 @@ def _judge_backend_summary(snapshot: dict) -> dict[str, str]:
     }
 
 
+def _request_rate_limit_summary(snapshot: dict) -> dict[str, int | float | str]:
+    rate_limit = (snapshot.get("options") or {}).get("request_rate_limit") or {}
+    return {
+        "rate_limit_requests": rate_limit.get("max_requests", ""),
+        "rate_limit_window_s": rate_limit.get("window_seconds", ""),
+    }
+
+
 def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
     data = _with_operation_compat(data)
     items = data.get("items") or []
@@ -593,6 +601,7 @@ def _jsonl_eval_run(snapshot: dict) -> dict:
         "model": options.get("model") or "",
         **_judge_backend_summary(snapshot),
         "concurrency": options.get("concurrency"),
+        **_request_rate_limit_summary(snapshot),
         "eval_timeout_s": options.get("eval_timeout_s"),
         "rerun_count": len(snapshot.get("rerun_history") or []),
         "append_count": len(snapshot.get("append_history") or []),
@@ -1684,6 +1693,7 @@ def _rerun_record_rows(snapshot: dict) -> list[dict]:
     rows: list[dict] = []
     for attempt in snapshot.get("rerun_history") or []:
         attempt_backend = attempt.get("judge_backend") or {}
+        attempt_rate_limit = attempt.get("request_rate_limit") or {}
         detail_by_index = {
             int(detail["index"]): detail
             for detail in (attempt.get("items") or [])
@@ -1714,6 +1724,8 @@ def _rerun_record_rows(snapshot: dict) -> list[dict]:
                 "Provider ID": detail.get("judge_provider_id") or attempt_backend.get("provider_id") or "",
                 "模型": detail.get("judge_model") or attempt_backend.get("model") or "",
                 "Provider版本": detail.get("judge_provider_revision") or attempt_backend.get("provider_revision") or "",
+                "限速请求数": attempt_rate_limit.get("max_requests", ""),
+                "限速窗口（秒）": attempt_rate_limit.get("window_seconds", ""),
                 "开始时间": _format_ts(attempt.get("started_at")),
                 "完成时间": _format_ts(detail.get("finished_at") or attempt.get("finished_at")),
                 "批次耗时（秒）": attempt.get("duration_s", ""),
@@ -1727,6 +1739,7 @@ def _append_record_rows(snapshot: dict) -> list[dict]:
     rows: list[dict] = []
     for attempt in snapshot.get("append_history") or []:
         backend = attempt.get("judge_backend") or {}
+        rate_limit = attempt.get("request_rate_limit") or {}
         rows.append({
             "追加批次": attempt.get("segment_no", ""),
             "append_id": attempt.get("append_id", ""),
@@ -1745,6 +1758,8 @@ def _append_record_rows(snapshot: dict) -> list[dict]:
             "Provider ID": backend.get("provider_id") or "",
             "模型": backend.get("model") or "",
             "Provider版本": backend.get("provider_revision") or "",
+            "限速请求数": rate_limit.get("max_requests", ""),
+            "限速窗口（秒）": rate_limit.get("window_seconds", ""),
             "并发": attempt.get("concurrency", ""),
             "单题超时（秒）": attempt.get("eval_timeout_s", ""),
             "开始时间": _format_ts(attempt.get("started_at")),
@@ -1854,6 +1869,7 @@ def _operation_run_summary(snapshot: dict) -> dict:
         "model": options.get("model") or "",
         **_judge_backend_summary(snapshot),
         "concurrency": options.get("concurrency", ""),
+        **_request_rate_limit_summary(snapshot),
         "eval_timeout_s": options.get("eval_timeout_s", ""),
         "total": summary.get("total", total),
         "done": summary.get("done", done),

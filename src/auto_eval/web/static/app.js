@@ -129,6 +129,8 @@ createApp({
     const providerError = ref(false);
     const providerForm = ref(emptyProviderForm());
     const concurrency = ref(8);
+    const rateLimitRequests = ref(9);
+    const rateLimitWindowSeconds = ref(1);
     const evalTimeout = ref(300);
     const running = ref(false);
     const progress = ref(0);
@@ -248,6 +250,8 @@ createApp({
         models_text: "",
         default_model: "",
         api_key: "",
+        rate_limit_requests: 9,
+        rate_limit_window_s: 1,
         enabled: true,
         editing: false,
       };
@@ -276,6 +280,30 @@ createApp({
     function onProviderChange() {
       const provider = selectedProvider.value;
       selectedProviderModel.value = provider?.default_model || provider?.models?.[0] || "";
+      rateLimitRequests.value = Number(provider?.rate_limit_requests || 9);
+      rateLimitWindowSeconds.value = Number(provider?.rate_limit_window_s || 1);
+    }
+
+    function requestRateLimitPayload() {
+      return {
+        max_requests: Math.trunc(Number(rateLimitRequests.value)),
+        window_seconds: Number(rateLimitWindowSeconds.value),
+        strategy: "smooth",
+      };
+    }
+
+    function requestRateLimitValidationError(rateLimit) {
+      if (!Number.isInteger(rateLimit.max_requests)
+        || rateLimit.max_requests < 1
+        || rateLimit.max_requests > 10000) {
+        return "模型请求限速次数必须是 1–10000 的整数。";
+      }
+      if (!Number.isFinite(rateLimit.window_seconds)
+        || rateLimit.window_seconds < 0.1
+        || rateLimit.window_seconds > 3600) {
+        return "模型请求限速时间窗口必须在 0.1–3600 秒之间。";
+      }
+      return "";
     }
 
     function providerApiErrorText(data, fallback = "未知错误") {
@@ -1855,6 +1883,12 @@ createApp({
 
     async function submit(appendConfirmed = false, automaticPreview = false) {
       runError.value = "";
+      const requestRateLimit = requestRateLimitPayload();
+      const requestRateLimitError = requestRateLimitValidationError(requestRateLimit);
+      if (requestRateLimitError) {
+        runError.value = requestRateLimitError;
+        return;
+      }
       const isAppendSubmit = mode.value === "operation" && submitMode.value === "append";
       const isConfirmedAppend = isAppendSubmit && appendConfirmed === true;
       const isAutomaticPreview = isAppendSubmit && automaticPreview === true;
@@ -1988,6 +2022,7 @@ createApp({
             },
           } : {}),
           concurrency: concurrency.value,
+          request_rate_limit: requestRateLimit,
           eval_timeout_s: evalTimeout.value,
           ...(isMultiGroupMode.value ? {
             operation_layout: "multi_group",
@@ -3293,6 +3328,9 @@ createApp({
         const judgeBackend = options.judge_backend || {};
         selectedProviderId.value = judgeBackend.provider_id || "";
         selectedProviderModel.value = judgeBackend.model || "";
+        const requestRateLimit = options.request_rate_limit || {};
+        rateLimitRequests.value = Number(requestRateLimit.max_requests || 9);
+        rateLimitWindowSeconds.value = Number(requestRateLimit.window_seconds || 1);
         if (mode.value === "operation" && !isMultiGroupMode.value) {
           await loadDatasetMaintenance(false);
         } else {
@@ -3443,6 +3481,12 @@ createApp({
         alert("请先选择本次重跑使用的模型");
         return;
       }
+      const requestRateLimit = requestRateLimitPayload();
+      const requestRateLimitError = requestRateLimitValidationError(requestRateLimit);
+      if (requestRateLimitError) {
+        alert(requestRateLimitError);
+        return;
+      }
       const rerunBackend = selectedProviderId.value ? {
         provider_id: selectedProviderId.value,
         model: selectedProviderModel.value.trim(),
@@ -3453,6 +3497,7 @@ createApp({
       if (!confirm(
         `确认重跑选中的 ${indices.length} 条数据？\n`
         + `本次使用：${rerunBackendLabel}\n`
+        + `请求限速：每 ${requestRateLimit.window_seconds} 秒最多 ${requestRateLimit.max_requests} 次\n`
         + "新结果会自动合并到当前历史任务。",
       )) return;
       runError.value = "";
@@ -3464,6 +3509,7 @@ createApp({
           body: JSON.stringify({
             item_indices: indices,
             judge_backend: rerunBackend,
+            request_rate_limit: requestRateLimit,
           }),
         });
       } catch (error) {
@@ -3535,6 +3581,8 @@ createApp({
         models_text: (provider.models || []).join("\n"),
         default_model: provider.default_model || "",
         api_key: "",
+        rate_limit_requests: Number(provider.rate_limit_requests || 9),
+        rate_limit_window_s: Number(provider.rate_limit_window_s || 1),
         enabled: provider.enabled !== false,
         editing: true,
       };
@@ -3555,6 +3603,8 @@ createApp({
         models,
         default_model: String(providerForm.value.default_model || "").trim(),
         api_key: String(providerForm.value.api_key || "").trim() || null,
+        rate_limit_requests: Math.trunc(Number(providerForm.value.rate_limit_requests)),
+        rate_limit_window_s: Number(providerForm.value.rate_limit_window_s),
         enabled: providerForm.value.enabled !== false,
       };
     }
@@ -3577,6 +3627,16 @@ createApp({
         providerMessage.value = "Base URL 必须以 http:// 或 https:// 开头。";
         return;
       }
+      if (!Number.isInteger(payload.rate_limit_requests) || payload.rate_limit_requests < 1 || payload.rate_limit_requests > 10000) {
+        providerError.value = true;
+        providerMessage.value = "请求限速次数必须是 1–10000 的整数。";
+        return;
+      }
+      if (!Number.isFinite(payload.rate_limit_window_s) || payload.rate_limit_window_s < 0.1 || payload.rate_limit_window_s > 3600) {
+        providerError.value = true;
+        providerMessage.value = "请求限速时间窗口必须在 0.1–3600 秒之间。";
+        return;
+      }
       providerBusy.value = true;
       providerMessage.value = "";
       try {
@@ -3596,6 +3656,8 @@ createApp({
         await loadProviders();
         selectedProviderId.value = data.provider.id;
         selectedProviderModel.value = data.provider.default_model || data.provider.models?.[0] || "";
+        rateLimitRequests.value = Number(data.provider.rate_limit_requests || 9);
+        rateLimitWindowSeconds.value = Number(data.provider.rate_limit_window_s || 1);
         providerForm.value = emptyProviderForm();
         providerError.value = false;
         providerMessage.value = "模型服务已保存。";
@@ -3696,7 +3758,8 @@ createApp({
       selectedProviderModels, providerModelOptions, providerManagerOpen, providerForm, providerBusy,
       providerMessage, providerError, onProviderChange, loadProviders, newProvider,
       editProvider, saveProvider, deleteProvider, testProvider,
-      concurrency, evalTimeout, running, progress, total, results, summary, taskId, runError,
+      concurrency, rateLimitRequests, rateLimitWindowSeconds, evalTimeout,
+      running, progress, total, results, summary, taskId, runError,
       submitMode, appendTargetTaskId, appendTargetMeta, appendTargetCandidates, selectedAppendTarget,
       appendMergePreview, appendConflictResolutions, unresolvedAppendConflictCount, appendPreviewing,
       appendNewSelections, selectedAppendNewCount, allAppendNewSelected, appendPreviewTab,

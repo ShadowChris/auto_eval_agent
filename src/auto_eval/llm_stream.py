@@ -12,6 +12,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from .observability import current_context, error_details, log_event
+from .request_rate_limit import acquire_request_slot
 
 
 class StreamProtocolError(RuntimeError):
@@ -98,6 +99,19 @@ def _status_code(exc: BaseException) -> int | None:
     return getattr(exc, "status_code", None) or getattr(
         getattr(exc, "response", None), "status_code", None
     )
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
 
 
 def _failure_progress_message(module: str, exc: BaseException, message: str) -> str:
@@ -354,6 +368,9 @@ async def stream_chat_completion(
     max_attempts: int = 4,
     retry_base_s: float = 1.0,
     retry_max_s: float = 20.0,
+    rate_limit_key: str | None = None,
+    rate_limit_max_requests: int | None = None,
+    rate_limit_window_s: float = 1.0,
 ):
     """始终使用流式接口，成功后返回与完整响应等价的聚合对象。
 
@@ -364,8 +381,32 @@ async def stream_chat_completion(
 
     last_exc: BaseException | None = None
     use_usage = include_usage
+
+    async def wait_for_request_slot(module: str) -> None:
+        if not rate_limit_key or not rate_limit_max_requests:
+            return
+        wait_seconds = await acquire_request_slot(
+            rate_limit_key,
+            max_requests=rate_limit_max_requests,
+            window_seconds=rate_limit_window_s,
+        )
+        if wait_seconds >= 0.01:
+            log_event(
+                module,
+                "模型请求限流排队",
+                details={
+                    "限速作用域": rate_limit_key,
+                    "请求上限": rate_limit_max_requests,
+                    "时间窗口": f"{rate_limit_window_s:g}秒",
+                    "等待": f"{wait_seconds:.2f}秒",
+                },
+                progress=34,
+                progress_message=f"{module}：限流排队 {wait_seconds:.2f} 秒",
+            )
+
     for attempt in range(max_attempts):
         module = current_context().module or "模型调用"
+        await wait_for_request_slot(module)
         call_started = time.perf_counter()
         log_event(
             module,
@@ -398,6 +439,7 @@ async def stream_chat_completion(
                         level=logging.WARNING,
                         details={"HTTP状态": _status_code(exc)},
                     )
+                    await wait_for_request_slot(module)
                     response, chunks, stats = await asyncio.wait_for(
                         _collect_stream(client, kwargs, include_usage=False),
                         timeout=total_timeout_s,
@@ -477,7 +519,12 @@ async def stream_chat_completion(
                 raise
             cap = min(retry_max_s, retry_base_s * (2**attempt))
             wait = random.uniform(0.0, cap)
+            retry_after = _retry_after_seconds(exc) if _status_code(exc) == 429 else None
+            if retry_after is not None:
+                wait = max(wait, retry_after)
             details["等待"] = f"{wait:.2f}秒"
+            if retry_after is not None:
+                details["Retry-After"] = f"{retry_after:.2f}秒"
             log_event(
                 module,
                 (
