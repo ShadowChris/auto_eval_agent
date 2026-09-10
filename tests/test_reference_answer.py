@@ -2,7 +2,7 @@
 
 覆盖：CSV/JSONL 导入读取、裁判侧稀疏输出（仅冲突时 yes）、未提供参考答案
 强制省略（防幻觉）、结果层归一为密集 yes/no、导出列 是/否 翻译、汇总计数、
-前端隐形往返与静态断言。
+前端隐形往返与静态断言；冲突内容（factual_conflict_detail）与判定绑定输出。
 """
 import json
 from pathlib import Path
@@ -146,6 +146,28 @@ def test_result_fields_normalizes_sparse_conflict():
         assert rich_content_result_fields(obs)["factual_conflict"] == "no", raw
 
 
+def test_result_fields_detail_bound_to_conflict():
+    # yes + 内容 → 保留（strip）
+    obs = RichContentObservation(
+        factual_conflict="yes", factual_conflict_detail="  产品答25℃，参考答15℃  "
+    )
+    fields = rich_content_result_fields(obs)
+    assert fields["factual_conflict"] == "yes"
+    assert fields["factual_conflict_detail"] == "产品答25℃，参考答15℃"
+    # yes 但裁判漏了内容 → 空
+    assert rich_content_result_fields(
+        RichContentObservation(factual_conflict="yes")
+    )["factual_conflict_detail"] == ""
+    # 孤儿内容（判定 no 却输出内容）→ 清空：列只在「是」的行有值
+    assert rich_content_result_fields(
+        RichContentObservation(factual_conflict="no", factual_conflict_detail="某冲突")
+    )["factual_conflict_detail"] == ""
+    # 全缺省 → 空
+    assert rich_content_result_fields(
+        RichContentObservation()
+    )["factual_conflict_detail"] == ""
+
+
 # ---------- evaluate：未提供参考答案强制省略（防幻觉） ----------
 
 class _StubClient:
@@ -198,6 +220,42 @@ async def test_evaluate_defaults_no_when_field_omitted():
     assert result["factual_conflict"] == "no"
 
 
+# ---------- evaluate：冲突内容（factual_conflict_detail）绑定 ----------
+
+async def test_evaluate_forces_detail_empty_without_reference_answer():
+    """未提供参考答案：裁判幻觉输出 yes+内容也一并归 no/空。"""
+    result = await _judge({
+        "factual_conflict": "yes",
+        "factual_conflict_detail": "产品答A，参考答B",
+    }).evaluate(question="q", context="", answer_text="", frames=[])
+    assert result["factual_conflict"] == "no"
+    assert result["factual_conflict_detail"] == ""
+
+
+async def test_evaluate_keeps_detail_with_reference_answer():
+    result = await _judge({
+        "factual_conflict": "yes",
+        "factual_conflict_detail": "产品答A，参考答B",
+    }).evaluate(
+        question="q", context="", answer_text="", frames=[],
+        reference_answer="参考A",
+    )
+    assert result["factual_conflict_detail"] == "产品答A，参考答B"
+    # 判定 yes 但漏了内容 → 空（不补造）
+    result = await _judge({"factual_conflict": "yes"}).evaluate(
+        question="q", context="", answer_text="", frames=[],
+        reference_answer="参考A",
+    )
+    assert result["factual_conflict_detail"] == ""
+    # 孤儿内容（省略判定却输出内容）→ 归一清空
+    result = await _judge({"factual_conflict_detail": "某冲突"}).evaluate(
+        question="q", context="", answer_text="", frames=[],
+        reference_answer="参考A",
+    )
+    assert result["factual_conflict"] == "no"
+    assert result["factual_conflict_detail"] == ""
+
+
 # ---------- prompt 契约 ----------
 
 def test_user_template_reference_block_is_conditional():
@@ -223,6 +281,14 @@ def test_system_template_declares_sparse_contract():
     assert "绝不判断谁对谁错" in rendered
 
 
+def test_system_template_declares_detail_binding():
+    rendered = RICH_CONTENT_SYSTEM.render(persona="p", card_types={})
+    # JSON 输出键 + 与 yes 绑定（同时输出/同步省略）
+    assert '"factual_conflict_detail"' in rendered
+    assert "必须**同时**输出 factual_conflict_detail" in rendered
+    assert "该字段同样**省略**" in rendered
+
+
 # ---------- 导出与汇总 ----------
 
 def test_export_rows_translate_conflict_column():
@@ -232,6 +298,17 @@ def test_export_rows_translate_conflict_column():
         {"item_id": "q3"},  # 旧任务结果行无该键 → 空单元格
     ])
     assert [row["事实冲突"] for row in rows] == ["是", "否", ""]
+
+
+def test_export_rows_include_conflict_detail_column():
+    # 行值取自 result_fields 归一输出（no 行 detail 已清空）
+    rows = _rich_content_export_rows([
+        {"item_id": "q1", "factual_conflict": "yes",
+         "factual_conflict_detail": "产品答25℃，参考答15℃"},
+        {"item_id": "q2", "factual_conflict": "no"},
+        {"item_id": "q3"},  # 旧任务结果行无该键 → 空单元格
+    ])
+    assert [row["冲突内容"] for row in rows] == ["产品答25℃，参考答15℃", "", ""]
 
 
 def test_summarize_counts_conflict_yes():
@@ -263,3 +340,13 @@ def test_frontend_reference_answer_roundtrip_and_column():
     assert "summary.factual_conflict_yes" in index_html
     # op 卡片区不加输入框（隐形透传，无 v-model）
     assert 'v-model="it.referenceAnswer"' not in index_html
+
+
+def test_frontend_conflict_detail_column():
+    app_js = APP_JS.read_text(encoding="utf-8")
+    index_html = INDEX_HTML.read_text(encoding="utf-8")
+    # 结果列 + 长文本宽度档（同 problem_solved_reason）
+    assert '{ key: "factual_conflict_detail", label: "冲突内容" }' in app_js
+    assert '"problem_solved_reason", "factual_conflict_detail"]' in app_js
+    # 长文本左对齐：不进居中 key 列表
+    assert "'factual_conflict_detail'" not in index_html

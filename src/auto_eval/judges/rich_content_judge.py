@@ -69,6 +69,13 @@ def rich_content_result_fields(
     # 省略/no/否/unclear/垃圾值一律 "no"（保守二元）
     factual_raw = (observation.factual_conflict or "").strip().lower()
     factual_conflict = "yes" if factual_raw in {"yes", "是", "有冲突"} else "no"
+    # 冲突内容与判定绑定：仅在归一为 yes 时保留，孤儿 detail（判定 no 却输出了
+    # 内容）一律清空——「冲突内容」列只在「事实冲突=是」的行有值
+    factual_conflict_detail = (
+        (observation.factual_conflict_detail or "").strip()
+        if factual_conflict == "yes"
+        else ""
+    )
 
     # 导出字段
     base = {
@@ -94,6 +101,7 @@ def rich_content_result_fields(
         "problem_solved_reason": problem_solved_reason,
         "answer_issues": answer_issues,
         "factual_conflict": factual_conflict,
+        "factual_conflict_detail": factual_conflict_detail,
         "rationale": observation.rationale,
     }
 
@@ -176,9 +184,10 @@ class RichContentJudge:
             ) from exc
 
         if not reference_answer.strip():
-            # 未提供参考答案：事实冲突字段强制省略（防裁判幻觉输出 yes），
-            # 归一化后为 "no"。此处在 trace/result/汇总扩散之前改写，全下游生效。
+            # 未提供参考答案：事实冲突两字段强制省略（防裁判幻觉输出 yes/内容），
+            # 归一化后为 "no"/空。此处在 trace/result/汇总扩散之前改写，全下游生效。
             observation.factual_conflict = ""
+            observation.factual_conflict_detail = ""
 
         result = rich_content_result_fields(observation)
         result.update({

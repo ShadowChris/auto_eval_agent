@@ -466,6 +466,7 @@ createApp({
         { key: "problem_solved_reason", label: "评价原因" },
         { key: "answer_issues", label: "error_type" },
         { key: "factual_conflict", label: "事实冲突" },
+        { key: "factual_conflict_detail", label: "冲突内容" },
         { key: "rationale", label: "识别结论" },
         { key: "latency_s", label: "耗时" },
       ];
@@ -476,7 +477,7 @@ createApp({
         "latency_s", "card_presence", "card_count", "superlink_presence",
         "superlink_count", "answer_coverage", "needs_review", "problem_solved",
       ].includes(c.key);
-      const textColumn = ["query", "context", "answer_text", "rationale", "answer_issues", "problem_solved_reason"].includes(c.key);
+      const textColumn = ["query", "context", "answer_text", "rationale", "answer_issues", "problem_solved_reason", "factual_conflict_detail"].includes(c.key);
       let minWidth = compact ? 80 : textColumn ? 150 : 96;
       let maxWidth = compact ? 120 : c.key === "rationale" ? 380 : textColumn ? 320 : 200;
       if (c.key === "item_id") {

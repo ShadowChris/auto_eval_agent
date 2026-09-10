@@ -68,6 +68,7 @@ class RichContentObservation(BaseModel):
     problem_solved_reason: str = ""  # Part 2：评价的原因
     answer_issues: str = ""  # Part 2：回答的内容有什么问题（分类标签：具体描述）
     factual_conflict: str = ""  # Part 3：事实冲突，稀疏：仅裁判判定冲突时输出 "yes"，其余省略（宽松 str，result_fields 归一化）
+    factual_conflict_detail: str = ""  # Part 3：冲突内容，与 factual_conflict 绑定稀疏输出（仅冲突时一句话转述两边各说什么，不判断谁对谁错）
     rationale: str = ""
 
 
