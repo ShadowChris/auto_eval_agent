@@ -82,14 +82,14 @@
           ${isCompare ? `<label>实验组 <select data-or="group">${payload.pairs.map(p => `<option value="${esc(p.target_task_id)}" ${p.target_task_id === state.group ? "selected" : ""}>${esc(p.target_label)}</option>`).join("")}</select></label>` : ""}
         </div>
         <div class="or-summary">${isCompare
-          ? metric("实验组 OK 率", pct(pair.target_ok_rate), `对照组 ${pct(pair.baseline_ok_rate)} · 两组交集`)
+          ? metric("实验组 OK / NOK 率", `${pct(pair.target_ok_rate)} / ${pct(pair.target_nok_rate)}`, `对照组 ${pct(pair.baseline_ok_rate)} / ${pct(pair.baseline_nok_rate)} · 分母为各组 OK+NOK`)
             + metric("OK 率差值", `<span class="${rateClass(pair)}">${signed(pair.ok_rate_delta, true)}</span>`, esc(pair.ok_rate_change_label))
             + metric("两组共同有效 Case", esc(pair.valid_pair_count), `全组交集 ${esc(payload.all_groups_common_valid_count)} 条`)
             + metric("OK 净变化", `<span class="${rateClass(pair)}">${signed(pair.net_ok_change)}</span>`, `其他→OK ${pair.to_ok_count} / OK→其他 ${pair.from_ok_count}`)
-          : metric("OK 率", pct(stats.ok_rate), `${stats.ok_count} / ${stats.valid_count} 条有效评估`)
-            + metric("NOK 率", pct(stats.valid_count ? stats.nok_count / stats.valid_count : null), `${stats.nok_count} 条`)
+          : metric("OK 率", pct(stats.ok_rate), `${stats.ok_count} / ${stats.rate_denominator} 条 OK+NOK`)
+            + metric("NOK 率", pct(stats.nok_rate), `${stats.nok_count} / ${stats.rate_denominator} 条 OK+NOK`)
             + metric("有效评估", `${stats.valid_count} / ${stats.total_cases}`, `覆盖率 ${pct(stats.coverage_rate)}`)
-            + metric("评估失败", esc(stats.failed_count), `待评估 ${stats.pending_count} · 均不计入分母`)
+            + metric("评估失败", esc(stats.failed_count), `待评估 ${stats.pending_count} · no_support/others/失败/待评估不计入 OK/NOK 率分母`)
         }</div>
         <div class="or-panels">
           <section class="or-panel"><div class="or-panel-heading"><h3>Correctness 分布</h3><span class="or-muted">${isCompare ? "全组共同有效集合" : "全部有效评估"}</span></div><div data-or="correctness" class="or-chart"></div></section>
@@ -137,7 +137,7 @@
           body += `<div class="or-stack-group"><div class="or-stack-head"><span>${esc(group.group_label)}</span><span style="font-weight:${s.ok_rate != null && s.ok_rate === max ? 700 : 400}">OK ${pct(s.ok_rate)}</span></div><div class="or-stack">${s.correctness_rows.map((r, i) => `<span style="width:${(r.rate || 0) * 100}%;background:${COLORS[i]}" title="${r.correctness}：${r.count} 条 · ${pct(r.rate)}">${r.rate >= .1 ? pct(r.rate) : ""}</span>`).join("")}</div>${!s.valid_count ? '<span class="or-muted">无全组共同有效数据</span>' : ""}</div>`;
         }
         body += `<div class="or-legend">${TYPES.map((t, i) => `<span><i class="or-dot" style="background:${COLORS[i]}"></i>${t}</span>`).join("")}</div>`;
-        body += `<details><summary>查看各组统计表</summary><div class="or-table-wrap">${table(["组别", "原始量", "共同有效量", ...TYPES, "OK率"], payload.groups.map(g => [esc(g.group_label), g.original_count, g.common_valid_count, ...g.statistics.correctness_rows.map(r => r.count), pct(g.statistics.ok_rate)]))}</div></details>`;
+        body += `<details><summary>查看各组统计表</summary><div class="or-table-wrap">${table(["组别", "原始量", "共同有效量", ...TYPES, "OK率", "NOK率", "率分母"], payload.groups.map(g => [esc(g.group_label), g.original_count, g.common_valid_count, ...g.statistics.correctness_rows.map(r => r.count), pct(g.statistics.ok_rate), pct(g.statistics.nok_rate), g.statistics.rate_denominator]))}</div></details>`;
       }
       $("correctness").innerHTML = body;
     }
@@ -257,11 +257,9 @@
     }
     function renderConclusion() {
       if (!comparison()) { $("conclusion").textContent = payload.statistics.conclusion; return; }
-      const n = pair.valid_pair_count;
-      const leftNok = pairs.filter(r => r.left.correctness === "nok").length;
-      const rightNok = pairs.filter(r => r.right.correctness === "nok").length;
-      const nokDelta = n ? (rightNok - leftNok) / n : null;
-      $("conclusion").innerHTML = `${esc(pair.target_label)} 相对对照组：<strong class="${rateClass(pair)}">${esc(pair.ok_rate_change_label)}</strong>，OK 率差值 ${signed(pair.ok_rate_delta, true)}；NOK 率差值 <span class="${deltaClass(nokDelta)}">${signed(nokDelta, true)}</span>。${nokDelta > 0 ? "需同时关注新增执行错误。" : ""}<span class="or-muted"> 两组共同有效集合；优化/劣化阈值为 ±${(payload.ok_rate_close_threshold * 100).toFixed(2)}pp，边界内为接近。</span>`;
+      const nokDelta = pair.target_nok_rate == null || pair.baseline_nok_rate == null
+        ? null : pair.target_nok_rate - pair.baseline_nok_rate;
+      $("conclusion").innerHTML = `${esc(pair.target_label)} 相对对照组：<strong class="${rateClass(pair)}">${esc(pair.ok_rate_change_label)}</strong>，OK 率差值 ${signed(pair.ok_rate_delta, true)}；NOK 率差值 <span class="${deltaClass(nokDelta)}">${signed(nokDelta, true)}</span>。${nokDelta > 0 ? "需同时关注新增执行错误。" : ""}<span class="or-muted"> OK/NOK 率均以各组 OK+NOK 为分母；优化/劣化阈值为 ±${(payload.ok_rate_close_threshold * 100).toFixed(2)}pp，边界内为接近。</span>`;
     }
     function resetCasePage() { state.page = 1; state.open = null; }
     function onClick(event) {

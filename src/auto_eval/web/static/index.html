@@ -874,7 +874,8 @@
       <div class="operation-statistics-overview">
         <span>有效评估 {{ operationStatistics.valid_count }}/{{ operationStatistics.total_cases }}</span>
         <span>评估覆盖率 {{ operationStatistics.coverage_rate!=null ? (operationStatistics.coverage_rate*100).toFixed(2)+'%' : '—' }}</span>
-        <span>OK 率 {{ operationStatistics.ok_rate!=null ? (operationStatistics.ok_rate*100).toFixed(2)+'%' : '—' }}（有效评估={{ operationStatistics.ok_rate_denominator }}）</span>
+        <span>OK 率 {{ operationStatistics.ok_rate!=null ? (operationStatistics.ok_rate*100).toFixed(2)+'%' : '—' }}</span>
+        <span>NOK 率 {{ operationStatistics.nok_rate!=null ? (operationStatistics.nok_rate*100).toFixed(2)+'%' : '—' }}（OK+NOK={{ operationStatistics.rate_denominator }}）</span>
         <span v-if="operationStatistics.failed_count">评估失败 {{ operationStatistics.failed_count }}</span>
         <span v-if="operationStatistics.pending_count">待评估 {{ operationStatistics.pending_count }}</span>
       </div>
@@ -1319,24 +1320,25 @@
       <h4>各批次 Correctness 对比</h4>
       <div class="table-scroll">
         <table class="grid auto-table">
-          <thead><tr><th>组别</th><th>数据集</th><th>原始数据量</th><th>共有有效数据量</th><th>ok</th><th>nok</th><th>no_support</th><th>others</th><th>OK率</th></tr></thead>
+          <thead><tr><th>组别</th><th>数据集</th><th>原始数据量</th><th>共有有效数据量</th><th>ok</th><th>nok</th><th>no_support</th><th>others</th><th>OK率</th><th>NOK率</th><th>率分母</th></tr></thead>
           <tbody><tr v-for="group in historyComparison.groups" :key="'comparison-group-'+group.task_id">
             <td><strong>{{ group.group_label }}</strong></td><td><div>{{ group.group_name }}</div><div class="history-task-id">{{ group.task_id }}</div></td>
             <td>{{ group.original_count }}</td><td>{{ group.common_valid_count }}</td><td>{{ comparisonCorrectnessCount(group, 'ok') }}</td><td>{{ comparisonCorrectnessCount(group, 'nok') }}</td><td>{{ comparisonCorrectnessCount(group, 'no_support') }}</td><td>{{ comparisonCorrectnessCount(group, 'others') }}</td>
             <td :class="{'comparison-best-rate': comparisonIsBestOkRate(group)}">{{ group.statistics.ok_rate!=null ? (group.statistics.ok_rate*100).toFixed(2)+'%' : '—' }}</td>
+            <td>{{ group.statistics.nok_rate!=null ? (group.statistics.nok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ group.statistics.rate_denominator }}</td>
           </tr></tbody>
         </table>
       </div>
       <h4>相对对照组的共同 Case 对比</h4>
       <div class="table-scroll">
         <table class="grid auto-table">
-          <thead><tr><th>对比关系</th><th>共同 Case</th><th>共同有效 Case</th><th>对照组OK数</th><th>对照组OK率</th><th>实验组OK数</th><th>实验组OK率</th><th>其他→OK</th><th>OK→其他</th><th>OK净变化</th><th>OK率差值</th><th>结论</th></tr></thead>
+          <thead><tr><th>对比关系</th><th>共同 Case</th><th>共同有效 Case</th><th>对照组OK/NOK数</th><th>对照组OK/NOK率</th><th>实验组OK/NOK数</th><th>实验组OK/NOK率</th><th>其他→OK</th><th>OK→其他</th><th>OK净变化</th><th>OK率差值</th><th>结论</th></tr></thead>
           <tbody><tr v-for="pair in historyComparison.pairwise" :key="'comparison-pair-'+pair.target_task_id">
-            <td><strong>{{ pair.baseline_label }}</strong> / <strong>{{ pair.target_label }}</strong></td><td>{{ pair.matched_count }}</td><td>{{ pair.valid_pair_count }}</td><td>{{ pair.baseline_ok_count }}</td><td>{{ pair.baseline_ok_rate!=null ? (pair.baseline_ok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.target_ok_count }}</td><td>{{ pair.target_ok_rate!=null ? (pair.target_ok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.to_ok_count }}</td><td>{{ pair.from_ok_count }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ comparisonPairChangeLabel(pair) }}</td>
+            <td><strong>{{ pair.baseline_label }}</strong> / <strong>{{ pair.target_label }}</strong></td><td>{{ pair.matched_count }}</td><td>{{ pair.valid_pair_count }}</td><td>{{ pair.baseline_ok_count }}/{{ pair.baseline_nok_count }}</td><td>{{ pair.baseline_ok_rate!=null ? (pair.baseline_ok_rate*100).toFixed(2)+'% / '+(pair.baseline_nok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.target_ok_count }}/{{ pair.target_nok_count }}</td><td>{{ pair.target_ok_rate!=null ? (pair.target_ok_rate*100).toFixed(2)+'% / '+(pair.target_nok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.to_ok_count }}</td><td>{{ pair.from_ok_count }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ comparisonPairChangeLabel(pair) }}</td>
           </tr></tbody>
         </table>
       </div>
-      <p class="hint">“其他”表示 <code>nok</code>、<code>no_support</code> 或 <code>others</code>；OK率差值超过 ±{{ ((historyComparison.ok_rate_close_threshold ?? 0.01)*100).toFixed(2) }}pp 判定为优化或劣化，范围内判定为接近。</p>
+      <p class="hint">OK/NOK 率统一以各组 <code>ok+nok</code> 为分母；“其他→OK”中的“其他”表示 <code>nok</code>、<code>no_support</code> 或 <code>others</code>。OK率差值超过 ±{{ ((historyComparison.ok_rate_close_threshold ?? 0.01)*100).toFixed(2) }}pp 判定为优化或劣化，范围内判定为接近。</p>
       <h4>对照组与实验组 Issue Type 详细对比</h4>
       <details v-for="pair in historyComparison.pairwise" :key="'comparison-issue-detail-'+pair.target_task_id" class="history-comparison-detail">
         <summary><strong>{{ pair.baseline_label }}</strong> vs <strong>{{ pair.target_label }}</strong>｜共同有效 {{ pair.valid_pair_count }} 条</summary>

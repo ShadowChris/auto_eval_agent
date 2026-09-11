@@ -65,9 +65,13 @@ def test_history_comparison_matches_by_index_then_unique_query() -> None:
     pair = payload["pairwise"][0]
     assert pair["matched_count"] == 3
     assert pair["valid_pair_count"] == 3
-    assert pair["baseline_ok_rate"] == 0.3333
-    assert pair["target_ok_rate"] == 0.6667
-    assert pair["ok_rate_delta"] == 0.3333
+    assert pair["baseline_rate_denominator"] == 2
+    assert pair["target_rate_denominator"] == 2
+    assert pair["baseline_ok_rate"] == 0.5
+    assert pair["baseline_nok_rate"] == 0.5
+    assert pair["target_ok_rate"] == 1.0
+    assert pair["target_nok_rate"] == 0.0
+    assert pair["ok_rate_delta"] == 0.5
     assert pair["ok_rate_change"] == "improved"
     assert pair["ok_rate_change_label"] == "优化"
     assert pair["to_ok_count"] == 1
@@ -172,6 +176,27 @@ def test_history_comparison_preserves_dataset_name_with_version_dot() -> None:
     assert payload["pairwise"][0]["ok_rate_change"] == "close"
 
 
+def test_history_comparison_has_no_rate_without_ok_or_nok() -> None:
+    baseline = _batch("a", "对照组", [
+        _row(0, "打开蓝牙", "no_support", case_id="1"),
+    ])
+    target = _batch("b", "实验组", [
+        _row(0, "打开蓝牙", "others", case_id="1"),
+    ])
+
+    pair = compare_operation_batches(
+        [baseline, target],
+        baseline_task_id="a",
+    )["pairwise"][0]
+
+    assert pair["valid_pair_count"] == 1
+    assert pair["baseline_rate_denominator"] == 0
+    assert pair["target_rate_denominator"] == 0
+    assert pair["baseline_ok_rate"] is None
+    assert pair["target_nok_rate"] is None
+    assert pair["ok_rate_change"] == "unavailable"
+
+
 def test_history_comparison_uses_all_group_valid_intersection_and_union_export() -> None:
     baseline = _batch("a", "A", [
         _row(0, "q1", "ok", case_id="1"),
@@ -268,9 +293,9 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     overview_sheet = workbook["对比概览"]
     assert overview_sheet.freeze_panes == "A7"
     assert overview_sheet.sheet_view.showGridLines is False
-    assert "A1:L1" in {str(value) for value in overview_sheet.merged_cells.ranges}
+    assert "A1:R1" in {str(value) for value in overview_sheet.merged_cells.ranges}
     assert overview_sheet["A6"].border.left.style == "thin"
-    assert [overview_sheet.cell(row=11, column=column).value for column in range(8, 13)] == [
+    assert [overview_sheet.cell(row=11, column=column).value for column in range(14, 19)] == [
         "其他→OK",
         "OK→其他",
         "OK净变化",
@@ -278,10 +303,10 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
         "结论",
     ]
     assert overview_sheet["J8"].font.bold is True
-    assert overview_sheet["J12"].fill.fgColor.rgb == "FFDCFCE7"
-    assert overview_sheet["K12"].fill.fgColor.rgb == "FFDCFCE7"
-    assert overview_sheet["L12"].value == "优化"
-    assert overview_sheet["L12"].font.bold is True
+    assert overview_sheet["P12"].fill.fgColor.rgb == "FFDCFCE7"
+    assert overview_sheet["Q12"].fill.fgColor.rgb == "FFDCFCE7"
+    assert overview_sheet["R12"].value == "优化"
+    assert overview_sheet["R12"].font.bold is True
 
     issue_sheet = workbook["Issue Type对比"]
     issue_headers = [cell.value for cell in issue_sheet[1]]

@@ -227,7 +227,7 @@ def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
     assert ["Issue Type 分布", None, None] in values
     assert any(row[0] == "统计结论" for row in values)
     assert any(
-        row[0] == "OK 率（有效评估口径）" and row[1] == "100.00%"
+        row[0] == "OK 率（OK+NOK 口径）" and row[1] == "100.00%"
         for row in values
     )
 
@@ -243,11 +243,12 @@ def test_operation_statistics_api_returns_excel_source_json(
     response = server.api_operation_statistics("task-1")
     payload = json.loads(response.body)
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["task_id"] == "task-1"
     assert payload["dataset_name"] == "operation_cases.jsonl"
     assert payload["statistics"]["valid_count"] == 1
     assert payload["statistics"]["ok_rate"] == 1.0
+    assert payload["statistics"]["nok_rate"] == 0.0
     assert [
         row["correctness"]
         for row in payload["statistics"]["correctness_rows"]

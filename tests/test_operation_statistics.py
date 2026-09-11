@@ -1,7 +1,7 @@
 from auto_eval.analysis.operation_statistics import summarize_operation_results
 
 
-def test_operation_statistics_uses_valid_results_as_rate_denominator() -> None:
+def test_operation_statistics_uses_ok_plus_nok_as_rate_denominator() -> None:
     statistics = summarize_operation_results(
         [
             {"correctness": "ok", "issue_types": ["路径冗余", "路径冗余"]},
@@ -18,8 +18,11 @@ def test_operation_statistics_uses_valid_results_as_rate_denominator() -> None:
     assert statistics["failed_count"] == 1
     assert statistics["pending_count"] == 1
     assert statistics["coverage_rate"] == 0.6667
-    assert statistics["ok_rate_denominator"] == 4
-    assert statistics["ok_rate"] == 0.25
+    assert statistics["rate_denominator"] == 2
+    assert statistics["ok_rate_denominator"] == 2
+    assert statistics["nok_rate_denominator"] == 2
+    assert statistics["ok_rate"] == 0.5
+    assert statistics["nok_rate"] == 0.5
     assert statistics["correctness_rows"] == [
         {"correctness": "ok", "count": 1, "rate": 0.25},
         {"correctness": "nok", "count": 1, "rate": 0.25},
@@ -71,7 +74,7 @@ def test_operation_statistics_handles_no_valid_results() -> None:
     assert "暂无有效判定" in statistics["conclusion"]
 
 
-def test_operation_statistics_includes_all_valid_results_in_ok_rate() -> None:
+def test_operation_statistics_excludes_no_support_and_others_from_ok_nok_rates() -> None:
     statistics = summarize_operation_results([
         {"correctness": "ok", "issue_types": []},
         {"correctness": "nok", "issue_types": ["应执行目标未执行"]},
@@ -80,6 +83,22 @@ def test_operation_statistics_includes_all_valid_results_in_ok_rate() -> None:
     ])
 
     assert statistics["valid_count"] == 4
-    assert statistics["ok_rate_denominator"] == 4
-    assert statistics["ok_rate"] == 0.25
+    assert statistics["rate_denominator"] == 2
+    assert statistics["ok_rate_denominator"] == 2
+    assert statistics["ok_rate"] == 0.5
+    assert statistics["nok_rate"] == 0.5
+    # Correctness 分布仍按全部有效结果统计。
     assert statistics["correctness_rows"][0]["rate"] == 0.25
+
+
+def test_operation_statistics_handles_valid_but_no_ok_or_nok_results() -> None:
+    statistics = summarize_operation_results([
+        {"correctness": "no_support", "issue_types": ["缺少必要外部条件"]},
+        {"correctness": "others", "issue_types": ["未预期场景"]},
+    ])
+
+    assert statistics["valid_count"] == 2
+    assert statistics["rate_denominator"] == 0
+    assert statistics["ok_rate"] is None
+    assert statistics["nok_rate"] is None
+    assert "OK 率 —、NOK 率 —" in statistics["conclusion"]

@@ -326,9 +326,27 @@ def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str,
 
     denominator = len(valid_pairs)
     baseline_ok = sum(left.get("correctness") == "ok" for left, _ in valid_pairs)
+    baseline_nok = sum(left.get("correctness") == "nok" for left, _ in valid_pairs)
     target_ok = sum(right.get("correctness") == "ok" for _, right in valid_pairs)
-    baseline_ok_rate = baseline_ok / denominator if denominator else None
-    target_ok_rate = target_ok / denominator if denominator else None
+    target_nok = sum(right.get("correctness") == "nok" for _, right in valid_pairs)
+    baseline_rate_denominator = baseline_ok + baseline_nok
+    target_rate_denominator = target_ok + target_nok
+    baseline_ok_rate = (
+        baseline_ok / baseline_rate_denominator
+        if baseline_rate_denominator else None
+    )
+    baseline_nok_rate = (
+        baseline_nok / baseline_rate_denominator
+        if baseline_rate_denominator else None
+    )
+    target_ok_rate = (
+        target_ok / target_rate_denominator
+        if target_rate_denominator else None
+    )
+    target_nok_rate = (
+        target_nok / target_rate_denominator
+        if target_rate_denominator else None
+    )
     ok_rate_delta = (
         target_ok_rate - baseline_ok_rate
         if target_ok_rate is not None and baseline_ok_rate is not None
@@ -356,16 +374,22 @@ def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str,
     )
     baseline_label = str(baseline.get("group_label") or "对照组")
     target_label = str(target.get("group_label") or "实验组")
-    if denominator:
+    if denominator and ok_rate_delta is not None:
         conclusion = (
             f"{target_label} 相对 {baseline_label}：共同有效 {denominator} 条，"
+            f"OK/NOK 率分母分别为 {target_rate_denominator}/{baseline_rate_denominator} 条，"
             f"OK 率相差 {ok_rate_delta * 100:+.2f} 个百分点，"
             f"结论为{ok_rate_change_label}；"
             f"{to_ok} 条由其他转为 OK，{from_ok} 条由 OK 转为其他，"
             f"OK 净变化 {to_ok - from_ok:+d} 条。"
         )
-    else:
+    elif not denominator:
         conclusion = f"{target_label} 与 {baseline_label} 没有双方均有效的共同 Case。"
+    else:
+        conclusion = (
+            f"{target_label} 与 {baseline_label} 有 {denominator} 条共同有效 Case，"
+            "但至少一组没有 OK 或 NOK，无法计算 OK/NOK 率差值。"
+        )
     return {
         "baseline_task_id": baseline["task_id"],
         "baseline_name": _batch_name(baseline),
@@ -376,9 +400,15 @@ def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str,
         "matched_count": len(matches),
         "valid_pair_count": denominator,
         "baseline_ok_count": baseline_ok,
+        "baseline_nok_count": baseline_nok,
+        "baseline_rate_denominator": baseline_rate_denominator,
         "baseline_ok_rate": round(baseline_ok_rate, 4) if baseline_ok_rate is not None else None,
+        "baseline_nok_rate": round(baseline_nok_rate, 4) if baseline_nok_rate is not None else None,
         "target_ok_count": target_ok,
+        "target_nok_count": target_nok,
+        "target_rate_denominator": target_rate_denominator,
         "target_ok_rate": round(target_ok_rate, 4) if target_ok_rate is not None else None,
+        "target_nok_rate": round(target_nok_rate, 4) if target_nok_rate is not None else None,
         "ok_rate_delta": round(ok_rate_delta, 4) if ok_rate_delta is not None else None,
         "ok_rate_change": ok_rate_change,
         "ok_rate_change_label": ok_rate_change_label,

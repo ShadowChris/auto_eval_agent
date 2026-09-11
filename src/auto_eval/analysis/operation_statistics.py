@@ -30,7 +30,8 @@ def summarize_operation_results(
 ) -> dict[str, Any]:
     """汇总一批普通任务类结果。
 
-    OK 率和各类占比只以具有合法 correctness 的有效评估 Case 为分母；
+    OK/NOK 率统一以 OK+NOK 为分母；Correctness 与 Issue Type 分布仍以
+    具有合法 correctness 的有效评估 Case 为分母；
     运行错误与尚无合法判定的条目分别计入失败、待评估，不伪装成 nok。
     每个 issue type 在同一 Case 中最多计一次。
     """
@@ -83,8 +84,10 @@ def summarize_operation_results(
 
     ok_count = correctness_counts.get("ok", 0)
     nok_count = correctness_counts.get("nok", 0)
+    rate_denominator = ok_count + nok_count
     coverage_rate = round(valid_count / total, 4) if total else None
-    ok_rate = round(ok_count / valid_count, 4) if valid_count else None
+    ok_rate = round(ok_count / rate_denominator, 4) if rate_denominator else None
+    nok_rate = round(nok_count / rate_denominator, 4) if rate_denominator else None
     conclusion = _operation_statistics_conclusion(
         total=total,
         valid_count=valid_count,
@@ -101,8 +104,11 @@ def summarize_operation_results(
         "coverage_rate": coverage_rate,
         "ok_count": ok_count,
         "nok_count": nok_count,
-        "ok_rate_denominator": valid_count,
+        "rate_denominator": rate_denominator,
+        "ok_rate_denominator": rate_denominator,
+        "nok_rate_denominator": rate_denominator,
         "ok_rate": ok_rate,
+        "nok_rate": nok_rate,
         "issue_case_count": issue_case_count,
         "correctness_rows": correctness_rows,
         "issue_type_rows": issue_type_rows,
@@ -136,6 +142,7 @@ def _operation_statistics_conclusion(
 
     ok_count = correctness_counts.get("ok", 0)
     nok_count = correctness_counts.get("nok", 0)
+    rate_denominator = ok_count + nok_count
     non_ok = [
         (correctness, correctness_counts.get(correctness, 0))
         for correctness in OPERATION_CORRECTNESS[1:]
@@ -146,8 +153,9 @@ def _operation_statistics_conclusion(
         f"评估覆盖率 {_percent(valid_count / total if total else None)}",
         (
             f"OK {ok_count} 条、NOK {nok_count} 条，"
-            f"OK 率 {_percent(ok_count / valid_count)}"
-            f"（分母为有效评估数 {valid_count}）"
+            f"OK 率 {_percent(ok_count / rate_denominator if rate_denominator else None)}、"
+            f"NOK 率 {_percent(nok_count / rate_denominator if rate_denominator else None)}"
+            f"（分母为 OK+NOK，共 {rate_denominator} 条）"
         ),
     ]
     if non_ok:
