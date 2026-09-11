@@ -908,11 +908,19 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
             rows["多组对照"] = _operation_multi_comparison_rows(snapshot)
             rows["逐题结果"] = _operation_multi_result_rows(snapshot)
         else:
-            rows["逐题结果"] = _operation_export_rows(
+            operation_result_rows = _operation_export_rows(
                 aligned_results,
                 snapshot.get("items") or [],
                 dataset_name=str(snapshot.get("dataset_name") or ""),
             )
+            rows["逐题结果"] = operation_result_rows
+            rows = {
+                "评估结果": _operation_user_result_rows(
+                    operation_result_rows,
+                    snapshot.get("items") or [],
+                ),
+                **rows,
+            }
     frame_rows = _frame_manifest_rows(
         snapshot,
         include_original_video=mode != "operation",
@@ -1091,6 +1099,35 @@ _OPERATION_EXPORT_COLUMNS = (
     "video_prepare_warnings",
 )
 
+# 普通任务类 Excel 的首个 Sheet：只呈现用户最常用的输入、媒体与评估字段。
+_OPERATION_USER_RESULT_COLUMNS = (
+    "数据集序号",
+    "item_id",
+    "index",
+    "session_id",
+    "query",
+    "context",
+    "attachment_path",
+    "attachment_url_domain",
+    "attachment_url_ip",
+    "answer",
+    "correctness",
+    "issue_types",
+    "rationale",
+    "is_low_level",
+    "total",
+    "维度_操作完成度",
+    "理由_操作完成度",
+    "维度_步骤正确性",
+    "理由_步骤正确性",
+    "latency_s",
+    "分享链接",
+    "video_path",
+    "video_url_domain",
+    "video_url_ip",
+    "录屏时长",
+)
+
 _OPERATION_ROUTE_DISPLAY = {
     "fast_system": "快系统",
     "skill": "skill",
@@ -1220,6 +1257,118 @@ def _operation_export_rows(
             )
         export.append({key: values[key] for key in _OPERATION_EXPORT_COLUMNS})
     return export
+
+
+def _first_export_value(*values: Any) -> Any:
+    """选择第一个非空导出值，同时保留 0 和 False。"""
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return ""
+
+
+def _operation_user_result_rows(
+    result_rows: list[dict],
+    items: list[dict],
+) -> list[dict]:
+    """生成面向用户的普通任务类“评估结果”表。"""
+    rows: list[dict] = []
+    for position, result in enumerate(result_rows):
+        try:
+            item_index = int(result.get("数据集序号", position + 1)) - 1
+        except (TypeError, ValueError):
+            item_index = position
+        item = items[item_index] if 0 <= item_index < len(items) else {}
+        source = _source_data_for_item(item)
+
+        issue_types = _first_export_value(
+            result.get("issue_types"),
+            source.get("issue_types"),
+            source.get("issue_type"),
+        )
+        if isinstance(issue_types, (list, tuple, set)):
+            issue_types = "；".join(str(value) for value in issue_types)
+
+        values = {
+            "数据集序号": result.get("数据集序号", position + 1),
+            "item_id": result.get("item_id") or item.get("id") or f"q{position}",
+            "index": _first_export_value(result.get("index"), source.get("index")),
+            "session_id": _first_export_value(
+                source.get("session_id"),
+                source.get("sessionid"),
+                source.get("sessionId"),
+                result.get("sessionid"),
+            ),
+            "query": _first_export_value(
+                result.get("query"),
+                source.get("query"),
+                item.get("query"),
+                item.get("question"),
+            ),
+            "context": _first_export_value(
+                result.get("context"), source.get("context"), item.get("context")
+            ),
+            "attachment_path": _first_export_value(
+                result.get("attachment_path"), source.get("attachment_path")
+            ),
+            "attachment_url_domain": _first_export_value(
+                result.get("attachment_url_domain"),
+                source.get("attachment_url_domain"),
+            ),
+            "attachment_url_ip": _first_export_value(
+                result.get("attachment_url_ip"), source.get("attachment_url_ip")
+            ),
+            "answer": _first_export_value(
+                result.get("answer"), source.get("answer"), item.get("answer")
+            ),
+            "correctness": _first_export_value(
+                result.get("correctness"), source.get("correctness")
+            ),
+            "issue_types": issue_types,
+            "rationale": _first_export_value(
+                result.get("rationale"), source.get("rationale")
+            ),
+            "is_low_level": _first_export_value(
+                result.get("is_low_level"), source.get("is_low_level")
+            ),
+            "total": _first_export_value(result.get("total"), source.get("total")),
+            "维度_操作完成度": _first_export_value(
+                result.get("维度_操作完成度"), source.get("维度_操作完成度")
+            ),
+            "理由_操作完成度": _first_export_value(
+                result.get("理由_操作完成度"), source.get("理由_操作完成度")
+            ),
+            "维度_步骤正确性": _first_export_value(
+                result.get("维度_步骤正确性"), source.get("维度_步骤正确性")
+            ),
+            "理由_步骤正确性": _first_export_value(
+                result.get("理由_步骤正确性"), source.get("理由_步骤正确性")
+            ),
+            "latency_s": _first_export_value(
+                result.get("latency_s"), source.get("latency_s")
+            ),
+            "分享链接": _first_export_value(
+                result.get("分享链接"), source.get("分享链接")
+            ),
+            "video_path": _first_export_value(
+                result.get("video_path"), source.get("video_path")
+            ),
+            "video_url_domain": _first_export_value(
+                result.get("video_url_domain"), source.get("video_url_domain")
+            ),
+            "video_url_ip": _first_export_value(
+                result.get("video_url_ip"), source.get("video_url_ip")
+            ),
+            "录屏时长": _first_export_value(
+                source.get("耗时"),
+                source.get("录屏时长"),
+                source.get("录屏时长（秒）"),
+                source.get("duration"),
+                item.get("duration"),
+            ),
+        }
+        rows.append({key: values[key] for key in _OPERATION_USER_RESULT_COLUMNS})
+    return rows
 
 
 def _operation_multi_case_results(snapshot: dict) -> dict[int, dict]:
@@ -2471,6 +2620,11 @@ def build_xlsx(snapshot: dict, cfg: Any | None = None) -> bytes:
                     matrix,
                     bold_rows=bold_rows,
                     widths=widths,
+                )
+            elif name == "评估结果" and snapshot.get("mode") == "operation":
+                sheet_xml = _sheet_xml(
+                    rows,
+                    auto_filter=True,
                 )
             else:
                 sheet_xml = _sheet_xml(rows)
