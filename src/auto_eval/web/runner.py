@@ -560,16 +560,17 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         总结直接取评测调用顺带产出的 turn_summary 字段，不再单独调用模型总结。
         任一轮失败即连坐：缺一轮信息的后续评测不可信，剩余轮次直接落
         「同组前序轮次失败」结果并提前终止（session 槽位随之释放）。"""
+        total = len(idxs)
         prior_summary = ""
         for turn_no, idx in enumerate(idxs, 1):
             it = task.items[idx]
-            if prior_summary:
-                base_ctx = (it.get("context") or "").strip()
-                it["context"] = (
-                    f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
-                    if base_ctx
-                    else f"历史对话总结：\n{prior_summary}"
-                )
+            is_last = "是" if turn_no == total else "否"
+            turn_marker = f"【轮次】第 {turn_no} 轮 / 共 {total} 轮 / 是否最后一轮：{is_last}"
+            base_ctx = (it.get("context") or "").strip()
+            history_part = (
+                f"\n\n历史对话总结：\n{prior_summary}" if prior_summary else ""
+            )
+            it["context"] = f"{base_ctx}\n\n{turn_marker}{history_part}"
             res = await one(idx, it, priority=turn_no > 1)  # 第 2+ 轮模型槽插队头
             if res.get("error") and turn_no < len(idxs):
                 reason = f"同组前序轮次失败：{res['error']}"

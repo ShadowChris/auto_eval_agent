@@ -13,6 +13,31 @@ from typing import Any, Iterable
 
 OPERATION_CORRECTNESS = ("ok", "nok", "need_review")
 
+# 问题类型封闭枚举：answer_issues 只允许取以下单个标签（prompt 与代码共用
+# 同一来源），禁止自造/组合/近似词。语义重叠项已归并；「需求未闭环」仅在
+# 末轮（含单轮）可报。
+OPERATION_ISSUE_TYPES = (
+    "需求未闭环",
+    "答非所问",
+    "逻辑矛盾",
+    "事实/计算错误",
+    "文卡不一致",
+    "回答不完整/无结果",
+    "卡片不相关",
+    "挂卡/资源缺失",
+    "思考暴露",
+    "结果重复",
+    "执行/操作失败",
+    "操作冗余",
+    "结构/总结问题",
+    "私域信息问题",
+    "本机机型不感知",
+    "时延高",
+)
+
+# 超出枚举的标签在统计/报告兜底归一到「其他」，保证只出现枚举内分类。
+OPERATION_ISSUE_OTHER = "其他"
+
 
 def normalize_operation_issue_types(value: Any) -> list[str]:
     if isinstance(value, str):

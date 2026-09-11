@@ -15,16 +15,26 @@ from ..analysis.operation_report import (
     build_comparison_report,
     build_single_report,
 )
-from ..analysis.operation_statistics import summarize_operation_results
+from ..analysis.operation_statistics import (
+    OPERATION_ISSUE_OTHER,
+    OPERATION_ISSUE_TYPES,
+    summarize_operation_results,
+)
 
 
 REPORT_MODE = "rich_content"
 
 
 def _issue_labels(value: Any) -> list[str]:
-    """answer_issues 每行形如「标签：具体描述」，取标签并同题去重保序。"""
+    """answer_issues 每行形如「标签：具体描述」。
+
+    取「：」前的标签、同题去重保序，并按 OPERATION_ISSUE_TYPES 封闭枚举
+    白名单兜底：枚举内保留，其他一律归一到「其他」，保证报告/统计/对比
+    只见枚举内分类（prompt 之外的保险）。
+    """
     if not isinstance(value, str):
         return []
+    allowed = set(OPERATION_ISSUE_TYPES)
     labels: list[str] = []
     for line in value.splitlines():
         line = line.strip()
@@ -32,7 +42,11 @@ def _issue_labels(value: Any) -> list[str]:
             continue
         colon = re.search(r"[：:]", line)
         label = (line[: colon.start()] if colon and colon.start() > 0 else line).strip()
-        if label and label not in labels:
+        if not label:
+            continue
+        if label not in allowed:
+            label = OPERATION_ISSUE_OTHER
+        if label not in labels:
             labels.append(label)
     return labels
 

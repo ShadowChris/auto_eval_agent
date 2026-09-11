@@ -32,8 +32,8 @@ def _snapshot(task_id: str, rows: list[dict]) -> dict:
 def _batch_a():
     return _snapshot("tz1", [
         {"_id": "q0", "_q": "天气", "problem_solved": "ok"},
-        {"_id": "q1", "_q": "闹钟", "problem_solved": "nok", "answer_issues": "错误1:没设\n错误2:报错"},
-        {"_id": "q2", "_q": "音乐", "problem_solved": "need_review", "answer_issues": "错误1:不清楚"},
+        {"_id": "q1", "_q": "闹钟", "problem_solved": "nok", "answer_issues": "执行/操作失败:没设提醒\n逻辑矛盾:前后矛盾"},
+        {"_id": "q2", "_q": "音乐", "problem_solved": "need_review", "answer_issues": "执行/操作失败:不清楚"},
         {"_id": "q3", "_q": "失败", "error": "Timeout"},
     ])
 
@@ -54,9 +54,9 @@ def test_statistics_denominator_and_classes():
 def test_statistics_issue_types_deduped_per_case():
     stats = single_report(_batch_a())["statistics"]
     rows = {row["issue_type"]: row["case_count"] for row in stats["issue_type_rows"]}
-    assert rows == {  # 错误1 只在 q1、q2 各计一次
-        "错误1": 2,
-        "错误2": 1,
+    assert rows == {  # 执行/操作失败 只在 q1、q2 各计一次
+        "执行/操作失败": 2,
+        "逻辑矛盾": 1,
     }
 
 
@@ -69,7 +69,7 @@ def test_single_report_cases_only_valid_and_whitelisted():
     assert ids == {"q0", "q1", "q2"}
     case = next(case for case in rep["cases"] if case["item_id"] == "q1")
     assert case["correctness"] == "nok"
-    assert case["issue_types"] == ["错误1", "错误2"]
+    assert case["issue_types"] == ["执行/操作失败", "逻辑矛盾"]
     # 投影只含白名单字段，不含原始错误/帧数据
     assert "error" not in case
     assert "traceback" not in case
@@ -130,3 +130,35 @@ def test_assets_render_js_and_css_exist():
     assets = Path(__file__).resolve().parents[1] / "src" / "auto_eval" / "report" / "assets"
     assert (assets / "operation_report.js").exists()
     assert (assets / "operation_report.css").exists()
+
+
+def test_issue_labels_whitelist_keeps_enum_members():
+    from auto_eval.web.report_payload import _issue_labels
+
+    # 枚举内标签原样保留、同题去重
+    labels = _issue_labels("答非所问：跑了题\n事实/计算错误：算错\n答非所问：重复")
+    assert labels == ["答非所问", "事实/计算错误"]
+
+
+def test_issue_labels_whitelist_normalizes_unknown():
+    from auto_eval.analysis.operation_statistics import OPERATION_ISSUE_OTHER
+    from auto_eval.web.report_payload import _issue_labels
+
+    # 自造/组合/旧标签 → 归一「其他」；同归一标签去重后只有一个「其他」
+    labels = _issue_labels(
+        "逻辑性/遵从性：组合\n服务闭环：foo\n需求闭环：bar\n旧标签：baz"
+    )
+    assert labels == [OPERATION_ISSUE_OTHER]
+    # 无冒号整行也按标签处理并归一
+    assert _issue_labels("整行无冒号的旧标签") == [OPERATION_ISSUE_OTHER]
+
+
+def test_issue_enum_has_no_blank_and_no_duplicates():
+    from auto_eval.analysis.operation_statistics import OPERATION_ISSUE_TYPES
+
+    assert len(OPERATION_ISSUE_TYPES) == len(set(OPERATION_ISSUE_TYPES))
+    assert all(label and label == label.strip() for label in OPERATION_ISSUE_TYPES)
+    # 需求未闭环是唯一闭环类标签（合并 服务闭环/需求未闭环 等）
+    assert "需求未闭环" in OPERATION_ISSUE_TYPES
+    assert "服务闭环" not in OPERATION_ISSUE_TYPES
+    assert "遵从性" not in OPERATION_ISSUE_TYPES
