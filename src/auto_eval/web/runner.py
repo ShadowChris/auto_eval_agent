@@ -1,4 +1,4 @@
-"""评估执行：垂域视觉评测 / 垂域视觉对比评测 + 并发 + 推 SSE 事件 + 汇总。"""
+"""评估执行：垂域视觉评测 / 垂域视觉对比评测 + 两级并发 + 推 SSE 事件 + 汇总。"""
 from __future__ import annotations
 
 import asyncio
@@ -33,7 +33,7 @@ from .video_prepare import (
     prepare_session_rich_content_item,
     prepare_session_visual_compare_item,
 )
-from .scheduler import EVAL_LIMITER, get_settings
+from .scheduler import MODEL_LIMITER, PIPELINE_LIMITER, get_settings
 from .tasks import Task, retire_task, upsert_result_by_index
 
 
@@ -198,19 +198,24 @@ def _make_item_evaluator(
     options: dict | None = None,
     on_result: Callable[[int, dict, float], Awaitable[None]] | None = None,
 ) -> tuple[
-    Callable[[int, dict], Awaitable[dict]],
+    Callable[..., Awaitable[dict]],
     Callable[[int, dict, str], Awaitable[dict]],
     list[JudgeClient],
 ]:
-    """构造单题评测协程 one(idx, item_dict) -> res（含失败 res，不抛出）、
-    连坐失败协程 fail(idx, item_dict, reason) -> res，以及本套裁判客户端
-    （调用方负责在 finally 中 aclose，见 _aclose_judge_clients）。
+    """构造单题评测协程 one(idx, item_dict, *, priority=False) -> res（含失败
+    res，不抛出）、连坐失败协程 fail(idx, item_dict, reason) -> res，以及本套
+    裁判客户端（调用方负责在 finally 中 aclose，见 _aclose_judge_clients）。
 
-    one 不再管理并发槽：调用方（_run / _run_update_batch_body）须已通过
-    EVAL_LIMITER 取得全局并发槽（整组一个槽或独立题一个槽），排队时间因此
-    不计入单题耗时。并发、单题超时与裁判由全局设置管理（scheduler.get_settings），
-    不再从 options 读取（旧 options 中的 concurrency/eval_timeout_s 已废弃；
-    options.judges 仍生效但仅作兼容优先，前端已改为全局设置选裁判）。
+    两级并发槽：调用方（_run / _run_update_batch_body）须已通过
+    PIPELINE_LIMITER 取得流水线准入槽（界定预处理/等待中的评测总量）；
+    one 内部在进入模型调用阶段前自行获取 MODEL_LIMITER 模型槽——视频
+    预处理不占模型槽，模型槽满时预处理照常进行。priority=True（组第 2+
+    轮 / 批第 2+ 条）请求模型槽时插队头，保留组内轮次不被排到队尾的语义。
+    流水线准入排队不计入单题耗时；模型槽等待计入（该题占着准入名额），
+    纯模型时长另有 latency_s 口径。并发、等待容量、单题超时与裁判由全局
+    设置管理（scheduler.get_settings），不再从 options 读取（旧 options 中
+    的 concurrency/eval_timeout_s 已废弃；options.judges 仍生效但仅作兼容
+    优先，前端已改为全局设置选裁判）。
     options：本次运行生效的配置（缺省 task.options），只读、不回写，
     供更新批以 {**task.options, **req.options} 运行。
     on_result：结果落地回调 (idx, res, started)，在评测上下文（bind_chain_context
@@ -288,9 +293,11 @@ def _make_item_evaluator(
                 loop.call_soon_threadsafe(apply)
         return publish_progress
 
-    async def one(idx: int, item_dict: dict) -> dict:
-        # 调用方须已取得全局并发槽（整组一个槽或独立题一个槽，见 _run /
-        # _run_update_batch_body）；排队时间不计入单题耗时，计时从进入本函数起。
+    async def one(idx: int, item_dict: dict, *, priority: bool = False) -> dict:
+        # 调用方须已取得流水线准入槽（见 _run / _run_update_batch_body）；
+        # 计时从进入本函数起：流水线排队不计入，模型槽等待计入单题耗时
+        # （纯模型时长另有 latency_s 口径）。priority=True 时模型槽插队头
+        # （组第 2+ 轮 / 批第 2+ 条优先续队，不排到新到达者之后）。
         request_id = make_request_id(task.created_at, task.id, idx)
         pending_judge_traces: list[tuple[str, dict]] = []
         publish_progress = _progress_publisher(idx)
@@ -387,56 +394,73 @@ def _make_item_evaluator(
                         progress_status="error",
                     )
             if last_error is None:
-                for attempt in range(2):
-                    # 每次尝试现读全局设置：运行中调整超时对后续轮次/题目生效
-                    eval_timeout = get_settings().eval_timeout_s
-                    try:
-                        if attempt:
+                if MODEL_LIMITER.would_block():
+                    # 展示层提示：预处理完成但模型槽全忙，需排队（可能与实际
+                    # 获取存在良序竞态，最坏多发/少发一条事件，不影响功能）
+                    log_event(
+                        "模型调度",
+                        "等待模型槽位",
+                        details={
+                            "模型运行中": MODEL_LIMITER.stats()["running"],
+                            "模型排队中": MODEL_LIMITER.stats()["queued"],
+                        },
+                        progress=13,
+                        progress_message="等待模型调用槽位",
+                    )
+                # 模型调用级并发槽：只在模型阶段持有，视频预处理不占槽；
+                # priority=True 插队头（组第 2+ 轮 / 批第 2+ 条优先续队）。
+                # wait_for 只包 _eval_one——排队等待不消耗单题超时。
+                async with MODEL_LIMITER.slot(priority=priority):
+                    for attempt in range(2):
+                        # 每次尝试现读全局设置：运行中调整超时对后续轮次/题目生效
+                        eval_timeout = get_settings().eval_timeout_s
+                        try:
+                            if attempt:
+                                log_event(
+                                    "单题评测",
+                                    "开始外层重试",
+                                    level=logging.WARNING,
+                                    details={"请求次数": f"{attempt + 1}/2"},
+                                    progress=15,
+                                    progress_message="正在重新执行单题评测",
+                                )
+                            res = await asyncio.wait_for(
+                                _eval_one(
+                                    task.mode, idx, item_dict,
+                                    rich_judges=rich_judges,
+                                    compare_judges=compare_judges,
+                                    category_display=category_display,
+                                ),
+                                timeout=eval_timeout,
+                            )
+                            break
+                        except asyncio.TimeoutError:
+                            last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
                             log_event(
                                 "单题评测",
-                                "开始外层重试",
-                                level=logging.WARNING,
-                                details={"请求次数": f"{attempt + 1}/2"},
-                                progress=15,
-                                progress_message="正在重新执行单题评测",
+                                "超时",
+                                level=logging.ERROR,
+                                details=error_details(last_error),
                             )
-                        res = await asyncio.wait_for(
-                            _eval_one(
-                                task.mode, idx, item_dict,
-                                rich_judges=rich_judges,
-                                compare_judges=compare_judges,
-                                category_display=category_display,
-                            ),
-                            timeout=eval_timeout,
-                        )
-                        break
-                    except asyncio.TimeoutError:
-                        last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
-                        log_event(
-                            "单题评测",
-                            "超时",
-                            level=logging.ERROR,
-                            details=error_details(last_error),
-                        )
-                        break
-                    except Exception as e:
-                        last_error = e
-                        retryable = is_retriable_llm_error(e)
-                        will_retry = attempt == 0 and retryable
-                        log_event(
-                            "单题评测",
-                            "失败，准备重试" if will_retry else "最终失败",
-                            level=logging.WARNING if will_retry else logging.ERROR,
-                            details={
-                                "请求次数": f"{attempt + 1}/2",
-                                "可重试": retryable,
-                                **error_details(e),
-                            },
-                        )
-                        if will_retry:
-                            await asyncio.sleep(0.7)  # 与模型调用层的固定重试间隔一致
-                            continue
-                        break
+                            break
+                        except Exception as e:
+                            last_error = e
+                            retryable = is_retriable_llm_error(e)
+                            will_retry = attempt == 0 and retryable
+                            log_event(
+                                "单题评测",
+                                "失败，准备重试" if will_retry else "最终失败",
+                                level=logging.WARNING if will_retry else logging.ERROR,
+                                details={
+                                    "请求次数": f"{attempt + 1}/2",
+                                    "可重试": retryable,
+                                    **error_details(e),
+                                },
+                            )
+                            if will_retry:
+                                await asyncio.sleep(0.7)  # 与模型调用层的固定重试间隔一致
+                                continue
+                            break
             if res is None:
                 res = {
                     "index": idx,
@@ -516,8 +540,9 @@ async def _run(task: Task, cfg: AppConfig) -> None:
 
     # 多轮垂域视觉评测：同一 session_group 的各轮按 turn_index 串行评测，
     # 评完一轮即生成 ≤120 字总结并注入下一轮 context。调度单位是「整组」或
-    # 「独立题」，在全局 EVAL_LIMITER 上排队（跨任务共享并发上限）；整组占
-    # 一个槽跑完全部轮次，后续轮次不再重新排队（不会被排到队尾）。
+    # 「独立题」，在 PIPELINE_LIMITER 上排队（流水线准入 = 并发 + 等待容量，
+    # 跨任务共享）；模型槽在 one() 内逐题获取，组第 2+ 轮插队头优先续队
+    # （预处理不占模型槽，组内轮次不被排到新到达者之后）。
     # session_group 由 parse_csv 据 is_start/is_end 切组赋值，与上游 session_id 列无关。
     sessions: dict[str, list[int]] = {}
     standalone: list[int] = []
@@ -545,7 +570,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                     if base_ctx
                     else f"历史对话总结：\n{prior_summary}"
                 )
-            res = await one(idx, it)
+            res = await one(idx, it, priority=turn_no > 1)  # 第 2+ 轮模型槽插队头
             if res.get("error") and turn_no < len(idxs):
                 reason = f"同组前序轮次失败：{res['error']}"
                 for later_idx in idxs[turn_no:]:
@@ -561,12 +586,13 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             )
 
     async def _session_job(idxs: list[int]) -> None:
-        # 整组独占一个全局并发槽：轮次背靠背执行，不与其他组/独立题交错排队
-        async with EVAL_LIMITER:
+        # 整组占一个流水线准入槽（界定等待总量）；模型槽由组内各轮在
+        # one() 中逐轮获取（第 2+ 轮插队头优先续队）
+        async with PIPELINE_LIMITER:
             await run_session(idxs)
 
     async def _standalone_job(i: int) -> None:
-        async with EVAL_LIMITER:
+        async with PIPELINE_LIMITER:
             await one(i, task.items[i])
 
     coros = [_session_job(idxs) for idxs in sessions.values()]
@@ -778,11 +804,12 @@ async def _run_update_batch_body(
         _persist_task(task, force=True)
     current: tuple[int, dict] | None = None
     try:
-        # 整批一个串行会话：占一个全局并发槽跑完整批（跨任务共享上限）；
+        # 整批一个串行会话：占一个流水线准入槽跑完整批（界定等待总量）；
+        # 模型槽由批内各条在 one() 中逐条获取（第 2+ 条插队头优先续队）。
         # 前轮总结在批次内本地链式注入，不从 task.results 读回，
         # 不受并行批次覆盖影响。任一轮失败即连坐：剩余条目直接落
         # 「同组前序轮次失败」结果并提前终止（槽位随之释放）。
-        async with EVAL_LIMITER:
+        async with PIPELINE_LIMITER:
             prior_summary = initial_summary
             for pos, (idx, item_dict) in enumerate(batch, 1):
                 turn_no = pos + initial_turn  # 总结链编号延续原组轮次
@@ -796,7 +823,7 @@ async def _run_update_batch_body(
                     )
                 task.in_flight_indexes.add(idx)
                 try:
-                    res = await one(idx, item_dict)
+                    res = await one(idx, item_dict, priority=pos > 1)
                 finally:
                     task.in_flight_indexes.discard(idx)
                 if res.get("error") and pos < len(batch):

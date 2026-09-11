@@ -41,11 +41,16 @@
   </div>
 
   <details class="settings-section" @toggle="onSettingsToggle">
-    <summary>系统设置（全局并发 {{ sysSettings.concurrency }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }} · 运行 {{ sysSettings.queue.running }} / 排队 {{ sysSettings.queue.queued }}）</summary>
+    <summary>系统设置（全局并发 {{ sysSettings.concurrency }} · 等待容量 {{ sysSettings.waiting_capacity }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }} · 模型 {{ sysSettings.queue.running }}/{{ sysSettings.queue.limit }} 运行 / {{ sysSettings.queue.queued }} 排队 · 流水线准入 {{ sysSettings.pipeline.running }}/{{ sysSettings.pipeline.limit }}）</summary>
     <div class="row">
       <span class="lbl">并发上限：</span>
       <input type="number" min="1" max="64" v-model.number="settingsForm.concurrency" style="width:70px">
-      <span class="hint">全系统所有评测任务共享一个队列；按模型限流设置（默认 10）。</span>
+      <span class="hint">模型调用级并发；按模型限流设置（默认 10）。视频预处理不占并发，只有调模型评测时占槽。</span>
+    </div>
+    <div class="row">
+      <span class="lbl">等待容量：</span>
+      <input type="number" min="0" max="256" v-model.number="settingsForm.waiting_capacity" style="width:70px">
+      <span class="hint">模型槽满时可继续做数据预处理的评测数；流水线总准入 = 并发上限 + 等待容量（默认 10）。</span>
     </div>
     <div class="row">
       <span class="lbl">单题超时：</span>
@@ -63,7 +68,7 @@
       <button class="primary" @click="saveSettings" :disabled="settingsSaving">保存系统设置</button>
       <span v-if="settingsMessage" :class="settingsMessageOk ? 'ok' : 'err'">{{ settingsMessage }}</span>
     </div>
-    <p class="hint">调低并发不会中断已开始的评测，新排队按新上限执行；设置保存在服务端，重启后仍生效。</p>
+    <p class="hint">调低并发或等待容量不会中断已开始的评测与预处理，运行完即止、新排队按新上限执行；设置保存在服务端，重启后仍生效。</p>
   </details>
 
   <details class="history-section">

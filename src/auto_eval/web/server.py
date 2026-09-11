@@ -48,7 +48,7 @@ from .runner import (
     spawn_background,
 )
 from . import scheduler
-from .scheduler import EVAL_LIMITER
+from .scheduler import MODEL_LIMITER, PIPELINE_LIMITER
 from .tasks import (
     TASKS,
     get_task,
@@ -120,9 +120,10 @@ class HistoryNoteReq(BaseModel):
 
 
 class SettingsReq(BaseModel):
-    """全局系统设置：并发上限、单题超时与裁判（均可选，至少传一个）。"""
+    """全局系统设置：并发上限、等待容量、单题超时与裁判（均可选，至少传一个）。"""
 
     concurrency: int | None = None
+    waiting_capacity: int | None = None
     eval_timeout_s: float | None = None
     judges: list[str] | None = None
 
@@ -214,9 +215,11 @@ def _settings_payload(*, persisted: bool | None = None) -> dict:
     judges = [name for name in s.judges if name in configured] or configured[:1]
     payload = {
         "concurrency": s.concurrency,
+        "waiting_capacity": s.waiting_capacity,
         "eval_timeout_s": s.eval_timeout_s,
         "judges": judges,
-        "queue": EVAL_LIMITER.stats(),
+        "queue": MODEL_LIMITER.stats(),       # 兼容键：模型调用级（运行/排队）
+        "pipeline": PIPELINE_LIMITER.stats(),  # 流水线准入级（含预处理/等待）
     }
     if persisted is not None:
         payload["persisted"] = persisted
@@ -232,15 +235,17 @@ async def api_settings_get():
 
 @app.put("/api/settings")
 async def api_settings_put(req: SettingsReq):
-    """更新全局并发/单题超时/裁判：即时生效（调大立即放行排队，调小为软限制，
-    运行中的评测跑完即止）并持久化到 runs/web_settings.json。"""
+    """更新全局并发/等待容量/单题超时/裁判：即时生效（调大立即放行排队，
+    调小为软限制，运行中的评测跑完即止；流水线上限随 并发+等待容量 实时
+    重算）并持久化到 runs/web_settings.json。"""
     if (
         req.concurrency is None
+        and req.waiting_capacity is None
         and req.eval_timeout_s is None
         and req.judges is None
     ):
         raise HTTPException(
-            422, "需至少提供 concurrency / eval_timeout_s / judges 之一"
+            422, "需至少提供 concurrency / waiting_capacity / eval_timeout_s / judges 之一"
         )
     if req.concurrency is not None and not (
         scheduler.MIN_CONCURRENCY <= req.concurrency <= scheduler.MAX_CONCURRENCY
@@ -249,6 +254,16 @@ async def api_settings_put(req: SettingsReq):
             422,
             f"concurrency 需在 {scheduler.MIN_CONCURRENCY}–"
             f"{scheduler.MAX_CONCURRENCY} 之间",
+        )
+    if req.waiting_capacity is not None and not (
+        scheduler.MIN_WAITING_CAPACITY
+        <= req.waiting_capacity
+        <= scheduler.MAX_WAITING_CAPACITY
+    ):
+        raise HTTPException(
+            422,
+            f"waiting_capacity 需在 {scheduler.MIN_WAITING_CAPACITY}–"
+            f"{scheduler.MAX_WAITING_CAPACITY} 之间",
         )
     if req.eval_timeout_s is not None and not (
         scheduler.MIN_EVAL_TIMEOUT_S
@@ -272,6 +287,7 @@ async def api_settings_put(req: SettingsReq):
             )
     scheduler.apply_settings(
         concurrency=req.concurrency,
+        waiting_capacity=req.waiting_capacity,
         eval_timeout_s=req.eval_timeout_s,
         judges=req.judges,
     )

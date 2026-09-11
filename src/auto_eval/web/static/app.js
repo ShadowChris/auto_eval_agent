@@ -20,14 +20,16 @@ createApp({
     const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
-    // 全局系统设置（并发/单题超时/裁判）：所有任务共享，服务端持久化
+    // 全局系统设置（并发/等待容量/单题超时/裁判）：所有任务共享，服务端持久化
     const sysSettings = ref({
       concurrency: 10,
+      waiting_capacity: 10,
       eval_timeout_s: 300,
       judges: [],
-      queue: { limit: 10, running: 0, queued: 0 },
+      queue: { limit: 10, running: 0, queued: 0 },       // 模型调用级
+      pipeline: { limit: 20, running: 0, queued: 0 },     // 流水线准入级
     });
-    const settingsForm = ref({ concurrency: 10, eval_timeout_s: 300, judges: [] });
+    const settingsForm = ref({ concurrency: 10, waiting_capacity: 10, eval_timeout_s: 300, judges: [] });
     const settingsSaving = ref(false);
     const settingsMessage = ref("");
     const settingsMessageOk = ref(true);
@@ -805,6 +807,7 @@ createApp({
           sysSettings.value = { ...sysSettings.value, ...d };
           settingsForm.value = {
             concurrency: d.concurrency,
+            waiting_capacity: d.waiting_capacity,
             eval_timeout_s: d.eval_timeout_s,
             judges: d.judges || [],
           };
@@ -823,11 +826,12 @@ createApp({
 
     async function saveSettings() {
       const concurrency = Number(settingsForm.value.concurrency);
+      const waitingCapacity = Number(settingsForm.value.waiting_capacity);
       const evalTimeoutS = Number(settingsForm.value.eval_timeout_s);
       const judgeNames = [...new Set(settingsForm.value.judges || [])];
-      if (!Number.isFinite(concurrency) || !Number.isFinite(evalTimeoutS)) {
+      if (!Number.isFinite(concurrency) || !Number.isFinite(waitingCapacity) || !Number.isFinite(evalTimeoutS)) {
         settingsMessageOk.value = false;
-        settingsMessage.value = "请填写有效的并发上限与超时秒数";
+        settingsMessage.value = "请填写有效的并发上限、等待容量与超时秒数";
         return;
       }
       if (!judgeNames.length) {
@@ -843,6 +847,7 @@ createApp({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             concurrency,
+            waiting_capacity: waitingCapacity,
             eval_timeout_s: evalTimeoutS,
             judges: judgeNames,
           }),

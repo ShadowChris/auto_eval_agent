@@ -1,8 +1,15 @@
-"""全局调度：跨任务共享的可调并发限流器 + 运行时设置（系统并发/单题超时/裁判）。
+"""全局调度：跨任务共享的两级并发限流 + 运行时设置（并发/等待容量/超时/裁判）。
 
-所有评测请求（全量跑批、更新批、独立题）竞争同一个 EVAL_LIMITER 槽位；
-调度单位是「整个 session 组」或「单条独立题」，组内轮次背靠背执行，
-不再每轮重新排队。并发、单题超时与裁判由 GET/PUT /api/settings 全局管理，
+两级闸门，获取顺序恒为 PIPELINE → MODEL，无反向嵌套：
+- PIPELINE_LIMITER（上限 = concurrency + waiting_capacity）：流水线准入，
+  调度单位是「整个 session 组」「单条独立题」或「一个更新批」——最多这么
+  多个评测单元处于准入后状态（预处理中 / 等模型槽 / 模型调用中），界定
+  「最多积累 waiting_capacity 个等待的评测」。
+- MODEL_LIMITER（上限 = concurrency）：模型调用级，单题在 one() 内进入
+  模型调用阶段时获取——视频预处理不占模型槽，模型并发始终跑满。组第 2+
+  轮 / 批第 2+ 条 priority=True 插到模型队列队头（组内轮次不被排到队尾）。
+
+并发、等待容量、单题超时与裁判由 GET/PUT /api/settings 全局管理，
 持久化到 runs/web_settings.json（runs/ 不入库，重启后加载）。
 """
 from __future__ import annotations
@@ -23,15 +30,18 @@ from ..paths import RUNS_DIR
 logger = logging.getLogger(__name__)
 
 SETTINGS_PATH = RUNS_DIR / "web_settings.json"
-DEFAULT_CONCURRENCY = 10  # 模型限流 ~10 req/s 建模为全局并发 10
+DEFAULT_CONCURRENCY = 10  # 模型限流 ~10 req/s 建模为模型调用级并发 10
+DEFAULT_WAITING_CAPACITY = 10  # 模型槽满时可继续做预处理的等待评测数
 DEFAULT_EVAL_TIMEOUT_S = 300.0
 MIN_CONCURRENCY, MAX_CONCURRENCY = 1, 64
+MIN_WAITING_CAPACITY, MAX_WAITING_CAPACITY = 0, 256
 MIN_EVAL_TIMEOUT_S, MAX_EVAL_TIMEOUT_S = 30.0, 3600.0
 
 
 @dataclass
 class RuntimeSettings:
     concurrency: int = DEFAULT_CONCURRENCY
+    waiting_capacity: int = DEFAULT_WAITING_CAPACITY
     eval_timeout_s: float = DEFAULT_EVAL_TIMEOUT_S
     # 裁判名列表（本模块不感知 config，只存原始名字；空 = 未设置，由
     # 调用方回落到配置的第一个裁判）。合法性校验在 server PUT 侧做。
@@ -47,6 +57,12 @@ class ResizableLimiter:
 
     调大上限立即唤醒队头等待者；调小为软限制——不抢占运行中的任务，
     新的 acquire 按 `running < limit` 门控，运行完自然收敛。
+
+    acquire(priority=True) 把等待者插到队头（_wake 的 popleft 天然先放行），
+    供 session 组第 2+ 轮 / 批第 2+ 条优先续队：不排到新到达者之后。多个
+    优先者之间为 LIFO——每组同一时刻至多一个优先等待者（组内轮次串行），
+    有界可接受。取消清理（按 future 恒等出队 / 已预占则归还）与队列位置
+    无关，priority 路径与普通路径同等安全。
     """
 
     def __init__(self, limit: int) -> None:
@@ -80,13 +96,16 @@ class ResizableLimiter:
             self._running += 1
             waiter.set_result(None)
 
-    async def acquire(self) -> None:
+    async def acquire(self, *, priority: bool = False) -> None:
         if not self._waiters and self._running < self._limit:
-            # 有等待者时禁止插队，保证 FIFO
+            # 有等待者时禁止插队，保证 FIFO（显式 priority 除外）
             self._running += 1
             return
         waiter = asyncio.get_running_loop().create_future()
-        self._waiters.append(waiter)
+        if priority:
+            self._waiters.appendleft(waiter)
+        else:
+            self._waiters.append(waiter)
         try:
             await waiter
         except asyncio.CancelledError:
@@ -106,6 +125,10 @@ class ResizableLimiter:
         self._running = max(0, self._running - 1)
         self._wake()
 
+    def would_block(self) -> bool:
+        """现在 acquire 是否需要排队（供展示层决定是否发「等待槽位」事件）。"""
+        return bool(self._waiters) or self._running >= self._limit
+
     async def __aenter__(self) -> "ResizableLimiter":
         await self.acquire()
         return self
@@ -113,8 +136,26 @@ class ResizableLimiter:
     async def __aexit__(self, *exc) -> None:
         self.release()
 
+    def slot(self, *, priority: bool = False) -> "_LimiterSlot":
+        """带参数的槽位 async CM（`async with lim:` 语法无法给 __aenter__ 传参）。"""
+        return _LimiterSlot(self, priority)
 
-EVAL_LIMITER = ResizableLimiter(DEFAULT_CONCURRENCY)
+
+class _LimiterSlot:
+    def __init__(self, limiter: ResizableLimiter, priority: bool) -> None:
+        self._limiter = limiter
+        self._priority = priority
+
+    async def __aenter__(self) -> ResizableLimiter:
+        await self._limiter.acquire(priority=self._priority)
+        return self._limiter
+
+    async def __aexit__(self, *exc) -> None:
+        self._limiter.release()
+
+
+MODEL_LIMITER = ResizableLimiter(DEFAULT_CONCURRENCY)
+PIPELINE_LIMITER = ResizableLimiter(DEFAULT_CONCURRENCY + DEFAULT_WAITING_CAPACITY)
 
 _settings = RuntimeSettings()
 
@@ -126,16 +167,28 @@ def get_settings() -> RuntimeSettings:
 def apply_settings(
     *,
     concurrency: int | None = None,
+    waiting_capacity: int | None = None,
     eval_timeout_s: float | None = None,
     judges: list[str] | None = None,
 ) -> RuntimeSettings:
-    """更新运行时设置并即时对齐限流器（越界值 clamp 到合法区间）。"""
+    """更新运行时设置并即时对齐限流器（越界值 clamp 到合法区间）。
+
+    任一参数单独变化都从 _settings 读对方现值重算 PIPELINE 上限
+    （= concurrency + waiting_capacity），避免两参非原子更新时出现
+    pipeline < model 的病态；waiting_capacity=0 是安全退化（无预取缓冲）。
+    """
     global _settings
     if concurrency is not None:
         _settings.concurrency = min(
             MAX_CONCURRENCY, max(MIN_CONCURRENCY, int(concurrency))
         )
-        EVAL_LIMITER.set_limit(_settings.concurrency)
+        MODEL_LIMITER.set_limit(_settings.concurrency)
+        PIPELINE_LIMITER.set_limit(_settings.concurrency + _settings.waiting_capacity)
+    if waiting_capacity is not None:
+        _settings.waiting_capacity = min(
+            MAX_WAITING_CAPACITY, max(MIN_WAITING_CAPACITY, int(waiting_capacity))
+        )
+        PIPELINE_LIMITER.set_limit(_settings.concurrency + _settings.waiting_capacity)
     if eval_timeout_s is not None:
         _settings.eval_timeout_s = min(
             MAX_EVAL_TIMEOUT_S, max(MIN_EVAL_TIMEOUT_S, float(eval_timeout_s))
@@ -154,11 +207,14 @@ def load_persisted_settings(path: Path | None = None) -> RuntimeSettings:
     except (OSError, json.JSONDecodeError):
         raw = None
     concurrency = None
+    waiting_capacity = None
     eval_timeout_s = None
     judges = None
     if isinstance(raw, dict):
         if isinstance(raw.get("concurrency"), int):
             concurrency = raw["concurrency"]
+        if isinstance(raw.get("waiting_capacity"), int):
+            waiting_capacity = raw["waiting_capacity"]
         if isinstance(raw.get("eval_timeout_s"), (int, float)):
             eval_timeout_s = float(raw["eval_timeout_s"])
         persisted_judges = raw.get("judges")
@@ -167,7 +223,10 @@ def load_persisted_settings(path: Path | None = None) -> RuntimeSettings:
         ):
             judges = persisted_judges
     apply_settings(
-        concurrency=concurrency, eval_timeout_s=eval_timeout_s, judges=judges
+        concurrency=concurrency,
+        waiting_capacity=waiting_capacity,
+        eval_timeout_s=eval_timeout_s,
+        judges=judges,
     )
     return _settings
 
@@ -177,6 +236,7 @@ def persist_settings(path: Path | None = None) -> bool:
     target = path or SETTINGS_PATH
     payload = {
         "concurrency": _settings.concurrency,
+        "waiting_capacity": _settings.waiting_capacity,
         "eval_timeout_s": _settings.eval_timeout_s,
         "judges": _settings.judges,
         "updated_at": time.time(),
