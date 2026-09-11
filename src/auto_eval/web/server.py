@@ -1,6 +1,6 @@
 """FastAPI 后端：路由 + SSE 实时流 + 静态前端挂载。
 
-启动：python -m auto_eval.web.server  （默认 http://localhost:8501）
+启动：python -m auto_eval.web.server  （默认 http://localhost:8502）
 """
 from __future__ import annotations
 
