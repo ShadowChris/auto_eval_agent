@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260909_conflict_detail">
+  <link rel="stylesheet" href="/static/style.css?v=20260911_report_sync">
+  <link rel="stylesheet" href="/report-assets/operation_report.css?v=20260911_report_sync">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
     .op-card { border:1px solid #e2e8f0; border-radius:8px; padding:12px; background:#fafbfc; }
@@ -37,9 +38,11 @@
   <h1>auto_eval 评估台 <small>批量输入 query · 批量输出评估结果</small></h1>
 
   <div class="tabs">
-    <button v-for="m in modes" :class="{active: mode===m.key}" @click="switchMode(m.key)">{{ m.label }}</button>
+    <button v-for="m in modes" :class="{active: page==='eval' && mode===m.key}" @click="switchMode(m.key)">{{ m.label }}</button>
+    <button :class="{active: page==='comparison'}" @click="openComparisonPage">对比分析</button>
   </div>
 
+  <div v-show="page==='eval'">
   <details class="settings-section" @toggle="onSettingsToggle">
     <summary>系统设置（全局并发 {{ sysSettings.concurrency }} · 等待容量 {{ sysSettings.waiting_capacity }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }} · 模型 {{ sysSettings.queue.running }}/{{ sysSettings.queue.limit }} 运行 / {{ sysSettings.queue.queued }} 排队 · 流水线准入 {{ sysSettings.pipeline.running }}/{{ sysSettings.pipeline.limit }}）</summary>
     <div class="row">
@@ -74,11 +77,28 @@
   <details class="history-section">
     <summary>历史记录（{{ historyItems.length }}）<button @click.stop="loadHistory" :disabled="loadingHistory" style="margin-left:8px">刷新</button></summary>
     <p class="hint">历史结果保存在本地 runs/web_history，服务重启后仍可加载；运行中断时会保留已完成的题目。</p>
+    <div class="history-comparison-toolbar">
+      <span>已选 {{ comparisonSelectedCount }}/5 个已完成垂域视觉评测批次</span>
+      <button class="primary" @click="openComparisonFromHistory" :disabled="!comparisonSelectedCount">
+        加入对比分析
+      </button>
+      <button @click="clearHistoryComparisonSelection" :disabled="!comparisonSelectedCount">清空选择</button>
+      <span class="hint">仅已完成的垂域视觉评测记录可选，用于「对比分析」页的批次对比。</span>
+    </div>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
-        <thead><tr><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th class="history-progress-cell">进度</th><th>操作</th><th>批跑备注</th></tr></thead>
+        <thead><tr><th class="history-comparison-select">对比</th><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th class="history-progress-cell">进度</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
           <tr v-for="h in pagedHistoryItems" :key="h.task_id">
+            <td class="history-comparison-select">
+              <input
+                type="checkbox"
+                :checked="isHistoryComparisonSelected(h.task_id)"
+                :disabled="!canCompareHistoryItem(h)"
+                :title="canCompareHistoryItem(h) ? '选择用于历史批次对比' : '仅支持已完成的垂域视觉评测批次'"
+                @change="toggleHistoryComparisonItem(h, $event.target.checked)"
+              >
+            </td>
             <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
             <td>{{ h.dataset_name || '未记录' }}</td>
             <td>{{ modeLabel(h.mode) }}</td>
@@ -278,6 +298,7 @@
       <button @click="exportCsv" :disabled="!taskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId">导出 JSON</button>
       <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
+      <button v-if="mode!=='compare'" @click="exportHtml" :disabled="!taskId">导出 HTML 报告</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId">导出抽帧 ZIP</button>
     </h2>
     <div class="summary" v-if="summary">
@@ -317,7 +338,12 @@
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <span class="result-count">共 {{ filteredResults.length }} 条</span>
       </div>
-      <div v-if="mode!=='compare' && correctnessStats.rows.length" class="stats-grid">
+      <details v-if="mode!=='compare' && taskId" class="operation-statistics" open>
+        <summary>📊 统计分布</summary>
+        <operation-report :task-id="taskId" :revision="summary"></operation-report>
+        <details v-if="correctnessStats.rows.length" class="operation-statistics-legacy">
+        <summary>查看原始统计表</summary>
+        <div class="stats-grid">
         <div class="stat-section">
           <h3>Correctness 分布<span class="stat-sub">problem_solved · 当前筛选 {{ correctnessStats.evaluated }} 条</span></h3>
           <table class="grid stat-table">
@@ -361,6 +387,8 @@
           <p class="stat-note">按 answer_issues 中“标签：描述”的标签（“：”前）统计。次数占比分母为问题总次数；样本占比 = 出现该错误的题数 / 已评测题数（同题重复标签只算一次，一题可有多个标签，各行之和可超 100%）；合计行样本占比为出现任意问题的题数占比。</p>
         </div>
       </div>
+        </details>
+      </details>
       <div class="result-table-wrap">
         <table class="grid results compact-results" :style="{ width: resultTableWidth + 'px' }">
           <colgroup>
@@ -452,8 +480,96 @@
       @mouseleave="hideCellTooltip"
     >{{ cellTooltip.text }}</div>
   </section>
+  </div>
+
+  <section v-if="page==='comparison'" class="comparison-page">
+    <div class="comparison-page-topbar">
+      <div>
+        <h2>垂域评测对比分析</h2>
+        <p class="hint">从历史记录勾选 2～5 个已完成的垂域视觉评测批次进行对比；第一组固定为对照组，可上移/下移调整顺序。</p>
+      </div>
+      <div class="comparison-page-actions">
+        <button @click="clearComparisonSources" :disabled="!comparisonSources.length || historyComparisonLoading">清空结果集</button>
+      </div>
+    </div>
+
+    <details class="comparison-history-picker">
+      <summary>从历史记录选择（已选 {{ comparisonSelectedCount }} 条）</summary>
+      <div class="comparison-history-picker-actions">
+        <button @click="loadHistory" :disabled="loadingHistory">{{ loadingHistory ? '加载中…' : '刷新历史' }}</button>
+        <button class="primary" @click="addSelectedHistoryComparisonSources" :disabled="!comparisonSelectedCount || comparisonSources.length>=5">添加所选历史</button>
+        <button @click="clearHistoryComparisonSelection" :disabled="!comparisonSelectedCount">清空勾选</button>
+      </div>
+      <div class="table-scroll" v-if="historyItems.length">
+        <table class="grid auto-table comparison-history-table">
+          <thead><tr><th>选择</th><th>时间</th><th>数据集</th><th>模式</th><th>状态</th><th>进度</th></tr></thead>
+          <tbody><tr v-for="h in historyItems" :key="'comparison-picker-'+h.task_id">
+            <td><input type="checkbox" :checked="isHistoryComparisonSelected(h.task_id)" :disabled="!canCompareHistoryItem(h)" @change="toggleHistoryComparisonItem(h,$event.target.checked)"></td>
+            <td>{{ formatTime(h.updated_at || h.created_at) }}</td>
+            <td><div>{{ h.dataset_name || '未命名数据集' }}</div><div class="history-task-id">{{ h.task_id }}</div></td>
+            <td>{{ modeLabel(h.mode) }}</td>
+            <td>{{ h.status }}</td>
+            <td>{{ h.done || 0 }}/{{ h.total || 0 }}</td>
+          </tr></tbody>
+        </table>
+      </div>
+      <p v-else class="hint">暂无历史记录。</p>
+    </details>
+
+    <div v-if="comparisonSources.length" class="comparison-source-list">
+      <article v-for="(source,index) in comparisonSources" :key="source.source_id" class="comparison-source-card" :class="{control:index===0}">
+        <div class="comparison-source-card-head">
+          <strong>{{ comparisonSourceRoleLabel(source) }}</strong>
+          <span class="comparison-source-kind">历史任务</span>
+          <span class="hint comparison-source-order-hint">{{ index===0 ? '第一组固定为对照组' : '按顺序生成实验组标识' }}</span>
+          <div class="comparison-source-order-actions">
+            <button @click="moveComparisonSource(index,-1)" :disabled="index===0 || historyComparisonLoading" title="上移结果集">↑ 上移</button>
+            <button @click="moveComparisonSource(index,1)" :disabled="index===comparisonSources.length-1 || historyComparisonLoading" title="下移结果集">↓ 下移</button>
+          </div>
+          <button class="btn-danger" @click="removeComparisonSource(source.source_id)">删除</button>
+        </div>
+        <div class="comparison-source-name">
+          <span class="comparison-source-name-label">数据集名称</span>
+          <template v-if="source._editingName">
+            <input v-model="source._comparisonNameDraft" placeholder="数据集名称" @keyup.enter="saveComparisonSourceName(source)" @keyup.escape="cancelComparisonSourceNameEdit(source)">
+            <button class="history-text-link" @click="saveComparisonSourceName(source)">保存</button>
+            <button class="history-text-link" @click="cancelComparisonSourceNameEdit(source)">取消</button>
+          </template>
+          <template v-else>
+            <strong class="comparison-source-name-value">{{ source.group_name || source.dataset_name || source.source_id }}</strong>
+            <button class="history-text-link" @click="beginComparisonSourceNameEdit(source)">编辑</button>
+          </template>
+          <div class="history-task-id comparison-source-task-id">task_id: {{ source.task_id || source.source_id }}</div>
+        </div>
+        <div class="summary comparison-source-summary">
+          <span>原始 {{ source.summary?.raw_count ?? '—' }} 条</span>
+          <span>状态 {{ source.summary?.status || '—' }}</span>
+          <span>历史任务</span>
+        </div>
+      </article>
+    </div>
+    <div v-else class="comparison-empty">请从历史记录添加已完成的垂域视觉评测批次。</div>
+
+    <div class="comparison-generate-bar">
+      <span>已添加 {{ comparisonSources.length }}/5 个结果集</span>
+      <span v-if="comparisonSources.length" class="hint">第一组为对照组，可通过上移/下移调整</span>
+      <button class="primary" @click="generateHistoryComparison" :disabled="!comparisonCanGenerate">{{ historyComparisonLoading ? '分析中…' : '生成对比分析' }}</button>
+    </div>
+    <p v-if="historyComparisonError" class="run-error">对比失败：{{ historyComparisonError }}</p>
+
+    <div v-if="historyComparison" class="history-comparison-result">
+      <div class="history-comparison-heading">
+        <h3>垂域评测对比分析结果</h3>
+        <div class="row">
+          <button @click="exportHistoryComparison('html')" :disabled="historyComparisonLoading">导出 HTML 报告</button>
+        </div>
+      </div>
+      <operation-report v-if="historyComparison.report" :report="historyComparison.report"></operation-report>
+    </div>
+  </section>
 </div>
 
-  <script type="module" src="/static/app.js?v=20260909_conflict_detail"></script>
+  <script src="/report-assets/operation_report.js?v=20260911_report_sync"></script>
+  <script type="module" src="/static/app.js?v=20260911_report_sync"></script>
 </body>
 </html>

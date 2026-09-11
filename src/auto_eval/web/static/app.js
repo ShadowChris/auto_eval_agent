@@ -1,6 +1,51 @@
-import { createApp, ref, computed, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
+import { createApp, ref, computed, watch, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
 
 createApp({
+  components: {
+    // 图表报告组件：fetch /api/eval/{taskId}/report 后挂载共用渲染器
+    // AutoEvalOperationReport（/report-assets/operation_report.js）。
+    OperationReport: {
+      props: ["taskId", "revision", "report"],
+      setup(props) {
+        const host = ref(null), loading = ref(false), error = ref("");
+        let viewer = null, controller = null, disposed = false;
+        async function refresh() {
+          controller?.abort();
+          const current = new AbortController();
+          controller = current;
+          error.value = "";
+          viewer?.update(null);
+          if (!props.report && !props.taskId) { loading.value = false; return; }
+          loading.value = true;
+          const timeout = setTimeout(() => current.abort(), 30000);
+          try {
+            let data = props.report;
+            if (!data) {
+              const response = await fetch(`/api/eval/${encodeURIComponent(props.taskId)}/report`, { signal: current.signal });
+              data = await response.json();
+              if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+            }
+            if (disposed || current !== controller || current.signal.aborted) return;
+            if (!globalThis.AutoEvalOperationReport) throw new Error("报告资源未加载，请刷新页面");
+            if (!viewer) viewer = globalThis.AutoEvalOperationReport.mount(host.value, data);
+            else viewer.update(data);
+          } catch (e) {
+            if (!disposed && current === controller) {
+              error.value = current.signal.aborted ? "报告加载超时，请重试" : (e.message || "报告加载失败");
+            }
+          } finally {
+            clearTimeout(timeout);
+            if (current === controller) loading.value = false;
+          }
+        }
+        onMounted(refresh);
+        watch([() => props.taskId, () => props.revision, () => props.report], refresh, { flush: "post" });
+        onUnmounted(() => { disposed = true; controller?.abort(); viewer?.destroy(); viewer = null; });
+        return { host, loading, error, refresh };
+      },
+      template: '<div><p v-if="loading" class="hint">正在加载图表与 Case…</p><p v-if="error" class="run-error">{{ error }} <button @click="refresh">重试</button></p><div ref="host"></div></div>',
+    },
+  },
   setup() {
     const modes = [
       { key: "rich_content", label: "垂域视觉评测" },
@@ -52,6 +97,24 @@ createApp({
     const progressJumpPage = ref("");
     const cellTooltip = ref({ visible: false, text: "", style: {} });
     const historyItems = ref([]);
+    // —— 页面切换 + 历史批次对比分析（仅 rich_content 已完成任务） ——
+    const page = ref("eval");
+    const comparisonSelectedItems = ref({});
+    const comparisonSources = ref([]);
+    const historyComparison = ref(null);
+    const historyComparisonLoading = ref(false);
+    const historyComparisonError = ref("");
+    const comparisonSelectedList = computed(
+      () => Object.values(comparisonSelectedItems.value),
+    );
+    const comparisonSelectedCount = computed(
+      () => comparisonSelectedList.value.length,
+    );
+    const comparisonCanGenerate = computed(() => (
+      comparisonSources.value.length >= 2
+      && comparisonSources.value.length <= 5
+      && !historyComparisonLoading.value
+    ));
     const historyPage = ref(1);
     const historyJumpPage = ref("");
     const historyNoteDrafts = ref({});
@@ -658,6 +721,7 @@ createApp({
     }
 
     function switchMode(k) {
+      page.value = "eval";
       mode.value = k;
       items.value = [];
       progressPage.value = 1;
@@ -1259,7 +1323,194 @@ createApp({
         results.value = [];
         summary.value = null;
       }
+      if (comparisonSelectedItems.value[id]) {
+        const next = { ...comparisonSelectedItems.value };
+        delete next[id];
+        comparisonSelectedItems.value = next;
+        historyComparison.value = null;
+      }
+      if (comparisonSources.value.some((source) => source.source_id === id)) {
+        removeComparisonSource(id);
+      }
       await loadHistory();
+    }
+
+    function canCompareHistoryItem(item) {
+      return item?.mode === "rich_content" && item?.status === "done";
+    }
+
+    function isHistoryComparisonSelected(taskId) {
+      return Boolean(comparisonSelectedItems.value[taskId]);
+    }
+
+    function toggleHistoryComparisonItem(item, checked) {
+      const next = { ...comparisonSelectedItems.value };
+      if (checked && canCompareHistoryItem(item) && !next[item.task_id]) {
+        next[item.task_id] = {
+          task_id: item.task_id,
+          dataset_name: item.dataset_name || item.task_id,
+          created_at: item.created_at,
+          total: item.total,
+          done: item.done,
+          status: item.status,
+        };
+      } else {
+        delete next[item.task_id];
+      }
+      comparisonSelectedItems.value = next;
+    }
+
+    function clearHistoryComparisonSelection() {
+      comparisonSelectedItems.value = {};
+    }
+
+    function addSelectedHistoryComparisonSources() {
+      const existing = new Set(comparisonSources.value.map((source) => source.source_id));
+      const additions = comparisonSelectedList.value.filter((item) => !existing.has(item.task_id));
+      const available = Math.max(0, 5 - comparisonSources.value.length);
+      if (additions.length > available) {
+        alert(`最多添加 5 个结果集，本次仅添加前 ${available} 个`);
+      }
+      for (const item of additions.slice(0, available)) {
+        comparisonSources.value.push({
+          source_id: item.task_id,
+          source_type: "history",
+          task_id: item.task_id,
+          dataset_name: item.dataset_name || item.task_id,
+          group_name: item.dataset_name || item.task_id,
+          summary: {
+            format: "历史任务",
+            status: item.status,
+            raw_count: Number(item.total || item.done || 0),
+          },
+        });
+      }
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    async function openComparisonPage() {
+      page.value = "comparison";
+      if (!historyItems.value.length) await loadHistory();
+    }
+
+    async function openComparisonFromHistory() {
+      addSelectedHistoryComparisonSources();
+      await openComparisonPage();
+    }
+
+    function removeComparisonSource(sourceId) {
+      comparisonSources.value = comparisonSources.value.filter(
+        (source) => source.source_id !== sourceId,
+      );
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function moveComparisonSource(index, delta) {
+      const target = index + delta;
+      if (target < 0 || target >= comparisonSources.value.length) return;
+      const reordered = [...comparisonSources.value];
+      [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+      comparisonSources.value = reordered;
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function beginComparisonSourceNameEdit(source) {
+      source._comparisonNameDraft = source.group_name || source.dataset_name || source.source_id;
+      source._editingName = true;
+    }
+
+    function saveComparisonSourceName(source) {
+      source.group_name = String(source._comparisonNameDraft || "").trim()
+        || source.dataset_name
+        || source.source_id;
+      source._editingName = false;
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function cancelComparisonSourceNameEdit(source) {
+      source._comparisonNameDraft = source.group_name || source.dataset_name || source.source_id;
+      source._editingName = false;
+    }
+
+    function clearComparisonSources() {
+      comparisonSources.value = [];
+      historyComparison.value = null;
+      historyComparisonError.value = "";
+    }
+
+    function comparisonSourceRoleLabel(source) {
+      const index = Math.max(0, comparisonSources.value.findIndex(
+        (item) => item.source_id === source?.source_id,
+      ));
+      return index === 0 ? "对照组" : `实验组${String.fromCharCode(64 + index)}`;
+    }
+
+    function historyComparisonRequestBody() {
+      // 第一组固定为对照组（上移/下移调整顺序）
+      return {
+        task_ids: comparisonSources.value.map((source) => source.task_id || source.source_id),
+        baseline_task_id: comparisonSources.value[0]?.source_id || "",
+      };
+    }
+
+    async function generateHistoryComparison() {
+      if (!comparisonCanGenerate.value) return;
+      historyComparisonLoading.value = true;
+      historyComparisonError.value = "";
+      try {
+        const response = await fetch("/api/operation/history-comparison", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(historyComparisonRequestBody()),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        historyComparison.value = data;
+      } catch (error) {
+        historyComparison.value = null;
+        historyComparisonError.value = error?.message || "生成对比失败";
+      } finally {
+        historyComparisonLoading.value = false;
+      }
+    }
+
+    async function exportHistoryComparison(format = "html") {
+      if (!historyComparison.value) return;
+      historyComparisonLoading.value = true;
+      historyComparisonError.value = "";
+      try {
+        const response = await fetch(`/api/operation/history-comparison/export?format=${format}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(historyComparisonRequestBody()),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get("Content-Disposition") || "";
+        const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        const filename = utf8Match
+          ? decodeURIComponent(utf8Match[1])
+          : `rich_content_comparison.${format}`;
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        historyComparisonError.value = error?.message || "导出对比报告失败";
+      } finally {
+        historyComparisonLoading.value = false;
+      }
     }
 
     async function loadHistoryTask(id) {
@@ -1318,6 +1569,9 @@ createApp({
     function exportXlsx() {
       window.open(`/api/eval/${taskId.value}/export?format=xlsx`);
     }
+    function exportHtml() {
+      window.open(`/api/eval/${taskId.value}/export?format=html`);
+    }
     function exportFrames() {
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
@@ -1367,7 +1621,15 @@ createApp({
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       correctnessStats, errorTypeStats,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportHtml, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      page, openComparisonPage, openComparisonFromHistory,
+      comparisonSelectedCount, comparisonSelectedList, comparisonSources, comparisonCanGenerate,
+      historyComparison, historyComparisonLoading, historyComparisonError,
+      canCompareHistoryItem, isHistoryComparisonSelected, toggleHistoryComparisonItem,
+      clearHistoryComparisonSelection, addSelectedHistoryComparisonSources,
+      removeComparisonSource, moveComparisonSource, beginComparisonSourceNameEdit,
+      saveComparisonSourceName, cancelComparisonSourceNameEdit, clearComparisonSources,
+      comparisonSourceRoleLabel, generateHistoryComparison, exportHistoryComparison,
       loadHistory, loadHistoryTask, delHistory, editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime,
       selectSkill, resetResultPage, changePage,
       changeProgressPage, changeOpPage, changeHistoryPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,

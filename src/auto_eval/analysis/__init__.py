@@ -1,24 +1,15 @@
-"""分析层：聚合 / 对比 / case 挖掘 / 优化建议 / 逐条诊断 / 错因聚类。"""
-from .advisor import advise, weaknesses
-from .aggregate import model_overview, overview_by_slice, per_model
-from .cases import disagreement_cases, focal_vs_competitors
-from .cluster import cluster_weaknesses, normalize_error_type
-from .compare import dim_gap, pairwise_by_category, pairwise_winrate
-from .per_case import build_case_rows, cases_to_csv
+"""分析层：统计与批次对比纯函数（自 dev_czm 同步的报告口径）。
+
+本层专注于 Web 报告/对比分析消费的纯计算，不依赖旧离线分析链
+（advisor/aggregate/cases 等仅被 cli.py 引用的历史模块）。
+"""
+from .operation_comparison import compare_operation_batches
+from .operation_report import build_comparison_report, build_single_report
+from .operation_statistics import summarize_operation_results
 
 __all__ = [
-    "model_overview",
-    "overview_by_slice",
-    "per_model",
-    "pairwise_winrate",
-    "pairwise_by_category",
-    "dim_gap",
-    "focal_vs_competitors",
-    "disagreement_cases",
-    "weaknesses",
-    "advise",
-    "build_case_rows",
-    "cases_to_csv",
-    "cluster_weaknesses",
-    "normalize_error_type",
+    "compare_operation_batches",
+    "build_comparison_report",
+    "build_single_report",
+    "summarize_operation_results",
 ]

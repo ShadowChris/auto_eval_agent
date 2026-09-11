@@ -302,3 +302,56 @@ tr.result-error td, tr.result-error-detail td { background: #fef2f2 !important; 
 .rerun-cell input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; }
 .rerun-cell input[type="checkbox"]:disabled { cursor: not-allowed; }
 th.rerun-col { background: #fff; }
+
+/* ===== 统计分布报告折叠区 + 对比分析页（自 dev_czm 同步） ===== */
+.operation-statistics-legacy { margin-top: 16px; }
+.operation-statistics > .operation-report,
+.operation-statistics > div { margin-top: 12px; }
+.history-table .history-comparison-select {
+  width: 52px; min-width: 52px; max-width: 52px; text-align: center; white-space: nowrap;
+}
+.history-table .history-comparison-select input { width: 15px; height: 15px; cursor: pointer; }
+.history-table .history-comparison-select input:disabled { cursor: not-allowed; }
+.history-task-id {
+  margin-top: 3px;
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+.history-comparison-toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 10px 0; padding: 9px 10px; border: 1px solid #dbeafe;
+  border-radius: 8px; background: #f8fbff; color: #475569; font-size: 13px;
+}
+.history-comparison-toolbar .hint { margin: 0 0 0 auto; }
+.history-comparison-result {
+  margin-top: 16px; padding: 14px; border: 1px solid #c7d2fe;
+  border-radius: 10px; background: #fcfdff;
+}
+.history-comparison-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.history-comparison-heading h3 { margin: 0; color: #334155; }
+.comparison-page { max-width: 1500px; margin: 0 auto; }
+.comparison-page-topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.comparison-page-topbar h2 { margin: 0 0 4px; }
+.comparison-page-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.comparison-history-picker { margin: 10px 0 14px; padding: 10px 12px; border: 1px solid #dbeafe; border-radius: 9px; background: #f8fbff; }
+.comparison-history-picker > summary { cursor: pointer; font-weight: 650; color: #334155; }
+.comparison-history-picker-actions { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+.comparison-history-table td:nth-child(3) { min-width: 320px; white-space: normal; }
+.comparison-source-list { display: grid; gap: 10px; margin: 12px 0; }
+.comparison-source-card { padding: 12px; border: 1px solid #dbe3ee; border-radius: 9px; background: #fff; }
+.comparison-source-card.control { border-color: #818cf8; box-shadow: inset 3px 0 #6366f1; }
+.comparison-source-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; flex-wrap: wrap; }
+.comparison-source-card-head .btn-danger { margin-left: auto; }
+.comparison-source-order-hint { margin: 0; }
+.comparison-source-order-actions { display: flex; gap: 6px; margin-left: auto; }
+.comparison-source-order-actions + .btn-danger { margin-left: 0; }
+.comparison-source-kind { padding: 2px 7px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 12px; }
+.comparison-source-name { display: grid; grid-template-columns: auto minmax(220px, 620px) auto auto; align-items: center; justify-content: start; gap: 8px; margin-bottom: 8px; }
+.comparison-source-name-label { color: #64748b; font-size: 13px; }
+.comparison-source-name-value { min-width: 220px; max-width: 620px; overflow-wrap: anywhere; }
+.comparison-source-name .history-text-link { padding: 0; border: 0; background: transparent; }
+.comparison-source-task-id { grid-column: 2 / -1; margin-top: -2px; }
+.comparison-source-summary { margin: 6px 0; }
+.comparison-empty { margin: 14px 0; padding: 28px; border: 1px dashed #cbd5e1; border-radius: 9px; text-align: center; color: #64748b; background: #f8fafc; }
+.comparison-generate-bar { position: sticky; bottom: 0; z-index: 8; display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin: 14px 0; padding: 10px 12px; border: 1px solid #dbeafe; border-radius: 9px; background: rgba(248,251,255,.96); }

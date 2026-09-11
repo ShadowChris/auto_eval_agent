@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -21,6 +22,7 @@ from starlette.background import BackgroundTask
 from ..config import load_config
 from ..media import probe_duration
 from ..paths import RUNS_DIR
+from ..report.operation import OPERATION_REPORT_ASSETS, build_operation_report_html
 from .parse_input import Mode, parse_csv, parse_jsonl, parse_text
 from .history import (
     build_xlsx,
@@ -36,6 +38,7 @@ from .history import (
     task_to_snapshot,
     write_frames_zip,
 )
+from .report_payload import comparison_report, operation_statistics_payload, single_report
 from .video_prepare import (
     VIDEO_EXTENSIONS,
     resolve_operation_video_path,
@@ -117,6 +120,13 @@ class RerunReq(BaseModel):
 
 class HistoryNoteReq(BaseModel):
     note: str = ""
+
+
+class HistoryComparisonReq(BaseModel):
+    """历史批次对比请求：2～5 个已完成垂域视觉评测批次 + 对照组 task_id。"""
+
+    task_ids: list[str]
+    baseline_task_id: str
 
 
 class SettingsReq(BaseModel):
@@ -640,6 +650,92 @@ async def api_history_note(task_id: str, req: HistoryNoteReq):
     return {"ok": True, "task_id": task.id, "note": task.note}
 
 
+def _report_snapshot(task_id: str) -> dict:
+    """报告/对比取数：活任务取只读快照，否则读盘；不驻留内存。"""
+    task = peek_task(task_id, touch=False)
+    data = task_to_snapshot(task) if task else load_snapshot(task_id)
+    if not data:
+        raise HTTPException(404, "task not found")
+    return data
+
+
+@app.get("/api/eval/{task_id}/report")
+def api_operation_report(task_id: str):
+    """单批垂域视觉评测的图表报告 payload（Web 报告组件与 HTML 导出共用）。"""
+    data = _report_snapshot(task_id)
+    try:
+        return single_report(data)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/eval/{task_id}/statistics")
+def api_operation_statistics(task_id: str):
+    """单批统计 JSON（与图表报告共用口径）。"""
+    data = _report_snapshot(task_id)
+    try:
+        return operation_statistics_payload(data)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+def _history_comparison_payload(request: HistoryComparisonReq) -> dict:
+    task_ids = [str(task_id).strip() for task_id in request.task_ids]
+    if not 2 <= len(task_ids) <= 5:
+        raise HTTPException(422, "请选择 2～5 个已完成的垂域视觉评测历史批次")
+    if not all(task_ids) or len(set(task_ids)) != len(task_ids):
+        raise HTTPException(422, "历史批次不能为空或重复选择")
+    if request.baseline_task_id not in task_ids:
+        raise HTTPException(422, "对照组必须包含在已选历史批次中")
+
+    snapshots = []
+    for task_id in task_ids:
+        data = _report_snapshot(task_id)
+        if data.get("status") != "done":
+            raise HTTPException(409, f"只能对比已完成任务：{task_id}")
+        snapshots.append(data)
+    try:
+        return comparison_report(
+            snapshots,
+            baseline_task_id=request.baseline_task_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/operation/history-comparison")
+def api_operation_history_comparison(request: HistoryComparisonReq):
+    """生成历史垂域视觉评测批次的确定性配对对比 JSON（含图表报告）。"""
+    return _history_comparison_payload(request)
+
+
+@app.post("/api/operation/history-comparison/export")
+def api_operation_history_comparison_export(
+    request: HistoryComparisonReq,
+    format: Literal["html"] = "html",
+):
+    """导出独立垂域对比分析 HTML 报告。"""
+    payload = _history_comparison_payload(request)
+    content = build_operation_report_html(payload["report"])
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    baseline_name = _download_stem(
+        str(payload.get("baseline_name") or "rich_content"),
+        "rich_content",
+    )
+    utf8_name = f"{baseline_name}_comparison_{timestamp}.html"
+    ascii_name = f"rich_content_comparison_{timestamp}.html"
+    return Response(
+        content,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+            ),
+        },
+    )
+
+
 @app.get("/api/eval/{task_id}/export")
 def api_export(task_id: str, format: str = "json"):
     task = peek_task(task_id, touch=False)  # 导出只读视图不驻留内存；touch=False：线程池端点不变异 TASKS
@@ -673,6 +769,28 @@ def api_export(task_id: str, format: str = "json"):
             media_type="application/zip",
             filename=f"{safe_name}_frames.zip",
             background=BackgroundTask(archive_path.unlink, missing_ok=True),
+        )
+
+    if format == "html":
+        try:
+            report = single_report(data)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        stem = _download_stem(
+            str(data.get("dataset_name") or f"eval_{task_id}"),
+            f"eval_{task_id}",
+        )
+        utf8_name = f"{stem}_report.html"
+        ascii_name = f"rich_content_report_{_download_stem(task_id, 'task')[:8]}.html"
+        return Response(
+            build_operation_report_html(report),
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{quote(utf8_name, safe='')}"
+                ),
+            },
         )
 
     sheets = export_rows(data)
@@ -762,6 +880,11 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.mount(
+    "/report-assets",
+    StaticFiles(directory=str(OPERATION_REPORT_ASSETS)),
+    name="report-assets",
+)
 
 
 if __name__ == "__main__":
