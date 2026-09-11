@@ -271,6 +271,9 @@ async def run_rerun(
         "base_status": base_status,
         "started_at": started_at,
         "judge_backend": dict(pending_attempt.get("judge_backend") or {}),
+        "request_rate_limit": dict(
+            pending_attempt.get("request_rate_limit") or {}
+        ),
         "items": [],
     }
     task.active_rerun = attempt

@@ -73,7 +73,7 @@ def report_case(row: dict[str, Any]) -> dict[str, Any]:
 
 def build_single_report(batch: dict[str, Any], statistics: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "single",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dataset_name": batch.get("dataset_name") or "",
@@ -103,8 +103,10 @@ def build_comparison_report(
     ]
     pair_fields = (
         "baseline_task_id", "target_task_id", "baseline_label", "target_label",
-        "matched_count", "valid_pair_count", "baseline_ok_count", "baseline_ok_rate",
-        "target_ok_count", "target_ok_rate", "ok_rate_delta", "ok_rate_change",
+        "matched_count", "valid_pair_count", "baseline_ok_count", "baseline_nok_count",
+        "baseline_rate_denominator", "baseline_ok_rate", "baseline_nok_rate",
+        "target_ok_count", "target_nok_count", "target_rate_denominator",
+        "target_ok_rate", "target_nok_rate", "ok_rate_delta", "ok_rate_change",
         "ok_rate_change_label", "to_ok_count", "from_ok_count", "net_ok_change",
         "issue_type_rows", "conclusion",
     )
@@ -123,7 +125,7 @@ def build_comparison_report(
             "matches": valid_matches,
         })
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "comparison",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "baseline_task_id": comparison["baseline_task_id"],

@@ -48,6 +48,14 @@ def _snapshot(project: Path) -> dict:
                     "query": "打开设置",
                     "分享链接": "https://example.test/1",
                     "video_path": "data/videos/one.mp4",
+                    "video_url_domain": "https://video.example.test/one.mp4",
+                    "video_url_ip": "http://192.0.2.10/one.mp4",
+                    "attachment_path": "/datasets/images/one.png",
+                    "attachment_url_domain": "https://image.example.test/one.png",
+                    "attachment_url_ip": "http://192.0.2.11/one.png",
+                    "耗时": 4.5,
+                    "context": "设置页已打开",
+                    "answer": "已打开设置",
                     "custom_field": "kept",
                 },
                 "video_path": str(video_1),
@@ -110,12 +118,15 @@ def _snapshot(project: Path) -> dict:
                 ],
                 "route_rationale": "先快系统后 skill。",
                 "issue_types": [],
+                "is_low_level": "no",
                 "total": 5,
                 "rubric": {"操作完成度": 5, "步骤正确性": 4},
                 "rubric_reasons": {
                     "操作完成度": "已打开设置",
                     "步骤正确性": "路径正确",
                 },
+                "rationale": "画面显示设置页已打开。",
+                "latency_s": 8.25,
             },
         ],
         "summary": {},
@@ -131,6 +142,53 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     monkeypatch.setattr(history, "PROJECT_ROOT", tmp_path)
 
     sheets = history.export_rows(snapshot)
+
+    assert list(sheets)[0] == "评估结果"
+    user_results = sheets["评估结果"]
+    assert list(user_results[0]) == list(history._OPERATION_USER_RESULT_COLUMNS)
+    assert list(user_results[0]) == [
+        "数据集序号",
+        "item_id",
+        "index",
+        "session_id",
+        "query",
+        "context",
+        "attachment_path",
+        "attachment_url_domain",
+        "attachment_url_ip",
+        "answer",
+        "correctness",
+        "issue_types",
+        "rationale",
+        "is_low_level",
+        "total",
+        "维度_操作完成度",
+        "理由_操作完成度",
+        "维度_步骤正确性",
+        "理由_步骤正确性",
+        "latency_s",
+        "分享链接",
+        "video_path",
+        "video_url_domain",
+        "video_url_ip",
+        "录屏时长",
+    ]
+    assert user_results[0]["session_id"] == "session-001"
+    assert user_results[0]["context"] == "设置页已打开"
+    assert user_results[0]["attachment_path"] == "/datasets/images/one.png"
+    assert user_results[0]["attachment_url_domain"] == "https://image.example.test/one.png"
+    assert user_results[0]["attachment_url_ip"] == "http://192.0.2.11/one.png"
+    assert user_results[0]["answer"] == "已打开设置"
+    assert user_results[0]["correctness"] == "ok"
+    assert user_results[0]["issue_types"] == ""
+    assert user_results[0]["rationale"] == "画面显示设置页已打开。"
+    assert user_results[0]["is_low_level"] == "no"
+    assert user_results[0]["latency_s"] == 8.25
+    assert user_results[0]["video_url_domain"] == "https://video.example.test/one.mp4"
+    assert user_results[0]["video_url_ip"] == "http://192.0.2.10/one.mp4"
+    assert user_results[0]["录屏时长"] == 4.5
+    assert user_results[1]["correctness"] == ""
+    assert user_results[2]["correctness"] == ""
 
     dataset = sheets["数据集明细"]
     assert len(dataset) == 3
@@ -187,6 +245,7 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     assert frames[-1]["抽帧状态"] == "无抽帧结果"
 
     assert set(sheets) == {
+        "评估结果",
         "数据集明细",
         "逐题结果",
         "抽帧清单",
@@ -216,6 +275,15 @@ def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
     workbook_path.write_bytes(content)
 
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook.sheetnames[0] == "评估结果"
+    result_sheet = workbook["评估结果"]
+    assert result_sheet.freeze_panes is None
+    assert result_sheet.auto_filter.ref == "A1:Y4"
+    assert result_sheet.sheet_view.showGridLines is None
+    assert result_sheet["A1"].fill.patternType is None
+    assert result_sheet["A1"].alignment.wrap_text is None
+    assert result_sheet["A2"].fill.patternType is None
+    assert result_sheet["A2"].alignment.wrap_text is None
     assert "统计分布" in workbook.sheetnames
     sheet = workbook["统计分布"]
     values = [
@@ -227,7 +295,7 @@ def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
     assert ["Issue Type 分布", None, None] in values
     assert any(row[0] == "统计结论" for row in values)
     assert any(
-        row[0] == "OK 率（有效评估口径）" and row[1] == "100.00%"
+        row[0] == "OK 率（OK+NOK 口径）" and row[1] == "100.00%"
         for row in values
     )
 
@@ -243,11 +311,12 @@ def test_operation_statistics_api_returns_excel_source_json(
     response = server.api_operation_statistics("task-1")
     payload = json.loads(response.body)
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["task_id"] == "task-1"
     assert payload["dataset_name"] == "operation_cases.jsonl"
     assert payload["statistics"]["valid_count"] == 1
     assert payload["statistics"]["ok_rate"] == 1.0
+    assert payload["statistics"]["nok_rate"] == 0.0
     assert [
         row["correctness"]
         for row in payload["statistics"]["correctness_rows"]

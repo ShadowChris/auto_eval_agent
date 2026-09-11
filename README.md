@@ -4,6 +4,8 @@
 
 盲评 + 多裁判 + 元评测的 LLM 评测框架。支持批量批跑待评测 agent 与竞品（如豆包），对**混合评测集**（有/无参考答案）做盲评，并用参考答案在最后**校验评测 agent 本身**的可靠性。
 
+Web 评估台在通用问答链路之外还提供任务类录屏和垂域视觉评测。并非每个模式都启用全部机制：任务类当前固定使用终端用户单裁判，不运行多裁判聚合或元评测。
+
 ## 三条核心设计原则
 
 1. **盲评**：被测模型只拿 `question+context`（绝不传参考答案）；裁判也不接收参考答案，靠 rubric + 多裁判 + 联网检索独立判断。
@@ -45,7 +47,7 @@ cp .env.example .env                 # 填入 PROXY_API_KEY / TAVILY_API_KEY 等
 
 ## 启动与终止
 
-> 本项目**前后端一体**：FastAPI 后端同时托管前端页面（[web/static](src/auto_eval/web/static/)，Vue3 CDN、**无需构建**）。**启动 web 服务 = 前后端都起来了**，浏览器访问即可，没有独立的前端启动步骤。
+> 本项目**前后端一体**：FastAPI 后端同时托管前端页面（[web/static](src/auto_eval/web/static/)，Vue 3 CDN、**无需构建**）。**启动 Web 服务 = 前后端都起来了**，浏览器访问即可，没有独立的前端启动步骤。
 
 ### 方式 A：Web 评估台（推荐，有界面）
 
@@ -57,9 +59,9 @@ $env:PYTHONPATH="D:\workspace\quick_test\auto_eval_agent\src"
 python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502
 ```
 
-看到 `Uvicorn running on http://0.0.0.0:8501` 后，浏览器打开 **http://localhost:8501** 。
+看到 `Uvicorn running on http://0.0.0.0:8502` 后，浏览器打开 **http://localhost:8502** 。也可用 `--port <端口>` 覆盖端口，例如 `python -m uvicorn auto_eval.web.server:app --port 9000`。
 
-界面支持多种模式（Tab 切换），包括垂域问答类、两回答对比、接模型在线评估、过程盲评和任务类（录屏）等；粘贴（`|||` 分隔）或上传 jsonl 批量输入，SSE 实时出结果，可导出 CSV/JSON。
+界面支持垂域问答、回答对比、在线评估、过程盲评、任务类录屏、垂域视觉识别和垂域视觉综合评测等模式；粘贴文本或上传数据集后可预览，SSE 实时出结果，并支持历史、统计及多格式导出。任务类当前固定使用终端用户单裁判；其他问答模式仍可选择多个裁判。
 
 评估配置中的“裁判模型服务”支持保存和切换 OpenAI 兼容 Provider、Base URL、
 模型列表及 API Key。选择“跟随裁判角色默认配置”时继续使用
@@ -67,6 +69,8 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502
 判断统一使用对应模型。Provider 配置保存在忽略目录 `runs/web_settings/`，API Key
 加密存储且不会进入历史、导出或调用日志。服务器部署建议在 `.env` 固定设置
 `AUTO_EVAL_CREDENTIAL_KEY`，避免迁移时丢失自动生成的本机加密密钥。
+每个 Provider 可配置请求次数和时间窗口，评估或重跑时也可覆盖；默认每 1 秒最多 9 次，
+同一服务进程内按 Provider/API 作用域平滑共享限速。
 
 **终止**：在该终端按 `Ctrl+C`。
 
@@ -105,7 +109,7 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502
 - `meta/` 元评测（客观真值 + 裁判校准）
 - `analysis/` 聚合 / 对比 / case 挖掘 / 优化建议
 - `report/` A 对比报告 + B 可靠性报告
-- `cli.py` 命令行入口｜`web/` 前端评估台（FastAPI + Vue3）
+- `cli.py` 命令行入口｜`web/` 前端评估台（FastAPI + Vue 3 CDN）
 
 ## 需要你补充的输入
 

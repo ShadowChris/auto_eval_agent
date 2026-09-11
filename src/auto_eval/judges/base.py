@@ -211,6 +211,11 @@ class JudgeClient:
             read_timeout_s=cfg.read_timeout_s,
         )
         self.model = cfg.model or cfg.name
+        self.rate_limit_key = (
+            cfg.rate_limit_key
+            or (f"provider:{cfg.provider_id}" if cfg.provider_id else "")
+            or f"endpoint:{cfg.base_url.rstrip('/')}|credential:{cfg.api_key_env or 'default'}"
+        )
         self.persona = persona_text(cfg.persona)
         self.max_rounds = max_rounds
         # 显式 trace_path 保持精确文件语义；目录配置按任务分文件。
@@ -580,6 +585,9 @@ class JudgeClient:
             max_attempts=max_attempts or self.cfg.max_attempts,
             retry_base_s=self.cfg.retry_base_s,
             retry_max_s=self.cfg.retry_max_s,
+            rate_limit_key=self.rate_limit_key,
+            rate_limit_max_requests=self.cfg.rate_limit_requests,
+            rate_limit_window_s=self.cfg.rate_limit_window_s,
         )
 
     async def _exec_tool_async(self, name: str, args: dict) -> tuple[str, str]:

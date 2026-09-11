@@ -137,6 +137,42 @@ async def test_stream_retry_discards_partial_callback_output():
 
 
 @pytest.mark.asyncio
+async def test_stream_rate_limits_every_retry(monkeypatch):
+    acquired = []
+
+    async def fake_acquire(scope_key, *, max_requests, window_seconds):
+        acquired.append((scope_key, max_requests, window_seconds))
+        return 0.0
+
+    monkeypatch.setattr(
+        "auto_eval.llm_stream.acquire_request_slot",
+        fake_acquire,
+    )
+    client, completions = _client(
+        [
+            [httpx.RemoteProtocolError("peer closed")],
+            [_chunk("完成", finish="stop")],
+        ]
+    )
+
+    response = await stream_chat_completion(
+        client,
+        {"model": "fake-model", "messages": []},
+        max_attempts=2,
+        retry_base_s=0,
+        rate_limit_key="provider:test",
+        rate_limit_max_requests=9,
+        rate_limit_window_s=1.0,
+    )
+
+    assert response.choices[0].message.content == "完成"
+    assert acquired == [
+        ("provider:test", 9, 1.0),
+        ("provider:test", 9, 1.0),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_total_timeout():
     completions = FakeCompletions([])
 

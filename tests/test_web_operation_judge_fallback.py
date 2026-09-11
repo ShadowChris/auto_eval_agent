@@ -31,6 +31,11 @@ def test_operation_api_defaults_to_terminal_user_judge() -> None:
 
     assert options["judges"] == ["judge_2"]
     assert options["concurrency"] == 8
+    assert options["request_rate_limit"] == {
+        "max_requests": 9,
+        "window_seconds": 1.0,
+        "strategy": "smooth",
+    }
 
 
 def test_operation_api_ignores_explicit_judge_selection() -> None:

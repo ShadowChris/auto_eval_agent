@@ -1,6 +1,6 @@
 """FastAPI 后端：路由 + SSE 实时流 + 静态前端挂载。
 
-启动：python -m auto_eval.web.server  （默认 http://localhost:8501）
+启动：python -m auto_eval.web.server  （默认 http://localhost:8502）
 """
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import asyncio
 from copy import deepcopy
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -226,6 +227,7 @@ class OperationComparisonAnalyzeReq(BaseModel):
 class RerunReq(BaseModel):
     item_indices: list[int]
     judge_backend: dict | None = None
+    request_rate_limit: dict | None = None
 
 
 class DatasetItemsActionReq(BaseModel):
@@ -252,34 +254,76 @@ def _llm_provider_store() -> LLMProviderStore:
     return LLMProviderStore(RUNS_DIR / "web_settings")
 
 
+def _normalize_request_rate_limit(
+    value,
+    *,
+    default_requests: int = 9,
+    default_window_s: float = 1.0,
+) -> dict:
+    raw = value if isinstance(value, dict) else {}
+    try:
+        max_requests_number = float(raw.get("max_requests", default_requests))
+        window_seconds = float(raw.get("window_seconds", default_window_s))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("模型请求限速必须是有效数字") from exc
+    if not math.isfinite(max_requests_number) or not max_requests_number.is_integer():
+        raise ValueError("模型请求限速次数必须是整数")
+    max_requests = int(max_requests_number)
+    if not math.isfinite(window_seconds):
+        raise ValueError("模型请求限速时间窗口必须是有效数字")
+    if not 1 <= max_requests <= 10_000:
+        raise ValueError("模型请求限速次数必须在 1–10000 之间")
+    if not 0.1 <= window_seconds <= 3_600:
+        raise ValueError("模型请求限速时间窗口必须在 0.1–3600 秒之间")
+    return {
+        "max_requests": max_requests,
+        "window_seconds": window_seconds,
+        "strategy": "smooth",
+    }
+
+
 def _runtime_config_for_options(app_cfg, options: dict):
     """按任务快照构造隔离配置；绝不修改进程共享的 AppConfig。"""
     backend = options.get("judge_backend") or {}
     provider_id = str(backend.get("provider_id") or "").strip()
-    if not provider_id:
+    resolution = (
+        _llm_provider_store().resolve(
+            provider_id,
+            str(backend.get("model") or ""),
+            app_cfg,
+            base_url_snapshot=str(backend.get("base_url_snapshot") or ""),
+        )
+        if provider_id else None
+    )
+    if resolution is None and "request_rate_limit" not in options:
         return app_cfg
-    resolution = _llm_provider_store().resolve(
-        provider_id,
-        str(backend.get("model") or ""),
-        app_cfg,
-        base_url_snapshot=str(backend.get("base_url_snapshot") or ""),
+    rate_limit = _normalize_request_rate_limit(
+        options.get("request_rate_limit"),
+        default_requests=(resolution.rate_limit_requests if resolution else 9),
+        default_window_s=(resolution.rate_limit_window_s if resolution else 1.0),
     )
-    provider_name = str(backend.get("provider_name") or resolution.name)
-    provider_revision = str(
-        backend.get("provider_revision") or resolution.revision
-    )
-    judges = [
-        judge.model_copy(update={
-            "base_url": resolution.base_url,
-            "model": resolution.model,
-            "api_key_env": None,
-            "api_key_value": resolution.api_key,
-            "provider_id": resolution.id,
-            "provider_name": provider_name,
-            "provider_revision": provider_revision,
-        })
-        for judge in app_cfg.judges
-    ]
+    judges = []
+    for judge in app_cfg.judges:
+        update = {
+            "rate_limit_requests": rate_limit["max_requests"],
+            "rate_limit_window_s": rate_limit["window_seconds"],
+        }
+        if resolution is not None:
+            update.update({
+                "base_url": resolution.base_url,
+                "model": resolution.model,
+                "api_key_env": None,
+                "api_key_value": resolution.api_key,
+                "provider_id": resolution.id,
+                "provider_name": str(backend.get("provider_name") or resolution.name),
+                "provider_revision": str(
+                    backend.get("provider_revision") or resolution.revision
+                ),
+                "rate_limit_key": f"provider:{resolution.id}",
+            })
+        judges.append(judge.model_copy(update=update))
+    if resolution is None:
+        return app_cfg.model_copy(update={"judges": judges})
     eval_options = app_cfg.eval_options.model_copy(update={
         "classify_model": resolution.model,
         "classify_base_url": resolution.base_url,
@@ -298,7 +342,12 @@ def _normalize_eval_options(app_cfg, options: dict) -> tuple[dict, object]:
     provider_id = str(backend.get("provider_id") or "").strip()
     if not provider_id:
         normalized.pop("judge_backend", None)
-        return normalized, app_cfg
+        if "request_rate_limit" not in normalized:
+            return normalized, app_cfg
+        normalized["request_rate_limit"] = _normalize_request_rate_limit(
+            normalized.get("request_rate_limit"),
+        )
+        return normalized, _runtime_config_for_options(app_cfg, normalized)
     resolution = _llm_provider_store().resolve(
         provider_id,
         str(backend.get("model") or ""),
@@ -312,6 +361,11 @@ def _normalize_eval_options(app_cfg, options: dict) -> tuple[dict, object]:
         "provider_revision": resolution.revision,
         "builtin": resolution.builtin,
     }
+    normalized["request_rate_limit"] = _normalize_request_rate_limit(
+        normalized.get("request_rate_limit"),
+        default_requests=resolution.rate_limit_requests,
+        default_window_s=resolution.rate_limit_window_s,
+    )
     return normalized, _runtime_config_for_options(app_cfg, normalized)
 
 
@@ -383,6 +437,11 @@ def _with_operation_eval_persona(app_cfg, mode: Mode, options: dict) -> dict:
     if mode == "operation":
         normalized["judges"] = [_terminal_user_judge_name(app_cfg)]
         normalized.setdefault("concurrency", 8)
+        normalized.setdefault("request_rate_limit", {
+            "max_requests": 9,
+            "window_seconds": 1.0,
+            "strategy": "smooth",
+        })
     return normalized
 
 
@@ -892,6 +951,9 @@ async def api_llm_provider_test(provider_id: str, req: ProviderTestReq):
             include_usage=False,
             total_timeout_s=30,
             max_attempts=1,
+            rate_limit_key=f"provider:{provider.id}",
+            rate_limit_max_requests=provider.rate_limit_requests,
+            rate_limit_window_s=provider.rate_limit_window_s,
         )
         answer = str(response.choices[0].message.content or "").strip()
     except Exception as exc:
@@ -1117,7 +1179,10 @@ async def api_eval(req: EvalReq):
         ):
             raise HTTPException(409, "目标历史评估集仍有单题任务在执行")
         append_options = dict(append_task.options or {})
-        for key in ("concurrency", "eval_timeout_s", "eval_timeout"):
+        for key in (
+            "concurrency", "eval_timeout_s", "eval_timeout",
+            "request_rate_limit",
+        ):
             if key in req.options:
                 append_options[key] = req.options[key]
         requested_options = _with_operation_eval_persona(
@@ -1447,6 +1512,9 @@ async def api_eval(req: EvalReq):
             "base_status": previous_state["status"],
             "base_error": previous_state["error"],
             "judge_backend": dict(task_options.get("judge_backend") or {}),
+            "request_rate_limit": dict(
+                task_options.get("request_rate_limit") or {}
+            ),
             "concurrency": task_options.get("concurrency"),
             "eval_timeout_s": (
                 task_options.get("eval_timeout_s")
@@ -2589,6 +2657,11 @@ async def api_eval_rerun(task_id: str, req: RerunReq):
             rerun_options["judge_backend"] = req.judge_backend
         else:
             rerun_options.pop("judge_backend", None)
+    if "request_rate_limit" in req.model_fields_set:
+        if req.request_rate_limit:
+            rerun_options["request_rate_limit"] = req.request_rate_limit
+        else:
+            rerun_options.pop("request_rate_limit", None)
     try:
         normalized_rerun_options, runtime_cfg = _normalize_eval_options(
             cfg(),
@@ -2613,6 +2686,9 @@ async def api_eval_rerun(task_id: str, req: RerunReq):
         "base_status": base_status,
         "started_at": datetime.now().timestamp(),
         "judge_backend": rerun_backend,
+        "request_rate_limit": dict(
+            normalized_rerun_options.get("request_rate_limit") or {}
+        ),
         "items": [],
     }
     save_task(task)
@@ -2632,6 +2708,7 @@ async def api_eval_rerun(task_id: str, req: RerunReq):
         "status": task.status,
         "item_indices": indices,
         "judge_backend": rerun_backend,
+        "request_rate_limit": normalized_rerun_options.get("request_rate_limit") or {},
     }
 
 

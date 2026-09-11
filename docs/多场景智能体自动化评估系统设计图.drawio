@@ -126,7 +126,7 @@
         <mxCell id="t4" parent="task_lane" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEDD5;strokeColor=#EA580C;strokeWidth=2;fontSize=13;" value="④ 视觉输入组装&lt;br&gt;Query + Context + 自述&lt;br&gt;按时间排序的多张图片" vertex="1">
           <mxGeometry height="82" width="225" x="270" y="175" as="geometry" />
         </mxCell>
-        <mxCell id="t_judge" parent="task_lane" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE9FE;strokeColor=#7C3AED;strokeWidth=2;fontSize=13;fontStyle=1;" value="⑤ 终端用户单视觉裁判（end_user）&lt;br&gt;依据 operation 评分标准判断目标完成、操作过程与最终状态；证据不足可输出 unclear" vertex="1">
+        <mxCell id="t_judge" parent="task_lane" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE9FE;strokeColor=#7C3AED;strokeWidth=2;fontSize=13;fontStyle=1;" value="⑤ 终端用户单视觉裁判（end_user）&lt;br&gt;依据 operation 评分标准判断目标完成、操作过程与最终状态；证据不足判 others" vertex="1">
           <mxGeometry height="82" width="225" x="20" y="175" as="geometry" />
         </mxCell>
         <mxCell id="t_result" parent="task_lane" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCFCE7;strokeColor=#16A34A;strokeWidth=2;fontSize=13;" value="任务类单题结果&lt;br&gt;操作完成度 · 步骤正确性 · correctness · total · rationale · 视觉证据" vertex="1">

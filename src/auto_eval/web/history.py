@@ -447,6 +447,14 @@ def _judge_backend_summary(snapshot: dict) -> dict[str, str]:
     }
 
 
+def _request_rate_limit_summary(snapshot: dict) -> dict[str, int | float | str]:
+    rate_limit = (snapshot.get("options") or {}).get("request_rate_limit") or {}
+    return {
+        "rate_limit_requests": rate_limit.get("max_requests", ""),
+        "rate_limit_window_s": rate_limit.get("window_seconds", ""),
+    }
+
+
 def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
     data = _with_operation_compat(data)
     items = data.get("items") or []
@@ -593,6 +601,7 @@ def _jsonl_eval_run(snapshot: dict) -> dict:
         "model": options.get("model") or "",
         **_judge_backend_summary(snapshot),
         "concurrency": options.get("concurrency"),
+        **_request_rate_limit_summary(snapshot),
         "eval_timeout_s": options.get("eval_timeout_s"),
         "rerun_count": len(snapshot.get("rerun_history") or []),
         "append_count": len(snapshot.get("append_history") or []),
@@ -899,11 +908,19 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
             rows["多组对照"] = _operation_multi_comparison_rows(snapshot)
             rows["逐题结果"] = _operation_multi_result_rows(snapshot)
         else:
-            rows["逐题结果"] = _operation_export_rows(
+            operation_result_rows = _operation_export_rows(
                 aligned_results,
                 snapshot.get("items") or [],
                 dataset_name=str(snapshot.get("dataset_name") or ""),
             )
+            rows["逐题结果"] = operation_result_rows
+            rows = {
+                "评估结果": _operation_user_result_rows(
+                    operation_result_rows,
+                    snapshot.get("items") or [],
+                ),
+                **rows,
+            }
     frame_rows = _frame_manifest_rows(
         snapshot,
         include_original_video=mode != "operation",
@@ -1082,6 +1099,35 @@ _OPERATION_EXPORT_COLUMNS = (
     "video_prepare_warnings",
 )
 
+# 普通任务类 Excel 的首个 Sheet：只呈现用户最常用的输入、媒体与评估字段。
+_OPERATION_USER_RESULT_COLUMNS = (
+    "数据集序号",
+    "item_id",
+    "index",
+    "session_id",
+    "query",
+    "context",
+    "attachment_path",
+    "attachment_url_domain",
+    "attachment_url_ip",
+    "answer",
+    "correctness",
+    "issue_types",
+    "rationale",
+    "is_low_level",
+    "total",
+    "维度_操作完成度",
+    "理由_操作完成度",
+    "维度_步骤正确性",
+    "理由_步骤正确性",
+    "latency_s",
+    "分享链接",
+    "video_path",
+    "video_url_domain",
+    "video_url_ip",
+    "录屏时长",
+)
+
 _OPERATION_ROUTE_DISPLAY = {
     "fast_system": "快系统",
     "skill": "skill",
@@ -1211,6 +1257,118 @@ def _operation_export_rows(
             )
         export.append({key: values[key] for key in _OPERATION_EXPORT_COLUMNS})
     return export
+
+
+def _first_export_value(*values: Any) -> Any:
+    """选择第一个非空导出值，同时保留 0 和 False。"""
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return ""
+
+
+def _operation_user_result_rows(
+    result_rows: list[dict],
+    items: list[dict],
+) -> list[dict]:
+    """生成面向用户的普通任务类“评估结果”表。"""
+    rows: list[dict] = []
+    for position, result in enumerate(result_rows):
+        try:
+            item_index = int(result.get("数据集序号", position + 1)) - 1
+        except (TypeError, ValueError):
+            item_index = position
+        item = items[item_index] if 0 <= item_index < len(items) else {}
+        source = _source_data_for_item(item)
+
+        issue_types = _first_export_value(
+            result.get("issue_types"),
+            source.get("issue_types"),
+            source.get("issue_type"),
+        )
+        if isinstance(issue_types, (list, tuple, set)):
+            issue_types = "；".join(str(value) for value in issue_types)
+
+        values = {
+            "数据集序号": result.get("数据集序号", position + 1),
+            "item_id": result.get("item_id") or item.get("id") or f"q{position}",
+            "index": _first_export_value(result.get("index"), source.get("index")),
+            "session_id": _first_export_value(
+                source.get("session_id"),
+                source.get("sessionid"),
+                source.get("sessionId"),
+                result.get("sessionid"),
+            ),
+            "query": _first_export_value(
+                result.get("query"),
+                source.get("query"),
+                item.get("query"),
+                item.get("question"),
+            ),
+            "context": _first_export_value(
+                result.get("context"), source.get("context"), item.get("context")
+            ),
+            "attachment_path": _first_export_value(
+                result.get("attachment_path"), source.get("attachment_path")
+            ),
+            "attachment_url_domain": _first_export_value(
+                result.get("attachment_url_domain"),
+                source.get("attachment_url_domain"),
+            ),
+            "attachment_url_ip": _first_export_value(
+                result.get("attachment_url_ip"), source.get("attachment_url_ip")
+            ),
+            "answer": _first_export_value(
+                result.get("answer"), source.get("answer"), item.get("answer")
+            ),
+            "correctness": _first_export_value(
+                result.get("correctness"), source.get("correctness")
+            ),
+            "issue_types": issue_types,
+            "rationale": _first_export_value(
+                result.get("rationale"), source.get("rationale")
+            ),
+            "is_low_level": _first_export_value(
+                result.get("is_low_level"), source.get("is_low_level")
+            ),
+            "total": _first_export_value(result.get("total"), source.get("total")),
+            "维度_操作完成度": _first_export_value(
+                result.get("维度_操作完成度"), source.get("维度_操作完成度")
+            ),
+            "理由_操作完成度": _first_export_value(
+                result.get("理由_操作完成度"), source.get("理由_操作完成度")
+            ),
+            "维度_步骤正确性": _first_export_value(
+                result.get("维度_步骤正确性"), source.get("维度_步骤正确性")
+            ),
+            "理由_步骤正确性": _first_export_value(
+                result.get("理由_步骤正确性"), source.get("理由_步骤正确性")
+            ),
+            "latency_s": _first_export_value(
+                result.get("latency_s"), source.get("latency_s")
+            ),
+            "分享链接": _first_export_value(
+                result.get("分享链接"), source.get("分享链接")
+            ),
+            "video_path": _first_export_value(
+                result.get("video_path"), source.get("video_path")
+            ),
+            "video_url_domain": _first_export_value(
+                result.get("video_url_domain"), source.get("video_url_domain")
+            ),
+            "video_url_ip": _first_export_value(
+                result.get("video_url_ip"), source.get("video_url_ip")
+            ),
+            "录屏时长": _first_export_value(
+                source.get("耗时"),
+                source.get("录屏时长"),
+                source.get("录屏时长（秒）"),
+                source.get("duration"),
+                item.get("duration"),
+            ),
+        }
+        rows.append({key: values[key] for key in _OPERATION_USER_RESULT_COLUMNS})
+    return rows
 
 
 def _operation_multi_case_results(snapshot: dict) -> dict[int, dict]:
@@ -1684,6 +1842,7 @@ def _rerun_record_rows(snapshot: dict) -> list[dict]:
     rows: list[dict] = []
     for attempt in snapshot.get("rerun_history") or []:
         attempt_backend = attempt.get("judge_backend") or {}
+        attempt_rate_limit = attempt.get("request_rate_limit") or {}
         detail_by_index = {
             int(detail["index"]): detail
             for detail in (attempt.get("items") or [])
@@ -1714,6 +1873,8 @@ def _rerun_record_rows(snapshot: dict) -> list[dict]:
                 "Provider ID": detail.get("judge_provider_id") or attempt_backend.get("provider_id") or "",
                 "模型": detail.get("judge_model") or attempt_backend.get("model") or "",
                 "Provider版本": detail.get("judge_provider_revision") or attempt_backend.get("provider_revision") or "",
+                "限速请求数": attempt_rate_limit.get("max_requests", ""),
+                "限速窗口（秒）": attempt_rate_limit.get("window_seconds", ""),
                 "开始时间": _format_ts(attempt.get("started_at")),
                 "完成时间": _format_ts(detail.get("finished_at") or attempt.get("finished_at")),
                 "批次耗时（秒）": attempt.get("duration_s", ""),
@@ -1727,6 +1888,7 @@ def _append_record_rows(snapshot: dict) -> list[dict]:
     rows: list[dict] = []
     for attempt in snapshot.get("append_history") or []:
         backend = attempt.get("judge_backend") or {}
+        rate_limit = attempt.get("request_rate_limit") or {}
         rows.append({
             "追加批次": attempt.get("segment_no", ""),
             "append_id": attempt.get("append_id", ""),
@@ -1745,6 +1907,8 @@ def _append_record_rows(snapshot: dict) -> list[dict]:
             "Provider ID": backend.get("provider_id") or "",
             "模型": backend.get("model") or "",
             "Provider版本": backend.get("provider_revision") or "",
+            "限速请求数": rate_limit.get("max_requests", ""),
+            "限速窗口（秒）": rate_limit.get("window_seconds", ""),
             "并发": attempt.get("concurrency", ""),
             "单题超时（秒）": attempt.get("eval_timeout_s", ""),
             "开始时间": _format_ts(attempt.get("started_at")),
@@ -1854,6 +2018,7 @@ def _operation_run_summary(snapshot: dict) -> dict:
         "model": options.get("model") or "",
         **_judge_backend_summary(snapshot),
         "concurrency": options.get("concurrency", ""),
+        **_request_rate_limit_summary(snapshot),
         "eval_timeout_s": options.get("eval_timeout_s", ""),
         "total": summary.get("total", total),
         "done": summary.get("done", done),
@@ -1881,7 +2046,7 @@ def operation_statistics_payload(snapshot: dict) -> dict:
     results = _results_with_identity(normalized)
     aligned = _aligned_results(normalized, results)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "task_id": normalized.get("task_id") or "",
         "dataset_name": normalized.get("dataset_name") or "",
         "mode": "operation",
@@ -2003,8 +2168,9 @@ def _operation_statistics_sheet(payload: dict) -> tuple[list[list[Any]], set[int
         ["评估失败数", statistics["failed_count"]],
         ["待评估数", statistics["pending_count"]],
         ["评估覆盖率", _display_percent(statistics["coverage_rate"])],
-        ["OK 率（有效评估口径）", _display_percent(statistics["ok_rate"])],
-        ["OK 率分母（有效评估数）", statistics["ok_rate_denominator"]],
+        ["OK 率（OK+NOK 口径）", _display_percent(statistics["ok_rate"])],
+        ["NOK 率（OK+NOK 口径）", _display_percent(statistics["nok_rate"])],
+        ["OK/NOK 率分母", statistics["rate_denominator"]],
         [],
         ["Correctness 分布"],
         ["判定", "频次", "占有效评估比例"],
@@ -2455,6 +2621,11 @@ def build_xlsx(snapshot: dict, cfg: Any | None = None) -> bytes:
                     bold_rows=bold_rows,
                     widths=widths,
                 )
+            elif name == "评估结果" and snapshot.get("mode") == "operation":
+                sheet_xml = _sheet_xml(
+                    rows,
+                    auto_filter=True,
+                )
             else:
                 sheet_xml = _sheet_xml(rows)
             zf.writestr(f"xl/worksheets/sheet{i}.xml", sheet_xml)
@@ -2470,12 +2641,13 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             "统计口径",
             "Correctness 与 Issue Type 仅统计所有选中批次共有且均有效的 Case；"
             "相对对照组表按每个实验组与对照组各自的共同有效 Case 计算；"
+            "OK/NOK 率统一以各组 ok+nok 为分母；"
             "“其他”表示 nok、no_support 或 others。",
         ],
         ["全组共同 Case", payload.get("all_groups_common_matched_count", 0)],
         ["全组共同有效 Case", payload.get("all_groups_common_valid_count", 0)],
         [],
-        ["组别", "数据集", "task_id", "原始数据量", "共有有效数据量", "ok", "nok", "no_support", "others", "OK率"],
+        ["组别", "数据集", "task_id", "原始数据量", "共有有效数据量", "ok", "nok", "no_support", "others", "OK率", "NOK率", "率分母"],
     ]
     for group in groups:
         statistics = group.get("statistics") or {}
@@ -2494,6 +2666,8 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             correctness.get("no_support", 0),
             correctness.get("others", 0),
             _display_percent(statistics.get("ok_rate")),
+            _display_percent(statistics.get("nok_rate")),
+            statistics.get("rate_denominator", 0),
         ])
     group_header_row = 6
     group_data_start = group_header_row + 1
@@ -2502,7 +2676,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
     pair_section_row = len(overview) + 1
     overview.append(["相对对照组的共同 Case 对比"])
     pair_header_row = len(overview) + 1
-    overview.append(["对比关系", "共同 Case", "共同有效 Case", "对照组OK数", "对照组OK率", "实验组OK数", "实验组OK率", "其他→OK", "OK→其他", "OK净变化", "OK率差值", "结论"])
+    overview.append(["对比关系", "共同 Case", "共同有效 Case", "对照组OK数", "对照组NOK数", "对照组率分母", "对照组OK率", "对照组NOK率", "实验组OK数", "实验组NOK数", "实验组率分母", "实验组OK率", "实验组NOK率", "其他→OK", "OK→其他", "OK净变化", "OK率差值", "结论"])
     pair_data_start = pair_header_row + 1
     for pair in payload.get("pairwise") or []:
         overview.append([
@@ -2510,9 +2684,15 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             pair.get("matched_count", 0),
             pair.get("valid_pair_count", 0),
             pair.get("baseline_ok_count", 0),
+            pair.get("baseline_nok_count", 0),
+            pair.get("baseline_rate_denominator", 0),
             _display_percent(pair.get("baseline_ok_rate")),
+            _display_percent(pair.get("baseline_nok_rate")),
             pair.get("target_ok_count", 0),
+            pair.get("target_nok_count", 0),
+            pair.get("target_rate_denominator", 0),
             _display_percent(pair.get("target_ok_rate")),
+            _display_percent(pair.get("target_nok_rate")),
             pair.get("to_ok_count", 0),
             pair.get("from_ok_count", 0),
             pair.get("net_ok_change", 0),
@@ -2593,10 +2773,10 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         (4, 2): 3,
     }
     for row_index in range(group_data_start, group_data_end + 1):
-        for column_index in range(1, 11):
+        for column_index in range(1, 13):
             overview_cell_styles[(row_index, column_index)] = 3
     for row_index in range(pair_data_start, pair_data_end + 1):
-        for column_index in range(1, 13):
+        for column_index in range(1, 19):
             overview_cell_styles[(row_index, column_index)] = 3
     valid_group_rates = [
         (group.get("statistics") or {}).get("ok_rate")
@@ -2613,26 +2793,26 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         row_index = pair_data_start + offset
         change = pair.get("ok_rate_change")
         change_style = 4 if change == "improved" else 5 if change == "worsened" else 6
-        overview_cell_styles[(row_index, 11)] = change_style
-        overview_cell_styles[(row_index, 12)] = change_style
+        overview_cell_styles[(row_index, 17)] = change_style
+        overview_cell_styles[(row_index, 18)] = change_style
         net_change = int(pair.get("net_ok_change") or 0)
-        overview_cell_styles[(row_index, 10)] = (
+        overview_cell_styles[(row_index, 16)] = (
             4 if net_change > 0 else 5 if net_change < 0 else 6
         )
     overview_merges = [
-        "A1:L1",
-        "B2:L2",
-        f"A{pair_section_row}:L{pair_section_row}",
-        f"A{conclusion_header_row}:L{conclusion_header_row}",
+        "A1:R1",
+        "B2:R2",
+        f"A{pair_section_row}:R{pair_section_row}",
+        f"A{conclusion_header_row}:R{conclusion_header_row}",
     ]
     for row_index in range(conclusion_start, conclusion_start + len(conclusion_lines)):
         overview_cell_styles[(row_index, 1)] = 9
-        overview_merges.append(f"A{row_index}:L{row_index}")
+        overview_merges.append(f"A{row_index}:R{row_index}")
 
     sheets: list[tuple[str, str]] = [
         ("对比概览", _matrix_sheet_xml(
             overview,
-            widths=[22, 46, 22, 14, 16, 12, 12, 12, 14, 14, 14, 12],
+            widths=[22, 46, 22, 14, 16, 12, 12, 12, 14, 14, 14, 12, 14, 14, 14, 14, 14, 18],
             row_styles={
                 1: 7,
                 group_header_row: 2,

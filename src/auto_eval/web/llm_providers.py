@@ -33,6 +33,8 @@ class LLMProviderPayload(BaseModel):
     default_model: str = ""
     api_key: str | None = None
     enabled: bool = True
+    rate_limit_requests: int = Field(default=9, ge=1, le=10_000)
+    rate_limit_window_s: float = Field(default=1.0, ge=0.1, le=3_600)
 
     @field_validator("id")
     @classmethod
@@ -85,6 +87,8 @@ class ProviderResolution(BaseModel):
     api_key: str = Field(repr=False, exclude=True)
     revision: str
     builtin: bool = False
+    rate_limit_requests: int = 9
+    rate_limit_window_s: float = 1.0
 
 
 def _revision(data: dict[str, Any]) -> str:
@@ -167,13 +171,18 @@ class LLMProviderStore:
             "default_model": record.get("default_model") or "",
             "has_api_key": bool(record.get("has_api_key") or record.get("api_key_encrypted")),
             "enabled": bool(record.get("enabled", True)),
+            "rate_limit_requests": int(record.get("rate_limit_requests") or 9),
+            "rate_limit_window_s": float(record.get("rate_limit_window_s") or 1.0),
             "builtin": builtin,
             "created_at": record.get("created_at"),
             "updated_at": record.get("updated_at"),
         }
         public["revision"] = record.get("revision") or _revision({
             key: public[key]
-            for key in ("id", "name", "base_url", "models", "default_model", "enabled")
+            for key in (
+                "id", "name", "base_url", "models", "default_model", "enabled",
+                "rate_limit_requests", "rate_limit_window_s",
+            )
         })
         return public
 
@@ -208,6 +217,8 @@ class LLMProviderStore:
                     "default_model": model,
                     "has_api_key": False,
                     "enabled": True,
+                    "rate_limit_requests": judge.rate_limit_requests,
+                    "rate_limit_window_s": judge.rate_limit_window_s,
                     "api_key_env": api_key_env,
                     "aliases": [],
                     "_api_key": None,
@@ -227,7 +238,8 @@ class LLMProviderStore:
                 key: record[key]
                 for key in (
                     "id", "name", "base_url", "models", "default_model",
-                    "enabled", "api_key_env",
+                    "enabled", "api_key_env", "rate_limit_requests",
+                    "rate_limit_window_s",
                 )
             })
         return records
@@ -351,4 +363,6 @@ class LLMProviderStore:
             api_key=api_key,
             revision=str(record.get("revision") or _revision(record)),
             builtin=is_builtin,
+            rate_limit_requests=int(record.get("rate_limit_requests") or 9),
+            rate_limit_window_s=float(record.get("rate_limit_window_s") or 1.0),
         )

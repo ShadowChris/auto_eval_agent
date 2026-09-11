@@ -68,6 +68,9 @@ class JudgeConfig(BaseModel):
     enable_python: bool = False  # 允许裁判执行代码核查编程题（注意安全，默认关）
     temperature: float = 0.0
     concurrency: int = 4
+    rate_limit_requests: int = Field(default=9, ge=1, le=10_000)
+    rate_limit_window_s: float = Field(default=1.0, ge=0.1, le=3_600)
+    rate_limit_key: str | None = None
     connect_timeout_s: float = 10.0
     read_timeout_s: float = 90.0
     total_timeout_s: float = 180.0
