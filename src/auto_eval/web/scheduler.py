@@ -1,16 +1,18 @@
-"""全局调度：跨任务共享的两级并发限流 + 运行时设置（并发/等待容量/超时/裁判）。
+"""全局调度：跨任务共享的速率限流 + 预处理并发 + 运行时设置（速率/容量/超时/裁判）。
 
 两级闸门，获取顺序恒为 PIPELINE → MODEL，无反向嵌套：
-- PIPELINE_LIMITER（上限 = concurrency + waiting_capacity）：流水线准入，
-  调度单位是「整个 session 组」「单条独立题」或「一个更新批」——最多这么
-  多个评测单元处于准入后状态（预处理中 / 等模型槽 / 模型调用中），界定
-  「最多积累 waiting_capacity 个等待的评测」。
-- MODEL_LIMITER（上限 = concurrency）：模型调用级，单题在 one() 内进入
-  模型调用阶段时获取——视频预处理不占模型槽，模型并发始终跑满。组第 2+
-  轮 / 批第 2+ 条 priority=True 插到模型队列队头（组内轮次不被排到队尾）。
+- PIPELINE_LIMITER（上限 = waiting_capacity）：视频预处理并发闸，只在 one()
+  的视频抽帧期间持有，抽出即释放——不限制模型在途请求。已带 frames 的重跑
+  题不走预处理、不占槽。
+- MODEL_LIMITER（速率 = concurrency 令牌/秒，无在途上限）：模型调用级速率
+  限流，令牌桶——每秒至多发起 concurrency 次模型请求（含重试的每一次尝试），
+  申请到令牌即发出、不等待完成、不限制在途。组第 2+ 轮 / 批第 2+ 条首次
+  尝试 priority=True 插队头（组内轮次不被排到队尾）。
 
-并发、等待容量、单题超时与裁判由 GET/PUT /api/settings 全局管理，
-持久化到 runs/web_settings.json（runs/ 不入库，重启后加载）。
+速率（concurrency，每秒请求数）、预处理并发（waiting_capacity）、单题超时
+与裁判由 GET/PUT /api/settings 全局管理，持久化到 runs/web_settings.json
+（runs/ 不入库，重启后加载）。字段名保留 concurrency/waiting_capacity 仅语义
+改变（旧设置值兼容，无需迁移）。
 """
 from __future__ import annotations
 
@@ -30,8 +32,8 @@ from ..paths import RUNS_DIR
 logger = logging.getLogger(__name__)
 
 SETTINGS_PATH = RUNS_DIR / "web_settings.json"
-DEFAULT_CONCURRENCY = 10  # 模型限流 ~10 req/s 建模为模型调用级并发 10
-DEFAULT_WAITING_CAPACITY = 10  # 模型槽满时可继续做预处理的等待评测数
+DEFAULT_CONCURRENCY = 10  # 模型调用速率限流：每秒至多 10 次请求（不限制在途）
+DEFAULT_WAITING_CAPACITY = 10  # 视频预处理并发上限：同时抽帧的评测数
 DEFAULT_EVAL_TIMEOUT_S = 300.0
 MIN_CONCURRENCY, MAX_CONCURRENCY = 1, 64
 MIN_WAITING_CAPACITY, MAX_WAITING_CAPACITY = 0, 256
@@ -154,8 +156,126 @@ class _LimiterSlot:
         self._limiter.release()
 
 
-MODEL_LIMITER = ResizableLimiter(DEFAULT_CONCURRENCY)
-PIPELINE_LIMITER = ResizableLimiter(DEFAULT_CONCURRENCY + DEFAULT_WAITING_CAPACITY)
+class TokenBucketRateLimiter:
+    """模型调用级速率限流：令牌桶，每秒至多 `rate` 个令牌（突发 = rate）。
+
+    与 ResizableLimiter（并发槽）不同：acquire 申请到令牌即返回、**不占在途
+    容量**——每次实际模型请求（含重试）消耗一个每秒配额，发出后不等待完成、
+    在途无上限。release() 不恢复容量（速率是时间制而非占用制），仅维护展示
+    用在途计数。
+
+    实现：快路径直接消费存量令牌；无令牌时压入等待队列（priority=True 经
+    appendleft 插队头），后台 minter 协程按当前 rate 间隔喂令牌给队头等待者。
+    取消清理按 future 恒等出队，跨事件循环安全（等待 future 每次现取 running
+    loop 创建）。
+
+    set_rate 调大立即以新间隔放行；调小为软生效（已排队等待者按新 rate 重算
+    间隔）。release 幂等（在途计数不越界）。
+    """
+
+    def __init__(self, rate: int) -> None:
+        self._rate = max(1, int(rate))
+        self._tokens = float(self._rate)  # 突发 = rate；时间制，无持有
+        self._last: float | None = None  # 上次补币的 loop 时间戳（None=未初始化）
+        self._in_flight = 0  # 仅展示用在途计数，不是限制
+        self._waiters: deque[asyncio.Future] = deque()
+        self._minter: asyncio.Task | None = None
+
+    @property
+    def limit(self) -> int:
+        return self._rate
+
+    def stats(self) -> dict:
+        return {
+            "limit": self._rate,
+            "running": self._in_flight,
+            "queued": sum(1 for w in self._waiters if not w.done()),
+        }
+
+    def set_rate(self, rate: int) -> None:
+        new = max(1, int(rate))
+        if new != self._rate:
+            self._rate = new
+            self._ensure_minter()
+
+    def would_block(self) -> bool:
+        """现在 acquire 是否要等待令牌（供展示层决定是否发「等待」事件）。"""
+        return self._tokens < 1.0 or bool(self._waiters)
+
+    def _refill(self, now: float) -> None:
+        if self._last is None:
+            self._last = now  # 首次基线：只记录时间戳，不凭空补突发
+        elapsed = now - self._last
+        if elapsed > 0:
+            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
+        self._last = now
+
+    def _ensure_minter(self) -> None:
+        if self._waiters and (
+            self._minter is None or self._minter.done() or self._minter.cancelled()
+        ):
+            self._minter = asyncio.create_task(self._refill_loop())
+
+    async def acquire(self, *, priority: bool = False) -> None:
+        if not self._waiters and self._tokens >= 1.0:
+            # 快路径：存量令牌足够且无人排队，直接消费
+            self._tokens -= 1.0
+            self._in_flight += 1
+            return
+        fut = asyncio.get_running_loop().create_future()
+        if priority:
+            self._waiters.appendleft(fut)
+        else:
+            self._waiters.append(fut)
+        self._ensure_minter()
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.cancelled() or not fut.done():
+                # 从未取得令牌：仅出队（minter 也未喂，未计在途）
+                try:
+                    self._waiters.remove(fut)
+                except ValueError:
+                    pass
+            else:
+                # 竞态兜底：minter 已喂令牌但协程被取消——归还展示计数
+                self._in_flight = max(0, self._in_flight - 1)
+            raise
+
+    async def _refill_loop(self) -> None:
+        """把令牌按 rate 间隔喂给队头等待者；队列清空即退出。"""
+        while self._waiters:
+            now = asyncio.get_running_loop().time()
+            self._refill(now)
+            if self._tokens < 1.0:
+                await asyncio.sleep((1.0 - self._tokens) / self._rate)
+                continue  # 循环顶部重补币；rate/priority 可随后续请求变化
+            waiter = self._waiters.popleft()
+            if waiter.done():  # 已被取消清理的滞留者
+                continue
+            self._tokens -= 1.0
+            self._in_flight += 1
+            waiter.set_result(None)
+
+    def release(self) -> None:
+        # 速率制：token 已按时间恢复，release 不补回；只降展示计数
+        self._in_flight = max(0, self._in_flight - 1)
+
+    async def __aenter__(self) -> "TokenBucketRateLimiter":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.release()
+
+    def slot(self, *, priority: bool = False) -> "_LimiterSlot":
+        return _LimiterSlot(self, priority)
+
+
+MODEL_LIMITER: ResizableLimiter | TokenBucketRateLimiter = TokenBucketRateLimiter(
+    DEFAULT_CONCURRENCY
+)
+PIPELINE_LIMITER = ResizableLimiter(DEFAULT_WAITING_CAPACITY)
 
 _settings = RuntimeSettings()
 
@@ -173,22 +293,22 @@ def apply_settings(
 ) -> RuntimeSettings:
     """更新运行时设置并即时对齐限流器（越界值 clamp 到合法区间）。
 
-    任一参数单独变化都从 _settings 读对方现值重算 PIPELINE 上限
-    （= concurrency + waiting_capacity），避免两参非原子更新时出现
-    pipeline < model 的病态；waiting_capacity=0 是安全退化（无预取缓冲）。
+    concurrency = 模型调用速率（令牌/秒，无在途上限）→ MODEL_LIMITER.set_rate；
+    waiting_capacity = 视频预处理并发 → PIPELINE_LIMITER.set_limit。两参独立、
+    不再联动——模型在途不再受流水线闸门约束。waiting_capacity=0 时
+    ResizableLimiter 自动 clamp 到 >=1（最严也保留单路预处理）。
     """
     global _settings
     if concurrency is not None:
         _settings.concurrency = min(
             MAX_CONCURRENCY, max(MIN_CONCURRENCY, int(concurrency))
         )
-        MODEL_LIMITER.set_limit(_settings.concurrency)
-        PIPELINE_LIMITER.set_limit(_settings.concurrency + _settings.waiting_capacity)
+        MODEL_LIMITER.set_rate(_settings.concurrency)
     if waiting_capacity is not None:
         _settings.waiting_capacity = min(
             MAX_WAITING_CAPACITY, max(MIN_WAITING_CAPACITY, int(waiting_capacity))
         )
-        PIPELINE_LIMITER.set_limit(_settings.concurrency + _settings.waiting_capacity)
+        PIPELINE_LIMITER.set_limit(max(1, _settings.waiting_capacity))
     if eval_timeout_s is not None:
         _settings.eval_timeout_s = min(
             MAX_EVAL_TIMEOUT_S, max(MIN_EVAL_TIMEOUT_S, float(eval_timeout_s))

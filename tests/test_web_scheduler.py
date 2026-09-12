@@ -11,6 +11,7 @@ from auto_eval.web.scheduler import (
     DEFAULT_EVAL_TIMEOUT_S,
     DEFAULT_WAITING_CAPACITY,
     ResizableLimiter,
+    TokenBucketRateLimiter,
 )
 from auto_eval.web.tasks import Task
 
@@ -71,6 +72,18 @@ def _patch_runner(
     monkeypatch.setattr(runner, "_eval_one", fake_eval_one)
     monkeypatch.setattr(runner, "_persist_task", lambda task, **kw: None)
     monkeypatch.setattr(runner, "_write_eval_error", lambda *a, **kw: None)
+
+
+class _CountingRateLimiter(TokenBucketRateLimiter):
+    """统计每次 acquire（每次实际模型请求，含重试）的调用，供重试限流断言。"""
+
+    def __init__(self) -> None:
+        super().__init__(1000)  # 高 rate：不引入真实限流时延
+        self.acquires: list[bool] = []
+
+    async def acquire(self, *, priority: bool = False) -> None:
+        self.acquires.append(priority)
+        await super().acquire(priority=priority)
 
 
 # ---------- ResizableLimiter ----------
@@ -179,6 +192,77 @@ async def test_limiter_priority_cancelled_waiter_leaks_no_slot():
     async with lim.slot(priority=True):
         assert lim.stats()["running"] == 1
     assert lim.stats()["running"] == 0
+
+
+# ---------- TokenBucketRateLimiter（模型速率限流） ----------
+
+async def test_rate_limiter_burst_then_block_until_refill():
+    """每秒 rate 个令牌（突发=rate）：突发内立即可用，超突发需等按率生成。"""
+    lim = TokenBucketRateLimiter(2)
+    for _ in range(2):
+        await lim.acquire()       # 突发 2 个立刻到账
+    assert lim.would_block()      # 第 3 个暂无可发令牌
+    assert lim.stats()["running"] == 2
+
+    third = asyncio.create_task(lim.acquire())
+    await asyncio.wait_for(third, 1.5)   # ~0.5s 后按率生成新令牌
+    assert third.done() and not third.cancelled()
+
+    lim.release()
+    lim.release()
+    lim.release()                 # release 幂等：在途计数不越界
+    assert lim.stats()["running"] == 0
+    assert lim.stats()["queued"] == 0
+
+
+async def test_rate_limiter_priority_waiter_served_first():
+    """等待令牌者中 priority 插队头：下一枚令牌先喂优先等待者（不排到普通者后）。"""
+    lim = TokenBucketRateLimiter(1)
+    await lim.acquire()           # 突发 1 用完，tokens=0
+    normal = asyncio.create_task(lim.acquire())
+    await asyncio.sleep(0.05)     # normal 入队，minter 起跑但按率等待
+    head = asyncio.create_task(lim.acquire(priority=True))  # 插队头
+    await asyncio.sleep(0)
+    assert lim.stats()["queued"] == 2
+
+    await asyncio.wait_for(head, 2.5)   # ~1s 后首枚令牌按率生成 → 喂队头(priority)
+    assert head.done() and not head.cancelled()
+    await asyncio.sleep(0)
+    assert not normal.done()            # 普通等待者仍未轮到
+
+    normal.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await normal
+    assert lim.stats()["queued"] == 0
+
+
+async def test_rate_limiter_cancelled_waiter_leaks_nothing():
+    """被取消的令牌等待者不留痕：队列清空、后续 acquire 正常。"""
+    lim = TokenBucketRateLimiter(1)
+    await lim.acquire()
+    queued = asyncio.create_task(lim.acquire())
+    await asyncio.sleep(0)
+    assert lim.stats()["queued"] == 1
+
+    queued.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await queued
+    assert lim.stats()["queued"] == 0
+
+    lim.release()                 # 归还首次 acquire 的在途计数
+    assert lim.stats()["running"] == 0
+    lim._tokens = 1.0             # 令牌仍可用（被取消的等待者不占额度）
+    async with lim:
+        assert lim.stats()["running"] == 1
+    assert lim.stats()["running"] == 0
+
+
+async def test_rate_limiter_set_rate_reflects():
+    """set_rate 更新每秒令牌数：limit/stats 随之变化。"""
+    lim = TokenBucketRateLimiter(2)
+    lim.set_rate(5)
+    assert lim.limit == 5
+    assert lim.stats()["limit"] == 5
 
 
 # ---------- 组优先续队 + 连坐失败（全量跑批） ----------
@@ -323,15 +407,20 @@ def _patch_slow_prep(monkeypatch, events: list):
 
 
 async def test_video_prep_runs_while_model_slots_busy(monkeypatch):
-    """预处理不占模型槽：模型 limit=1 时第二题的预处理与第一题的模型调用并行。"""
+    """预处理不占模型槽：模型 limit=1 时第二题的预处理与第一题的模型调用并行——
+    预处理不被模型闸门拦截；模型调用本身仍按限流 1 串行。确定性驱动：先占住
+    第一题模型槽，等第二题抽帧完成后再放行，断言第一题模型结束前 s1 已抽帧。"""
     cfg = load_config(Path("config"))
     task = _prep_free_task(cfg)
     events: list = []
+    release_s0 = asyncio.Event()
 
     async def fake_eval_one(mode, idx, item, **kw):
         events.append(("eval_start", idx))
-        await asyncio.sleep(0.1)  # 留出窗口让第二题预处理并行进行
+        if idx == 0:
+            await release_s0.wait()  # 占住唯一模型槽，直到测试放行
         events.append(("eval_end", idx))
+        await asyncio.sleep(0)
         return {"item_id": item.get("id"), "query": item.get("query")}
 
     _patch_slow_prep(monkeypatch, events)
@@ -339,17 +428,30 @@ async def test_video_prep_runs_while_model_slots_busy(monkeypatch):
         monkeypatch, ResizableLimiter(1), fake_eval_one,
         pipeline_limiter=ResizableLimiter(2),
     )
-    await runner._run(task, cfg)
+    run = asyncio.create_task(runner._run(task, cfg))
 
-    # 第二题预处理在第一题模型调用窗口内开始（没有等模型槽）
+    # 等 s0 占到模型槽、s1 完成预处理（不受超时限制地确定性等待）
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
+    while ("eval_start", 0) not in events or ("prep", "s1") not in events:
+        if loop.time() > deadline:
+            raise AssertionError(f"等待 s0 占槽 / s1 抽帧超时: events={events}")
+        await asyncio.sleep(0.01)
+    # s1 已抽帧但模型调用尚未开始：预处理不等待模型槽
+    assert ("eval_start", 1) not in events
+
+    release_s0.set()
+    await run
+    # 第二题抽帧发生在第一题模型结束前（没有被模型槽挡住）
     assert events.index(("prep", "s1")) < events.index(("eval_end", 0))
-    # 模型并发不超过 1：第二题的模型调用在第一题结束后才开始
+    # 模型限流 1：第二题模型调用严格在在第一题结束后才开始
     assert events.index(("eval_start", 1)) > events.index(("eval_end", 0))
 
 
-async def test_waiting_capacity_bounds_pipeline(monkeypatch):
-    """流水线准入 = 并发 + 等待容量：pipeline=1 时第二题在第一题释放
-    准入槽之前不开始预处理（等待容量 0 的退化行为）。"""
+async def test_waiting_capacity_bounds_preprocessing(monkeypatch):
+    """预处理并发闸只约束视频抽帧、抽出即释放：pipeline=1 时两次预处理
+    严格串行，但第 2 题的抽帧可发生在第 1 题模型调用窗口内（不等到模型
+    释放）——模型在途只受模型限流、不被流水线闸门拦截。"""
     cfg = load_config(Path("config"))
     task = _prep_free_task(cfg)
     events: list = []
@@ -367,11 +469,12 @@ async def test_waiting_capacity_bounds_pipeline(monkeypatch):
     )
     await runner._run(task, cfg)
 
-    # 第二题整体（含预处理）严格串行在第一题之后
-    assert events == [
-        ("prep", "s0"), ("eval_start", 0), ("eval_end", 0),
-        ("prep", "s1"), ("eval_start", 1), ("eval_end", 1),
-    ]
+    # 两次预处理严格串行（并发闸 1）
+    assert events.index(("prep", "s1")) > events.index(("prep", "s0"))
+    # 第 2 题抽帧不等模型槽：发生在第 1 题模型结束前（槽已随抽帧释放）
+    assert events.index(("prep", "s1")) < events.index(("eval_end", 0))
+    # 模型限流 1：第 2 题模型调用仍严格等第 1 题结束后才开始
+    assert events.index(("eval_start", 1)) > events.index(("eval_end", 0))
 
 
 async def test_model_slot_wait_emits_progress_event(monkeypatch):
@@ -398,6 +501,31 @@ async def test_model_slot_wait_emits_progress_event(monkeypatch):
     release.set()
     await run
     assert len(task.results) == 2
+
+
+async def test_retry_consumes_its_own_rate_token(monkeypatch):
+    """重试也占每秒配额：首次尝试失败后重试重新 acquire——每次实际模型
+    请求（含重试）消耗一个限额令牌。"""
+    cfg = load_config(Path("config"))
+    task = _session_task(cfg, {}, standalone=1)
+    calls = {"n": 0}
+
+    async def fake_eval_one(mode, idx, item, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("boom")  # 瞬时错误 → 触发重试
+        return {"item_id": item.get("id"), "query": item.get("query")}
+
+    limiter = _CountingRateLimiter()
+    monkeypatch.setattr(runner, "MODEL_LIMITER", limiter)
+    monkeypatch.setattr(runner, "_eval_one", fake_eval_one)
+    monkeypatch.setattr(runner, "_persist_task", lambda task, **kw: None)
+    monkeypatch.setattr(runner, "_write_eval_error", lambda *a, **kw: None)
+    await runner._run(task, cfg)
+
+    assert calls["n"] == 2                      # 确有一次重试
+    assert len(limiter.acquires) == 2           # 每次模型请求各取一个令牌
+    assert "error" not in task.results[0]       # 重试后成功，无错误
 
 
 async def test_update_batch_second_item_priority_requeue(monkeypatch):
@@ -439,8 +567,8 @@ def test_settings_persist_roundtrip_and_limiter_align(tmp_path):
     path = tmp_path / "web_settings.json"
     try:
         scheduler.apply_settings(concurrency=3, eval_timeout_s=600)
-        assert scheduler.MODEL_LIMITER.limit == 3
-        assert scheduler.PIPELINE_LIMITER.limit == 3 + DEFAULT_WAITING_CAPACITY
+        assert scheduler.MODEL_LIMITER.limit == 3  # 语义=每秒请求数
+        assert scheduler.PIPELINE_LIMITER.limit == DEFAULT_WAITING_CAPACITY
         assert scheduler.persist_settings(path) is True
 
         scheduler.apply_settings(
@@ -451,22 +579,22 @@ def test_settings_persist_roundtrip_and_limiter_align(tmp_path):
         assert scheduler.get_settings().concurrency == 3
         assert scheduler.get_settings().eval_timeout_s == 600.0
         assert scheduler.MODEL_LIMITER.limit == 3
-        assert scheduler.PIPELINE_LIMITER.limit == 3 + DEFAULT_WAITING_CAPACITY
+        assert scheduler.PIPELINE_LIMITER.limit == DEFAULT_WAITING_CAPACITY
 
-        # waiting_capacity 随设置往返，pipeline 上限随之重算
+        # waiting_capacity 随设置往返，预处理并发上限随其重算
         scheduler.apply_settings(waiting_capacity=5)
-        assert scheduler.PIPELINE_LIMITER.limit == 3 + 5
+        assert scheduler.PIPELINE_LIMITER.limit == 5
         assert scheduler.persist_settings(path) is True
         scheduler.apply_settings(waiting_capacity=DEFAULT_WAITING_CAPACITY)
         scheduler.load_persisted_settings(path)
         assert scheduler.get_settings().waiting_capacity == 5
-        assert scheduler.PIPELINE_LIMITER.limit == 3 + 5
+        assert scheduler.PIPELINE_LIMITER.limit == 5
 
-        # 仅调 concurrency：保留自定义 waiting_capacity 并重算 pipeline
+        # 仅调 concurrency：只改模型速率，不碰预处理并发
         scheduler.apply_settings(concurrency=4)
         assert scheduler.get_settings().waiting_capacity == 5
         assert scheduler.MODEL_LIMITER.limit == 4
-        assert scheduler.PIPELINE_LIMITER.limit == 4 + 5
+        assert scheduler.PIPELINE_LIMITER.limit == 5
     finally:
         _reset_scheduler_globals()
 
@@ -515,15 +643,14 @@ def test_apply_settings_clamps_out_of_range():
         assert scheduler.get_settings().concurrency == scheduler.MAX_CONCURRENCY
         assert scheduler.get_settings().waiting_capacity == scheduler.MIN_WAITING_CAPACITY
         assert scheduler.get_settings().eval_timeout_s == scheduler.MIN_EVAL_TIMEOUT_S
-        assert scheduler.PIPELINE_LIMITER.limit == (
-            scheduler.MAX_CONCURRENCY + scheduler.MIN_WAITING_CAPACITY
-        )
+        assert scheduler.MODEL_LIMITER.limit == scheduler.MAX_CONCURRENCY
+        assert scheduler.PIPELINE_LIMITER.limit == 1  # max(1, MIN_WAITING_CAPACITY)
     finally:
         _reset_scheduler_globals()
 
 
 def test_settings_panel_static_asserts():
-    """前端设置面板接线静态断言：等待容量输入 + 两级队列计数展示。"""
+    """前端设置面板接线静态断言：每秒请求数/预处理并发输入 + 限流计数展示。"""
     project_root = Path(__file__).resolve().parents[1]
     app_js = (project_root / "src/auto_eval/web/static/app.js").read_text(
         encoding="utf-8"
@@ -534,7 +661,8 @@ def test_settings_panel_static_asserts():
     assert "settingsForm.value.waiting_capacity" in app_js
     assert "waiting_capacity: waitingCapacity" in app_js
     assert "sysSettings.waiting_capacity" in index_html
-    assert "sysSettings.pipeline.running" in index_html
+    assert "每秒请求数" in index_html            # concurrency 改显示「每秒请求数」
+    assert "sysSettings.queue.limit" in index_html  # 模型限流（速率）展示
 
 
 # ---------- 设置 API ----------
@@ -554,9 +682,7 @@ def test_settings_api_roundtrip_and_validation(monkeypatch, tmp_path):
             assert "pipeline" in body and {"limit", "running", "queued"} <= set(
                 body["pipeline"]
             )
-            assert body["pipeline"]["limit"] == (
-                DEFAULT_CONCURRENCY + DEFAULT_WAITING_CAPACITY
-            )
+            assert body["pipeline"]["limit"] == DEFAULT_WAITING_CAPACITY
 
             assert client.put("/api/settings", json={}).status_code == 422
             assert client.put("/api/settings", json={"concurrency": 0}).status_code == 422
@@ -581,14 +707,14 @@ def test_settings_api_roundtrip_and_validation(monkeypatch, tmp_path):
             assert (tmp_path / "web_settings.json").exists()
 
             assert scheduler.MODEL_LIMITER.limit == 5
-            assert scheduler.PIPELINE_LIMITER.limit == 5 + DEFAULT_WAITING_CAPACITY
+            assert scheduler.PIPELINE_LIMITER.limit == DEFAULT_WAITING_CAPACITY
             assert scheduler.get_settings().eval_timeout_s == 480
 
-            # 仅传 waiting_capacity 也可保存，pipeline 随之和重算
+            # 仅传 waiting_capacity 也可保存，预处理并发上限随之更新
             response = client.put("/api/settings", json={"waiting_capacity": 3})
             assert response.status_code == 200
             assert response.json()["waiting_capacity"] == 3
-            assert scheduler.PIPELINE_LIMITER.limit == 5 + 3
+            assert scheduler.PIPELINE_LIMITER.limit == 3
 
             # judges：未知裁判名 / 空列表 → 422；仅传 judges 也可保存
             known = [j.name for j in load_config(Path("config")).judges]

@@ -65,14 +65,14 @@ createApp({
     const opPreparing = ref(false);
     const errors = ref([]);
     const judges = ref([]);
-    // 全局系统设置（并发/等待容量/单题超时/裁判）：所有任务共享，服务端持久化
+    // 全局系统设置（每秒请求数/预处理并发/单题超时/裁判）：所有任务共享，服务端持久化
     const sysSettings = ref({
       concurrency: 10,
       waiting_capacity: 10,
       eval_timeout_s: 300,
       judges: [],
-      queue: { limit: 10, running: 0, queued: 0 },       // 模型调用级
-      pipeline: { limit: 20, running: 0, queued: 0 },     // 流水线准入级
+      queue: { limit: 10, running: 0, queued: 0 },       // 模型限流：limit=每秒请求数，running=在途（仅展示）
+      pipeline: { limit: 10, running: 0, queued: 0 },     // 预处理并发级
     });
     const settingsForm = ref({ concurrency: 10, waiting_capacity: 10, eval_timeout_s: 300, judges: [] });
     const settingsSaving = ref(false);
@@ -895,7 +895,7 @@ createApp({
       const judgeNames = [...new Set(settingsForm.value.judges || [])];
       if (!Number.isFinite(concurrency) || !Number.isFinite(waitingCapacity) || !Number.isFinite(evalTimeoutS)) {
         settingsMessageOk.value = false;
-        settingsMessage.value = "请填写有效的并发上限、等待容量与超时秒数";
+        settingsMessage.value = "请填写有效的每秒请求数、预处理并发与超时秒数";
         return;
       }
       if (!judgeNames.length) {

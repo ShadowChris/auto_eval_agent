@@ -245,9 +245,9 @@ async def api_settings_get():
 
 @app.put("/api/settings")
 async def api_settings_put(req: SettingsReq):
-    """更新全局并发/等待容量/单题超时/裁判：即时生效（调大立即放行排队，
-    调小为软限制，运行中的评测跑完即止；流水线上限随 并发+等待容量 实时
-    重算）并持久化到 runs/web_settings.json。"""
+    """更新全局速率/预处理并发/单题超时/裁判：即时生效（concurrency 为模型
+    每秒请求数，调大立即放行限流队列、调小软生效；waiting_capacity 为视频
+    预处理并发）并持久化到 runs/web_settings.json。"""
     if (
         req.concurrency is None
         and req.waiting_capacity is None
