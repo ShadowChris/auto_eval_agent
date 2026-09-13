@@ -4,7 +4,8 @@
   compare:      {query, context?, video1, video2, answer1?, answer2?,
                  context1?, context2?, task_start_time?, task_end_time?}
   rich_content: {id?, query, context?, video_path, answer_text?,
-                 reference_answer?, task_start_time?, task_end_time?, category?}
+                 reference_answer?, task_start_time?, task_end_time?, category?,
+                 attachment_path?}
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import csv
 import io
 import json
 import math
+import re
 from numbers import Real
 from typing import Literal
 
@@ -332,6 +334,8 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             )
             task_start = _csv_time(row.get("开始时间"), "开始时间", ln, errors)
             task_end = _csv_time(row.get("结束时间"), "结束时间", ln, errors)
+            # 用户发送给产品的图片地址；一格里可写多个，用 ; , ， 分隔
+            attachment_path = _csv_clean(row.get("attachment_path"))
 
             item: dict = {
                 "id": idx,
@@ -347,6 +351,12 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 item["answer_text"] = answer_text
             if reference_answer:
                 item["reference_answer"] = reference_answer
+            if attachment_path:
+                item["attachment_path"] = [
+                    p.strip()
+                    for p in re.split(r"[;,，]", attachment_path)
+                    if p.strip()
+                ]
             if task_start is not None:
                 item["task_start_time"] = task_start
             if task_end is not None:

@@ -125,6 +125,7 @@ class RichContentJudge:
         answer_text: str,
         frames: list[str],
         reference_answer: str = "",
+        attachments: list[str] | None = None,
         stream_callback=None,
     ) -> dict[str, Any]:
         extraction = self.profile.extraction
@@ -132,28 +133,33 @@ class RichContentJudge:
             persona=self.client.persona,
             card_types=self.profile.card_types,
         )
+        attachments = attachments or []
         user = self._user_template.render(
             question=question,
             context=context,
             answer_text=answer_text,
             reference_answer=reference_answer,
             frame_count=len(frames),
+            attachment_count=len(attachments),
         )
-        user_images = [
-            encode_frame(
+        def _encode(path: str) -> str:
+            return encode_frame(
                 Path(path),
                 max_edge=extraction.max_edge,
                 quality=extraction.jpeg_quality,
             )
-            for path in frames
+        # 关键帧在前、用户上传附件在后（帧编号从第1张关键帧起，附件不占帧序号）
+        image_urls = [_encode(path) for path in frames] + [
+            _encode(path) for path in attachments
         ]
+        image_refs = list(frames) + attachments
         started = time.perf_counter()
         raw_output = await self.client.complete(
             system,
             user,
             stream_callback=stream_callback,
-            user_images=user_images or None,
-            user_image_refs=frames or None,
+            user_images=image_urls or None,
+            user_image_refs=image_refs or None,
         )
         data = parse_json_loose(raw_output)
         repaired = ""

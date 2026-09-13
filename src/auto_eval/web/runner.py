@@ -981,12 +981,16 @@ async def _eval_one(
         reference_answer = str(item_dict.get("reference_answer") or "").strip()
         # 视觉事实列表不做多裁判模糊合并；使用用户选择顺序中的第一位裁判，
         # 保证 presence/count/items 始终来自同一份自洽观察。
+        attachments = [
+            str(p) for p in (item_dict.get("attachment_path") or [])
+        ]
         visual = await rich_judges[0].evaluate(
             question=item.question,
             context=(item.context or "").strip(),
             answer_text=answer_text,
             reference_answer=reference_answer,
             frames=frames,
+            attachments=attachments,
         )
         out.update(visual)
         log_event(

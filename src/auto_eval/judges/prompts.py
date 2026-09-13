@@ -224,6 +224,9 @@ RICH_CONTENT_USER = Template(
 {{ reference_answer }}
 {% endif %}
 
+{% if attachment_count %}
+随后附带的 {{ frame_count }} 张关键帧之后，还有用户在寻求帮助时上传的 {{ attachment_count }} 张图片（非录屏关键帧，无固定顺序）。这些图片是用户想让产品处理的原始材料，请结合它们理解用户的实际问题，但统计挂卡和 Superlink 时仍只以关键帧为准。
+{% endif %}
 请检查随后按时间顺序排列的 {{ frame_count }} 张关键帧，只统计当前 assistant 回答区域中的挂卡和蓝色 Superlink。"""
 )
 
