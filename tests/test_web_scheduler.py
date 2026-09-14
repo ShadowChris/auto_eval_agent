@@ -9,6 +9,7 @@ from auto_eval.web import runner, scheduler
 from auto_eval.web.scheduler import (
     DEFAULT_CONCURRENCY,
     DEFAULT_EVAL_TIMEOUT_S,
+    DEFAULT_MAX_IN_FLIGHT,
     DEFAULT_WAITING_CAPACITY,
     ResizableLimiter,
     TokenBucketRateLimiter,
@@ -19,6 +20,7 @@ from auto_eval.web.tasks import Task
 def _reset_scheduler_globals():
     scheduler.apply_settings(
         concurrency=DEFAULT_CONCURRENCY,
+        max_in_flight=DEFAULT_MAX_IN_FLIGHT,
         waiting_capacity=DEFAULT_WAITING_CAPACITY,
         eval_timeout_s=DEFAULT_EVAL_TIMEOUT_S,
         judges=[],
@@ -263,6 +265,44 @@ async def test_rate_limiter_set_rate_reflects():
     lim.set_rate(5)
     assert lim.limit == 5
     assert lim.stats()["limit"] == 5
+
+
+async def test_rate_limiter_max_in_flight_bounds_concurrency():
+    """在途上限：高 rate（无速率瓶颈）下并发在途最多 max_in_flight，
+    满员时新请求等待 release() 释放名额后放行。"""
+    lim = TokenBucketRateLimiter(rate=1000, max_in_flight=2)
+    # 占满 2 个在途名额（速率充足不受堵）
+    await lim.acquire()
+    await lim.acquire()
+    assert lim.would_block()          # 无令牌 AND 在途满 → 需等待
+    assert lim.stats()["running"] == 2
+
+    third = asyncio.create_task(lim.acquire())
+    await asyncio.sleep(0.05)
+    assert not third.done()           # 在途满，被阻塞
+
+    lim.release()                     # 一个在途结束 → 立即放行队头
+    await asyncio.sleep(0.05)
+    assert third.done() and not third.cancelled()
+    assert lim.stats()["running"] == 2  # 仍在途 2（晚到一个占满）
+
+    lim.release(); lim.release()
+    assert lim.stats()["running"] == 0
+
+
+async def test_rate_limiter_set_max_in_flight_wakes_waiters():
+    """调大在途上限立即放行因名额满而等待的队头。"""
+    lim = TokenBucketRateLimiter(rate=1000, max_in_flight=1)
+    await lim.acquire()
+    queued = asyncio.create_task(lim.acquire())
+    await asyncio.sleep(0.05)
+    assert not queued.done()
+
+    lim.set_max_in_flight(2)          # 调大 → 立即放行
+    await asyncio.sleep(0.05)
+    assert queued.done() and not queued.cancelled()
+    lim.release(); lim.release()
+    assert lim.stats()["running"] == 0
 
 
 # ---------- 组优先续队 + 连坐失败（全量跑批） ----------
@@ -566,8 +606,9 @@ async def test_update_batch_second_item_priority_requeue(monkeypatch):
 def test_settings_persist_roundtrip_and_limiter_align(tmp_path):
     path = tmp_path / "web_settings.json"
     try:
-        scheduler.apply_settings(concurrency=3, eval_timeout_s=600)
+        scheduler.apply_settings(concurrency=3, max_in_flight=80, eval_timeout_s=600)
         assert scheduler.MODEL_LIMITER.limit == 3  # 语义=每秒请求数
+        assert scheduler.MODEL_LIMITER.stats()["max_in_flight"] == 80
         assert scheduler.PIPELINE_LIMITER.limit == DEFAULT_WAITING_CAPACITY
         assert scheduler.persist_settings(path) is True
 
@@ -577,8 +618,10 @@ def test_settings_persist_roundtrip_and_limiter_align(tmp_path):
         )
         scheduler.load_persisted_settings(path)
         assert scheduler.get_settings().concurrency == 3
+        assert scheduler.get_settings().max_in_flight == 80
         assert scheduler.get_settings().eval_timeout_s == 600.0
         assert scheduler.MODEL_LIMITER.limit == 3
+        assert scheduler.MODEL_LIMITER.stats()["max_in_flight"] == 80
         assert scheduler.PIPELINE_LIMITER.limit == DEFAULT_WAITING_CAPACITY
 
         # waiting_capacity 随设置往返，预处理并发上限随其重算
@@ -659,10 +702,12 @@ def test_settings_panel_static_asserts():
         encoding="utf-8"
     )
     assert "settingsForm.value.waiting_capacity" in app_js
-    assert "waiting_capacity: waitingCapacity" in app_js
+    assert "settingsForm.value.max_in_flight" in app_js
+    assert "max_in_flight: maxInFlight" in app_js
     assert "sysSettings.waiting_capacity" in index_html
-    assert "每秒请求数" in index_html            # concurrency 改显示「每秒请求数」
-    assert "sysSettings.queue.limit" in index_html  # 模型限流（速率）展示
+    assert "sysSettings.max_in_flight" in index_html
+    assert "每秒请求数" in index_html            # concurrency 显示「每秒请求数」
+    assert "最大在途" in index_html             # 新增最大在途输入/展示
 
 
 # ---------- 设置 API ----------
@@ -677,8 +722,10 @@ def test_settings_api_roundtrip_and_validation(monkeypatch, tmp_path):
         with TestClient(app) as client:
             body = client.get("/api/settings").json()
             assert body["concurrency"] == DEFAULT_CONCURRENCY
+            assert body["max_in_flight"] == DEFAULT_MAX_IN_FLIGHT
             assert body["waiting_capacity"] == DEFAULT_WAITING_CAPACITY
             assert "queue" in body and {"limit", "running", "queued"} <= set(body["queue"])
+            assert body["queue"]["max_in_flight"] == DEFAULT_MAX_IN_FLIGHT
             assert "pipeline" in body and {"limit", "running", "queued"} <= set(
                 body["pipeline"]
             )
@@ -686,6 +733,14 @@ def test_settings_api_roundtrip_and_validation(monkeypatch, tmp_path):
 
             assert client.put("/api/settings", json={}).status_code == 422
             assert client.put("/api/settings", json={"concurrency": 0}).status_code == 422
+            assert (
+                client.put("/api/settings", json={"max_in_flight": 0}).status_code
+                == 422
+            )
+            assert (
+                client.put("/api/settings", json={"max_in_flight": 9999}).status_code
+                == 422
+            )
             assert client.put("/api/settings", json={"eval_timeout_s": 5}).status_code == 422
             assert (
                 client.put("/api/settings", json={"waiting_capacity": -1}).status_code
@@ -697,16 +752,19 @@ def test_settings_api_roundtrip_and_validation(monkeypatch, tmp_path):
             )
 
             response = client.put(
-                "/api/settings", json={"concurrency": 5, "eval_timeout_s": 480}
+                "/api/settings",
+                json={"concurrency": 5, "max_in_flight": 80, "eval_timeout_s": 480},
             )
             assert response.status_code == 200
             body = response.json()
             assert body["concurrency"] == 5
+            assert body["max_in_flight"] == 80
             assert body["eval_timeout_s"] == 480
             assert body["persisted"] is True
             assert (tmp_path / "web_settings.json").exists()
 
             assert scheduler.MODEL_LIMITER.limit == 5
+            assert scheduler.MODEL_LIMITER.stats()["max_in_flight"] == 80
             assert scheduler.PIPELINE_LIMITER.limit == DEFAULT_WAITING_CAPACITY
             assert scheduler.get_settings().eval_timeout_s == 480
 

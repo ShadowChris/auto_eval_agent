@@ -68,13 +68,14 @@ createApp({
     // 全局系统设置（每秒请求数/预处理并发/单题超时/裁判）：所有任务共享，服务端持久化
     const sysSettings = ref({
       concurrency: 10,
+      max_in_flight: 50,
       waiting_capacity: 10,
       eval_timeout_s: 300,
       judges: [],
-      queue: { limit: 10, running: 0, queued: 0 },       // 模型限流：limit=每秒请求数，running=在途（仅展示）
+      queue: { limit: 10, running: 0, queued: 0 },       // 模型限流：limit=每秒请求数，running=在途，max_in_flight=在途上限
       pipeline: { limit: 10, running: 0, queued: 0 },     // 预处理并发级
     });
-    const settingsForm = ref({ concurrency: 10, waiting_capacity: 10, eval_timeout_s: 300, judges: [] });
+    const settingsForm = ref({ concurrency: 10, max_in_flight: 50, waiting_capacity: 10, eval_timeout_s: 300, judges: [] });
     const settingsSaving = ref(false);
     const settingsMessage = ref("");
     const settingsMessageOk = ref(true);
@@ -871,6 +872,7 @@ createApp({
           sysSettings.value = { ...sysSettings.value, ...d };
           settingsForm.value = {
             concurrency: d.concurrency,
+            max_in_flight: d.max_in_flight,
             waiting_capacity: d.waiting_capacity,
             eval_timeout_s: d.eval_timeout_s,
             judges: d.judges || [],
@@ -890,12 +892,13 @@ createApp({
 
     async function saveSettings() {
       const concurrency = Number(settingsForm.value.concurrency);
+      const maxInFlight = Number(settingsForm.value.max_in_flight);
       const waitingCapacity = Number(settingsForm.value.waiting_capacity);
       const evalTimeoutS = Number(settingsForm.value.eval_timeout_s);
       const judgeNames = [...new Set(settingsForm.value.judges || [])];
-      if (!Number.isFinite(concurrency) || !Number.isFinite(waitingCapacity) || !Number.isFinite(evalTimeoutS)) {
+      if (![concurrency, maxInFlight, waitingCapacity, evalTimeoutS].every(Number.isFinite)) {
         settingsMessageOk.value = false;
-        settingsMessage.value = "请填写有效的每秒请求数、预处理并发与超时秒数";
+        settingsMessage.value = "请填写有效的每秒请求数、最大在途、预处理并发与超时秒数";
         return;
       }
       if (!judgeNames.length) {
@@ -911,6 +914,7 @@ createApp({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             concurrency,
+            max_in_flight: maxInFlight,
             waiting_capacity: waitingCapacity,
             eval_timeout_s: evalTimeoutS,
             judges: judgeNames,

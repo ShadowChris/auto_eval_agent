@@ -130,9 +130,10 @@ class HistoryComparisonReq(BaseModel):
 
 
 class SettingsReq(BaseModel):
-    """全局系统设置：并发上限、等待容量、单题超时与裁判（均可选，至少传一个）。"""
+    """全局系统设置：模型速率/在途、预处理并发、单题超时与裁判（均可选，至少传一个）。"""
 
     concurrency: int | None = None
+    max_in_flight: int | None = None
     waiting_capacity: int | None = None
     eval_timeout_s: float | None = None
     judges: list[str] | None = None
@@ -225,11 +226,12 @@ def _settings_payload(*, persisted: bool | None = None) -> dict:
     judges = [name for name in s.judges if name in configured] or configured[:1]
     payload = {
         "concurrency": s.concurrency,
+        "max_in_flight": s.max_in_flight,
         "waiting_capacity": s.waiting_capacity,
         "eval_timeout_s": s.eval_timeout_s,
         "judges": judges,
-        "queue": MODEL_LIMITER.stats(),       # 兼容键：模型调用级（运行/排队）
-        "pipeline": PIPELINE_LIMITER.stats(),  # 流水线准入级（含预处理/等待）
+        "queue": MODEL_LIMITER.stats(),       # 兼容键：模型调用级（速率/在途/排队）
+        "pipeline": PIPELINE_LIMITER.stats(),  # 预处理并发级
     }
     if persisted is not None:
         payload["persisted"] = persisted
@@ -250,12 +252,15 @@ async def api_settings_put(req: SettingsReq):
     预处理并发）并持久化到 runs/web_settings.json。"""
     if (
         req.concurrency is None
+        and req.max_in_flight is None
         and req.waiting_capacity is None
         and req.eval_timeout_s is None
         and req.judges is None
     ):
         raise HTTPException(
-            422, "需至少提供 concurrency / waiting_capacity / eval_timeout_s / judges 之一"
+            422,
+            "需至少提供 concurrency / max_in_flight / waiting_capacity / "
+            "eval_timeout_s / judges 之一",
         )
     if req.concurrency is not None and not (
         scheduler.MIN_CONCURRENCY <= req.concurrency <= scheduler.MAX_CONCURRENCY
@@ -264,6 +269,16 @@ async def api_settings_put(req: SettingsReq):
             422,
             f"concurrency 需在 {scheduler.MIN_CONCURRENCY}–"
             f"{scheduler.MAX_CONCURRENCY} 之间",
+        )
+    if req.max_in_flight is not None and not (
+        scheduler.MIN_MAX_IN_FLIGHT
+        <= req.max_in_flight
+        <= scheduler.MAX_MAX_IN_FLIGHT
+    ):
+        raise HTTPException(
+            422,
+            f"max_in_flight 需在 {scheduler.MIN_MAX_IN_FLIGHT}–"
+            f"{scheduler.MAX_MAX_IN_FLIGHT} 之间",
         )
     if req.waiting_capacity is not None and not (
         scheduler.MIN_WAITING_CAPACITY
@@ -297,6 +312,7 @@ async def api_settings_put(req: SettingsReq):
             )
     scheduler.apply_settings(
         concurrency=req.concurrency,
+        max_in_flight=req.max_in_flight,
         waiting_capacity=req.waiting_capacity,
         eval_timeout_s=req.eval_timeout_s,
         judges=req.judges,
