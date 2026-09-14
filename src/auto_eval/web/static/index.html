@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260912_max_inflight">
+  <link rel="stylesheet" href="/static/style.css?v=20260912_pipeline_wait">
   <link rel="stylesheet" href="/report-assets/operation_report.css?v=20260911_report_sync">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
@@ -56,9 +56,9 @@
       <span class="hint">同时进行中的模型请求最大数（默认 50）；模型服务商有在途并发限制，超出会排队等待在途名额。</span>
     </div>
     <div class="row">
-      <span class="lbl">预处理并发：</span>
+      <span class="lbl">等待容量：</span>
       <input type="number" min="0" max="256" v-model.number="settingsForm.waiting_capacity" style="width:70px">
-      <span class="hint">最多同时做视频抽帧的评测数（默认 10）；不占用模型速率/在途限额。</span>
+      <span class="hint">「抽帧中 + 已抽帧待评」的总名额（默认 10，封顶已备好关键帧的内存）；流水线总准入 = 最大在途 + 等待容量。</span>
     </div>
     <div class="row">
       <span class="lbl">单题超时：</span>
@@ -575,6 +575,6 @@
 </div>
 
   <script src="/report-assets/operation_report.js?v=20260911_report_sync"></script>
-  <script type="module" src="/static/app.js?v=20260912_max_inflight"></script>
+  <script type="module" src="/static/app.js?v=20260912_pipeline_wait"></script>
 </body>
 </html>

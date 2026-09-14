@@ -206,15 +206,15 @@ def _make_item_evaluator(
     res，不抛出）、连坐失败协程 fail(idx, item_dict, reason) -> res，以及本套
     裁判客户端（调用方负责在 finally 中 aclose，见 _aclose_judge_clients）。
 
-    两级限流：one 内部在视频抽帧期间自行持有 PIPELINE_LIMITER（预处理并发
-    闸，抽出即释放），进入模型阶段前放开；模型调用走 MODEL_LIMITER 速率
-    限流（每秒至多 N 次，含重试，不限制在途、不等待完成）。priority=True
-    （组第 2+ 轮 / 批第 2+ 条）首次尝试取限流令牌时插队头，保留组内轮次
-    不被排到队尾的语义。限流等待不计入单题耗时，纯模型时长另有 latency_s
-    口径。速率、预处理并发、单题超时与裁判由全局设置管理
-    （scheduler.get_settings），不再从 options 读取（旧 options 中
-    的 concurrency/eval_timeout_s 已废弃；options.judges 仍生效但仅作兼容
-    优先，前端已改为全局设置选裁判）。
+    两级限流：调用方（_run / _run_update_batch_body）已持有 PIPELINE_LIMITER
+    流水线准入槽（预处理 + 等模型 + 模型同一名额，封顶关键帧内存）；one 内部
+    模型调用走 MODEL_LIMITER 速率+在途限流（每秒至多 N 次、在途至多
+    max_in_flight，含重试）。priority=True（组第 2+ 轮 / 批第 2+ 条）首次
+    尝试取限流令牌时插队头，保留组内轮次不被排到队尾的语义。限流等待不计入
+    单题耗时，纯模型时长另有 latency_s 口径。速率、在途、预处理并发、单题
+    超时与裁判由全局设置管理（scheduler.get_settings），不再从 options 读取
+    （旧 options 中的 concurrency/eval_timeout_s 已废弃；options.judges 仍
+    生效但仅作兼容优先，前端已改为全局设置选裁判）。
     options：本次运行生效的配置（缺省 task.options），只读、不回写，
     供更新批以 {**task.options, **req.options} 运行。
     on_result：结果落地回调 (idx, res, started)，在评测上下文（bind_chain_context
@@ -336,66 +336,65 @@ def _make_item_evaluator(
             )
             last_error = None
             res = None
-            # 预处理并发闸：仅在视频抽帧期间持有 PIPELINE_LIMITER，抽出即释放；
-            # 进入模型阶段前放开——模型在途只受速率限流、无流水线闸门。已带
-            # frames 的重跑题不走预处理、不占槽。
+            # 流水线准入槽由调用方（_run / _run_update_batch_body）整题持有：
+            # 预处理 + 等模型槽 + 模型调用同一名额，封顶「抽帧中 + 已抽帧等模型」
+            # 总关键帧内存（PIPELINE_LIMITER 上限 = max_in_flight + waiting_capacity）。
             if not item_dict.get("frames") and not item_dict.get("frames1"):
-                async with PIPELINE_LIMITER:
-                    try:
-                        log_event(
-                            "视频准备",
-                            "校验视频并分析场景",
-                            details={"视频路径": item_dict.get("video_path")},
-                            progress=3,
-                            progress_message="正在校验视频并分析场景",
-                        )
-                        if rich_profile is None:
-                            raise ValueError("缺少 rich_content 视觉模式配置")
-                        prepare_call = (
-                            prepare_session_visual_compare_item
-                            if task.mode == "compare"
-                            else prepare_session_rich_content_item
-                        )
-                        prepared = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                prepare_call,
-                                item_dict,
-                                session_name=task.session_name,
-                                item_index=idx,
-                                total_items=len(task.items),
-                                profile=rich_profile,
-                            ),
-                            timeout=float(runtime_options.get("video_prepare_timeout_s") or 300),
-                        )
-                        item_dict.clear()
-                        item_dict.update(prepared)
-                        _persist_task(task)
-                        _frame_dir = ""
-                        if item_dict.get("frames"):
-                            _frame_dir = str(Path(item_dict["frames"][0]).parent)
-                        elif item_dict.get("frames1"):
-                            _frame_dir = str(Path(item_dict["frames1"][0]).parent)
-                        log_event(
-                            "视频准备",
-                            "关键帧提取完成",
-                            details={
-                                "关键帧数": item_dict.get("frame_count"),
-                                "抽帧目录": _frame_dir,
-                            },
-                            progress=12,
-                            progress_message=f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
-                        )
-                    except Exception as e:
-                        last_error = e
-                        log_event(
-                            "视频准备",
-                            "失败",
-                            level=logging.ERROR,
-                            details=error_details(e),
-                            progress=12,
-                            progress_message="视频校验或抽帧失败",
-                            progress_status="error",
-                        )
+                try:
+                    log_event(
+                        "视频准备",
+                        "校验视频并分析场景",
+                        details={"视频路径": item_dict.get("video_path")},
+                        progress=3,
+                        progress_message="正在校验视频并分析场景",
+                    )
+                    if rich_profile is None:
+                        raise ValueError("缺少 rich_content 视觉模式配置")
+                    prepare_call = (
+                        prepare_session_visual_compare_item
+                        if task.mode == "compare"
+                        else prepare_session_rich_content_item
+                    )
+                    prepared = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            prepare_call,
+                            item_dict,
+                            session_name=task.session_name,
+                            item_index=idx,
+                            total_items=len(task.items),
+                            profile=rich_profile,
+                        ),
+                        timeout=float(runtime_options.get("video_prepare_timeout_s") or 300),
+                    )
+                    item_dict.clear()
+                    item_dict.update(prepared)
+                    _persist_task(task)
+                    _frame_dir = ""
+                    if item_dict.get("frames"):
+                        _frame_dir = str(Path(item_dict["frames"][0]).parent)
+                    elif item_dict.get("frames1"):
+                        _frame_dir = str(Path(item_dict["frames1"][0]).parent)
+                    log_event(
+                        "视频准备",
+                        "关键帧提取完成",
+                        details={
+                            "关键帧数": item_dict.get("frame_count"),
+                            "抽帧目录": _frame_dir,
+                        },
+                        progress=12,
+                        progress_message=f"关键帧提取完成（{item_dict.get('frame_count', 0)} 帧）",
+                    )
+                except Exception as e:
+                    last_error = e
+                    log_event(
+                        "视频准备",
+                        "失败",
+                        level=logging.ERROR,
+                        details=error_details(e),
+                        progress=12,
+                        progress_message="视频校验或抽帧失败",
+                        progress_status="error",
+                    )
             if last_error is None:
                 if MODEL_LIMITER.would_block():
                     # 展示层提示：暂时无可发令牌，需排队等限流（可能与实际获取
@@ -545,9 +544,9 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     one, fail, clients = _make_item_evaluator(task, cfg)
 
     # 多轮垂域视觉评测：同一 session_group 的各轮按 turn_index 串行评测，
-    # 评完一轮即生成 ≤120 字总结并注入下一轮 context。各轮在 one() 内自持
-    # 预处理并发闸（PIPELINE_LIMITER，跨任务共享），模型阶段走速率限流
-    # （MODEL_LIMITER），组第 2+ 轮首次尝试插队头优先续队。
+    # 评完一轮即生成 ≤120 字总结并注入下一轮 context。整组占一个流水线准入槽
+    # （预置 + 各轮模型同占，跨任务共享 PIPELINE_LIMITER，封顶关键帧内存），
+    # 模型走速率限流（MODEL_LIMITER），组第 2+ 轮首次尝试插队头优先续队。
     # session_group 由 parse_csv 据 is_start/is_end 切组赋值，与上游 session_id 列无关。
     sessions: dict[str, list[int]] = {}
     standalone: list[int] = []
@@ -592,13 +591,15 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             )
 
     async def _session_job(idxs: list[int]) -> None:
-        # 整组逐轮串行；各轮在 one() 内自持预处理并发闸（PIPELINE_LIMITER，
-        # 仅在视频抽帧期间），模型阶段走速率限流（第 2+ 轮首次尝试插队头续队）
-        await run_session(idxs)
+        # 整组占一个流水线准入槽跑完整个会话（预处理 + 各轮模型同占，界定
+        # 等模型/关键帧总量）；模型走速率限流，第 2+ 轮首次尝试插队头续队
+        async with PIPELINE_LIMITER:
+            await run_session(idxs)
 
     async def _standalone_job(i: int) -> None:
-        # one() 内部自持预处理并发闸；模型在途只受速率限流、不等待完成
-        await one(i, task.items[i])
+        # 整题占一个流水线准入槽（预处理 + 模型同占，封顶关键帧内存）
+        async with PIPELINE_LIMITER:
+            await one(i, task.items[i])
 
     coros = [_session_job(idxs) for idxs in sessions.values()]
     coros += [_standalone_job(i) for i in standalone]
@@ -809,39 +810,40 @@ async def _run_update_batch_body(
         _persist_task(task, force=True)
     current: tuple[int, dict] | None = None
     try:
-        # 整批一个串行会话：各条在 one() 内自持预处理并发闸，模型阶段走速率
-        # 限流（第 2+ 条首次尝试插队头续队）。前轮总结在批次内本地链式注入，
-        # 不从 task.results 读回，不受并行批次覆盖影响。任一轮失败即连坐：
-        # 剩余条目直接落「同组前序轮次失败」结果并提前终止。
-        prior_summary = initial_summary
-        for pos, (idx, item_dict) in enumerate(batch, 1):
-            turn_no = pos + initial_turn  # 总结链编号延续原组轮次
-            current = (idx, item_dict)
-            if prior_summary:
-                base_ctx = (item_dict.get("context") or "").strip()
-                item_dict["context"] = (
-                    f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
-                    if base_ctx
-                    else f"历史对话总结：\n{prior_summary}"
+        # 整批占一个流水线准入槽跑完整批（预处理 + 各条模型同占，界定等模型/
+        # 关键帧总量）；模型走速率限流，第 2+ 条首次尝试插队头续队。前轮总结在
+        # 批次内本地链式注入，不从 task.results 读回，不受并行批次覆盖影响。
+        # 任一轮失败即连坐：剩余条目直接落「同组前序轮次失败」结果并提前终止。
+        async with PIPELINE_LIMITER:
+            prior_summary = initial_summary
+            for pos, (idx, item_dict) in enumerate(batch, 1):
+                turn_no = pos + initial_turn  # 总结链编号延续原组轮次
+                current = (idx, item_dict)
+                if prior_summary:
+                    base_ctx = (item_dict.get("context") or "").strip()
+                    item_dict["context"] = (
+                        f"{base_ctx}\n\n历史对话总结：\n{prior_summary}"
+                        if base_ctx
+                        else f"历史对话总结：\n{prior_summary}"
+                    )
+                task.in_flight_indexes.add(idx)
+                try:
+                    res = await one(idx, item_dict, priority=pos > 1)
+                finally:
+                    task.in_flight_indexes.discard(idx)
+                if res.get("error") and pos < len(batch):
+                    reason = f"同组前序轮次失败：{res['error']}"
+                    for later_idx, later_item in batch[pos:]:
+                        await fail(later_idx, later_item, reason)
+                    break
+                if pos == len(batch):
+                    continue  # 最后一轮总结无人消费，跳过
+                summary = (res.get("turn_summary") or "").strip()
+                prior_summary += (
+                    f"【第{turn_no}轮】{summary}\n"
+                    if summary
+                    else f"【第{turn_no}轮】（未生成总结）\n"
                 )
-            task.in_flight_indexes.add(idx)
-            try:
-                res = await one(idx, item_dict, priority=pos > 1)
-            finally:
-                task.in_flight_indexes.discard(idx)
-            if res.get("error") and pos < len(batch):
-                reason = f"同组前序轮次失败：{res['error']}"
-                for later_idx, later_item in batch[pos:]:
-                    await fail(later_idx, later_item, reason)
-                break
-            if pos == len(batch):
-                continue  # 最后一轮总结无人消费，跳过
-            summary = (res.get("turn_summary") or "").strip()
-            prior_summary += (
-                f"【第{turn_no}轮】{summary}\n"
-                if summary
-                else f"【第{turn_no}轮】（未生成总结）\n"
-            )
         if manage_status:
             task.status = "done"
             task.summary = _summarize(task)  # publish 前重算（节流后不再每题重算）

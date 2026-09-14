@@ -1,9 +1,11 @@
 """全局调度：跨任务共享的模型限流（速率+在途）+ 预处理并发 + 运行时设置。
 
 两级闸门，获取顺序恒为 PIPELINE → MODEL，无反向嵌套：
-- PIPELINE_LIMITER（上限 = waiting_capacity）：视频预处理并发闸，只在 one()
-  的视频抽帧期间持有，抽出即释放——不限制模型在途请求。已带 frames 的重跑
-  题不走预处理、不占槽。
+- PIPELINE_LIMITER（上限 = max_in_flight + waiting_capacity）：流水线准入，
+  整题（预处理 + 等模型槽 + 模型调用）持有——界定「抽帧中 + 已抽帧等模型」
+  ≤ waiting_capacity、在途 ≤ max_in_flight，从而已准备好的关键帧总内存被封顶
+  （防止抽完帧堆在模型闸前等太久导致内存暴涨）。已带 frames 的重跑题不走预处理，
+  仅等模型、仍可占名额。
 - MODEL_LIMITER（速率 = concurrency 令牌/秒 + 最大在途 = max_in_flight）：
   模型调用级限流，每次实际模型请求（含重试的每一次尝试）同时满足「一个速率
   令牌」与「一个在途名额」才发出——速率限制每秒请求数，在途上限防范模型
@@ -325,13 +327,22 @@ def _loop_time() -> float:
 MODEL_LIMITER: ResizableLimiter | TokenBucketRateLimiter = TokenBucketRateLimiter(
     DEFAULT_CONCURRENCY, DEFAULT_MAX_IN_FLIGHT
 )
-PIPELINE_LIMITER = ResizableLimiter(DEFAULT_WAITING_CAPACITY)
+PIPELINE_LIMITER = ResizableLimiter(
+    DEFAULT_MAX_IN_FLIGHT + DEFAULT_WAITING_CAPACITY
+)
 
 _settings = RuntimeSettings()
 
 
 def get_settings() -> RuntimeSettings:
     return _settings
+
+
+def _sync_pipeline_limit() -> None:
+    """流水线准入 = 最大在途 + 预处理等待容量；整题持有，封顶关键帧内存。"""
+    PIPELINE_LIMITER.set_limit(
+        max(1, _settings.max_in_flight + _settings.waiting_capacity)
+    )
 
 
 def apply_settings(
@@ -346,9 +357,12 @@ def apply_settings(
 
     concurrency = 模型调用速率（令牌/秒）→ MODEL_LIMITER.set_rate；
     max_in_flight = 模型最大在途（模型服务商并发限制）→ MODEL_LIMITER.set_max_in_flight；
-    waiting_capacity = 视频预处理并发 → PIPELINE_LIMITER.set_limit。三参独立、
-    不再联动。waiting_capacity=0 时 ResizableLimiter 自动 clamp 到 >=1
-    （最严也保留单路预处理）。
+    waiting_capacity = 「预处理并发 + 预处理后等模型」的额度 → PIPELINE_LIMITER。
+    流水线准入 = max_in_flight + waiting_capacity（整题持有至模型结束），
+    从而在途 ≤ max_in_flight、「抽帧中 + 已抽帧等模型」≤ waiting_capacity——
+    关键帧内存被该名额封顶。max_in_flight 或 waiting_capacity 任一变化都重算
+    PIPELINE 上限。waiting_capacity=0 时 pipeline = max_in_flight（最严不排队，
+    预处理也要等模型释放，ResizableLimiter 再 clamp 到 >=1）。
     """
     global _settings
     if concurrency is not None:
@@ -361,11 +375,12 @@ def apply_settings(
             MAX_MAX_IN_FLIGHT, max(MIN_MAX_IN_FLIGHT, int(max_in_flight))
         )
         MODEL_LIMITER.set_max_in_flight(_settings.max_in_flight)
+        _sync_pipeline_limit()
     if waiting_capacity is not None:
         _settings.waiting_capacity = min(
             MAX_WAITING_CAPACITY, max(MIN_WAITING_CAPACITY, int(waiting_capacity))
         )
-        PIPELINE_LIMITER.set_limit(max(1, _settings.waiting_capacity))
+        _sync_pipeline_limit()
     if eval_timeout_s is not None:
         _settings.eval_timeout_s = min(
             MAX_EVAL_TIMEOUT_S, max(MIN_EVAL_TIMEOUT_S, float(eval_timeout_s))

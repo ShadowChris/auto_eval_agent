@@ -426,7 +426,7 @@ async def test_global_limit_shared_across_tasks(monkeypatch):
     assert peak == 2  # 旧实现两任务各 4 并发，峰值会是 4+
 
 
-# ---------- 两级限流：预处理不占模型槽 / 等待容量 ----------
+# ---------- 两级限流：流水线准入（在途+等待容量）/ 模型速率 ----------
 
 def _prep_free_task(cfg, count: int = 2) -> Task:
     """无 frames 的 rich_content 独立题任务：one() 会走视频预处理分支。"""
@@ -488,10 +488,10 @@ async def test_video_prep_runs_while_model_slots_busy(monkeypatch):
     assert events.index(("eval_start", 1)) > events.index(("eval_end", 0))
 
 
-async def test_waiting_capacity_bounds_preprocessing(monkeypatch):
-    """预处理并发闸只约束视频抽帧、抽出即释放：pipeline=1 时两次预处理
-    严格串行，但第 2 题的抽帧可发生在第 1 题模型调用窗口内（不等到模型
-    释放）——模型在途只受模型限流、不被流水线闸门拦截。"""
+async def test_waiting_capacity_bounds_pipeline(monkeypatch):
+    """流水线准入 = 在途 + 等待容量，整题持有：pipeline=1 时第二题整体
+    （预处理 + 模型）严格串行在第一题之后——已抽帧等模型的题被封顶在等待
+    容量内，不堆积关键帧内存。"""
     cfg = load_config(Path("config"))
     task = _prep_free_task(cfg)
     events: list = []
@@ -509,12 +509,11 @@ async def test_waiting_capacity_bounds_preprocessing(monkeypatch):
     )
     await runner._run(task, cfg)
 
-    # 两次预处理严格串行（并发闸 1）
-    assert events.index(("prep", "s1")) > events.index(("prep", "s0"))
-    # 第 2 题抽帧不等模型槽：发生在第 1 题模型结束前（槽已随抽帧释放）
-    assert events.index(("prep", "s1")) < events.index(("eval_end", 0))
-    # 模型限流 1：第 2 题模型调用仍严格等第 1 题结束后才开始
-    assert events.index(("eval_start", 1)) > events.index(("eval_end", 0))
+    # 第二题整体（含预处理）严格串行在第一题之后
+    assert events == [
+        ("prep", "s0"), ("eval_start", 0), ("eval_end", 0),
+        ("prep", "s1"), ("eval_start", 1), ("eval_end", 1),
+    ]
 
 
 async def test_model_slot_wait_emits_progress_event(monkeypatch):
@@ -609,7 +608,7 @@ def test_settings_persist_roundtrip_and_limiter_align(tmp_path):
         scheduler.apply_settings(concurrency=3, max_in_flight=80, eval_timeout_s=600)
         assert scheduler.MODEL_LIMITER.limit == 3  # 语义=每秒请求数
         assert scheduler.MODEL_LIMITER.stats()["max_in_flight"] == 80
-        assert scheduler.PIPELINE_LIMITER.limit == DEFAULT_WAITING_CAPACITY
+        assert scheduler.PIPELINE_LIMITER.limit == 80 + DEFAULT_WAITING_CAPACITY
         assert scheduler.persist_settings(path) is True
 
         scheduler.apply_settings(
@@ -622,22 +621,22 @@ def test_settings_persist_roundtrip_and_limiter_align(tmp_path):
         assert scheduler.get_settings().eval_timeout_s == 600.0
         assert scheduler.MODEL_LIMITER.limit == 3
         assert scheduler.MODEL_LIMITER.stats()["max_in_flight"] == 80
-        assert scheduler.PIPELINE_LIMITER.limit == DEFAULT_WAITING_CAPACITY
+        assert scheduler.PIPELINE_LIMITER.limit == 80 + DEFAULT_WAITING_CAPACITY
 
-        # waiting_capacity 随设置往返，预处理并发上限随其重算
+        # waiting_capacity 随设置往返，流水线准入 = max_in_flight + waiting_capacity
         scheduler.apply_settings(waiting_capacity=5)
-        assert scheduler.PIPELINE_LIMITER.limit == 5
+        assert scheduler.PIPELINE_LIMITER.limit == 80 + 5
         assert scheduler.persist_settings(path) is True
         scheduler.apply_settings(waiting_capacity=DEFAULT_WAITING_CAPACITY)
         scheduler.load_persisted_settings(path)
         assert scheduler.get_settings().waiting_capacity == 5
-        assert scheduler.PIPELINE_LIMITER.limit == 5
+        assert scheduler.PIPELINE_LIMITER.limit == 80 + 5
 
-        # 仅调 concurrency：只改模型速率，不碰预处理并发
+        # 仅调 concurrency：只改模型速率，不碰流水线上限
         scheduler.apply_settings(concurrency=4)
         assert scheduler.get_settings().waiting_capacity == 5
         assert scheduler.MODEL_LIMITER.limit == 4
-        assert scheduler.PIPELINE_LIMITER.limit == 5
+        assert scheduler.PIPELINE_LIMITER.limit == 80 + 5
     finally:
         _reset_scheduler_globals()
 
@@ -687,7 +686,10 @@ def test_apply_settings_clamps_out_of_range():
         assert scheduler.get_settings().waiting_capacity == scheduler.MIN_WAITING_CAPACITY
         assert scheduler.get_settings().eval_timeout_s == scheduler.MIN_EVAL_TIMEOUT_S
         assert scheduler.MODEL_LIMITER.limit == scheduler.MAX_CONCURRENCY
-        assert scheduler.PIPELINE_LIMITER.limit == 1  # max(1, MIN_WAITING_CAPACITY)
+        # pipeline = max_in_flight + max(1, waiting_capacity)
+        assert scheduler.PIPELINE_LIMITER.limit == (
+            scheduler.get_settings().max_in_flight + scheduler.MIN_WAITING_CAPACITY
+        )
     finally:
         _reset_scheduler_globals()
 
@@ -729,7 +731,9 @@ def test_settings_api_roundtrip_and_validation(monkeypatch, tmp_path):
             assert "pipeline" in body and {"limit", "running", "queued"} <= set(
                 body["pipeline"]
             )
-            assert body["pipeline"]["limit"] == DEFAULT_WAITING_CAPACITY
+            assert body["pipeline"]["limit"] == (
+                DEFAULT_MAX_IN_FLIGHT + DEFAULT_WAITING_CAPACITY
+            )
 
             assert client.put("/api/settings", json={}).status_code == 422
             assert client.put("/api/settings", json={"concurrency": 0}).status_code == 422
@@ -765,14 +769,14 @@ def test_settings_api_roundtrip_and_validation(monkeypatch, tmp_path):
 
             assert scheduler.MODEL_LIMITER.limit == 5
             assert scheduler.MODEL_LIMITER.stats()["max_in_flight"] == 80
-            assert scheduler.PIPELINE_LIMITER.limit == DEFAULT_WAITING_CAPACITY
+            assert scheduler.PIPELINE_LIMITER.limit == 80 + DEFAULT_WAITING_CAPACITY
             assert scheduler.get_settings().eval_timeout_s == 480
 
-            # 仅传 waiting_capacity 也可保存，预处理并发上限随之更新
+            # 仅传 waiting_capacity 也可保存，流水线准入随之重算
             response = client.put("/api/settings", json={"waiting_capacity": 3})
             assert response.status_code == 200
             assert response.json()["waiting_capacity"] == 3
-            assert scheduler.PIPELINE_LIMITER.limit == 3
+            assert scheduler.PIPELINE_LIMITER.limit == 80 + 3
 
             # judges：未知裁判名 / 空列表 → 422；仅传 judges 也可保存
             known = [j.name for j in load_config(Path("config")).judges]
