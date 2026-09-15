@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from auto_eval.config import AppConfig, EvalOptions, JudgeConfig
+from auto_eval.llm_stream import ProviderStreamError
 from auto_eval.web import server
 from auto_eval.web.history import jsonl_export_rows
 from auto_eval.web.llm_providers import LLMProviderPayload, LLMProviderStore
@@ -189,6 +190,21 @@ def test_frontend_exposes_provider_switch_and_management():
     assert "Provider ID 仅支持" in js
     assert "模型请求限速" in html
     assert "request_rate_limit" in js
+
+
+def test_provider_connectivity_only_expands_empty_length_responses():
+    assert server._provider_test_needs_larger_budget(ProviderStreamError(
+        "empty",
+        body={"finish_reason": "length", "content": ""},
+    )) is True
+    assert server._provider_test_needs_larger_budget(ProviderStreamError(
+        "partial",
+        body={"finish_reason": "length", "content": "OK"},
+    )) is False
+    assert server._provider_test_needs_larger_budget(ProviderStreamError(
+        "blocked",
+        body={"finish_reason": "content_filter", "content": ""},
+    )) is False
 
 
 def test_jsonl_export_records_provider_without_secret():

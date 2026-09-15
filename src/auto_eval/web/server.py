@@ -41,7 +41,7 @@ from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
 from ..report.operation import OPERATION_REPORT_ASSETS, build_operation_report_html
 from ..table_dataset import convert_table
-from ..llm_stream import build_openai_client, stream_chat_completion
+from ..llm_stream import ProviderStreamError, build_openai_client, stream_chat_completion
 from .parse_input import Mode, parse_jsonl, parse_text
 from .history import (
     build_operation_comparison_xlsx,
@@ -244,6 +244,16 @@ class ProviderTestReq(BaseModel):
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
+_PROVIDER_TEST_TOKEN_BUDGETS = (512, 2048)
+
+
+def _provider_test_needs_larger_budget(exc: BaseException) -> bool:
+    """Whether a connectivity probe ended before any visible answer appeared."""
+    if not isinstance(exc, ProviderStreamError) or not isinstance(exc.body, dict):
+        return False
+    finish_reason = str(exc.body.get("finish_reason") or "").strip().lower()
+    content = str(exc.body.get("content") or "").strip()
+    return not content and finish_reason in {"length", "max_tokens"}
 
 
 def _operation_video_roots() -> list[Path]:
@@ -940,21 +950,31 @@ async def api_llm_provider_test(provider_id: str, req: ProviderTestReq):
             connect_timeout_s=10,
             read_timeout_s=30,
         )
-        response = await stream_chat_completion(
-            client,
-            {
-                "model": provider.model,
-                "messages": [{"role": "user", "content": "请只回复 OK"}],
-                "temperature": 0,
-                "max_tokens": 16,
-            },
-            include_usage=False,
-            total_timeout_s=30,
-            max_attempts=1,
-            rate_limit_key=f"provider:{provider.id}",
-            rate_limit_max_requests=provider.rate_limit_requests,
-            rate_limit_window_s=provider.rate_limit_window_s,
-        )
+        response = None
+        for index, token_budget in enumerate(_PROVIDER_TEST_TOKEN_BUDGETS):
+            try:
+                response = await stream_chat_completion(
+                    client,
+                    {
+                        "model": provider.model,
+                        "messages": [{"role": "user", "content": "请只回复 OK"}],
+                        "temperature": 0,
+                        "max_tokens": token_budget,
+                    },
+                    include_usage=False,
+                    total_timeout_s=30,
+                    max_attempts=1,
+                    rate_limit_key=f"provider:{provider.id}",
+                    rate_limit_max_requests=provider.rate_limit_requests,
+                    rate_limit_window_s=provider.rate_limit_window_s,
+                )
+                break
+            except Exception as exc:
+                has_larger_budget = index + 1 < len(_PROVIDER_TEST_TOKEN_BUDGETS)
+                if not has_larger_budget or not _provider_test_needs_larger_budget(exc):
+                    raise
+        if response is None:
+            raise RuntimeError("模型连接测试未返回响应")
         answer = str(response.choices[0].message.content or "").strip()
     except Exception as exc:
         message = str(exc).replace(provider.api_key, "***")
