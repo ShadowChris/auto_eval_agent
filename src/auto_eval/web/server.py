@@ -91,7 +91,11 @@ from .operation_comparison_import import (
     import_operation_comparison_file,
     validate_uploaded_comparison_source,
 )
-from .llm_providers import LLMProviderPayload, LLMProviderStore
+from .llm_providers import (
+    LLMProviderDefaultPayload,
+    LLMProviderPayload,
+    LLMProviderStore,
+)
 from .runner import (
     refresh_task_summary,
     run_append,
@@ -351,19 +355,23 @@ def _normalize_eval_options(app_cfg, options: dict) -> tuple[dict, object]:
     normalized = dict(options or {})
     backend = normalized.get("judge_backend") or {}
     provider_id = str(backend.get("provider_id") or "").strip()
+    resolution = None
     if not provider_id:
-        normalized.pop("judge_backend", None)
-        if "request_rate_limit" not in normalized:
-            return normalized, app_cfg
-        normalized["request_rate_limit"] = _normalize_request_rate_limit(
-            normalized.get("request_rate_limit"),
+        resolution = _llm_provider_store().resolve_default(app_cfg)
+        if resolution is None:
+            normalized.pop("judge_backend", None)
+            if "request_rate_limit" not in normalized:
+                return normalized, app_cfg
+            normalized["request_rate_limit"] = _normalize_request_rate_limit(
+                normalized.get("request_rate_limit"),
+            )
+            return normalized, _runtime_config_for_options(app_cfg, normalized)
+    else:
+        resolution = _llm_provider_store().resolve(
+            provider_id,
+            str(backend.get("model") or ""),
+            app_cfg,
         )
-        return normalized, _runtime_config_for_options(app_cfg, normalized)
-    resolution = _llm_provider_store().resolve(
-        provider_id,
-        str(backend.get("model") or ""),
-        app_cfg,
-    )
     normalized["judge_backend"] = {
         "provider_id": resolution.id,
         "provider_name": resolution.name,
@@ -900,7 +908,12 @@ def api_config():
 
 @app.get("/api/llm-providers")
 def api_llm_providers():
-    return {"items": _llm_provider_store().list_public(cfg())}
+    store = _llm_provider_store()
+    app_cfg = cfg()
+    return {
+        "items": store.list_public(app_cfg),
+        "default_backend": store.default_public(app_cfg),
+    }
 
 
 @app.post("/api/llm-providers", status_code=201)
@@ -910,6 +923,26 @@ def api_llm_provider_create(payload: LLMProviderPayload):
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"provider": provider}
+
+
+@app.put("/api/llm-providers/default")
+def api_llm_provider_default_update(payload: LLMProviderDefaultPayload):
+    try:
+        default_backend = _llm_provider_store().set_default(payload, cfg())
+    except KeyError as exc:
+        raise HTTPException(404, "Provider not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"default_backend": default_backend}
+
+
+@app.delete("/api/llm-providers/default")
+def api_llm_provider_default_delete():
+    return {
+        "ok": True,
+        "cleared": _llm_provider_store().clear_default(),
+        "default_backend": None,
+    }
 
 
 @app.put("/api/llm-providers/{provider_id}")
@@ -1686,14 +1719,17 @@ async def api_eval_single(req: SingleEvalReq):
             task.single_api_attempts[item_id] = rerun_attempt
 
     # 接口和 Web 任务类统一使用终端用户裁判；其余已有运行参数保持不变。
-    task.options = {
+    single_options = {
         **task.options,
         "judges": [judge_name],
         "concurrency": single_concurrency,
         "submission_source": "single_api",
     }
     try:
-        runtime_cfg = _runtime_config_for_options(app_cfg, task.options)
+        task.options, runtime_cfg = _normalize_eval_options(
+            app_cfg,
+            single_options,
+        )
     except KeyError as exc:
         raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
     except ValueError as exc:

@@ -123,6 +123,8 @@ createApp({
     const llmProviders = ref([]);
     const selectedProviderId = ref("");
     const selectedProviderModel = ref("");
+    const defaultProviderBackend = ref(null);
+    const providerDefaultBusy = ref(false);
     const providerManagerOpen = ref(false);
     const providerBusy = ref(false);
     const providerMessage = ref("");
@@ -260,6 +262,12 @@ createApp({
     const selectedProvider = computed(
       () => llmProviders.value.find((item) => item.id === selectedProviderId.value) || null,
     );
+
+    const selectedProviderIsDefault = computed(() => (
+      Boolean(defaultProviderBackend.value?.valid)
+      && defaultProviderBackend.value.provider_id === selectedProviderId.value
+      && defaultProviderBackend.value.model === selectedProviderModel.value.trim()
+    ));
 
     const defaultJudgeBaseUrl = computed(
       () => String(terminalUserJudge()?.base_url || "").trim(),
@@ -3560,7 +3568,7 @@ createApp({
       if (Number.isInteger(index) && index >= 0) startRerun([index]);
     }
 
-    async function loadProviders() {
+    async function loadProviders(applySavedDefault = false) {
       try {
         const response = await fetch("/api/llm-providers");
         const data = await response.json().catch(() => ({}));
@@ -3568,9 +3576,68 @@ createApp({
           providerApiErrorText(data, `HTTP ${response.status}`),
         );
         llmProviders.value = data.items || [];
+        defaultProviderBackend.value = data.default_backend || null;
+        if (applySavedDefault && data.default_backend?.valid) {
+          selectedProviderId.value = data.default_backend.provider_id || "";
+          onProviderChange();
+          selectedProviderModel.value = data.default_backend.model || selectedProviderModel.value;
+        } else if (applySavedDefault && data.default_backend && !data.default_backend.valid) {
+          providerError.value = true;
+          providerMessage.value = `默认模型服务不可用：${data.default_backend.error || "配置无效"}`;
+        }
       } catch (error) {
         providerError.value = true;
         providerMessage.value = `模型服务加载失败：${error?.message || "未知错误"}`;
+      }
+    }
+
+    async function saveProviderDefault() {
+      const providerId = selectedProviderId.value.trim();
+      const model = selectedProviderModel.value.trim();
+      if (!providerId || !model || providerDefaultBusy.value) return;
+      providerDefaultBusy.value = true;
+      providerError.value = false;
+      providerMessage.value = "正在保存默认模型服务…";
+      try {
+        const response = await fetch("/api/llm-providers/default", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider_id: providerId, model }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(
+          providerApiErrorText(data, `HTTP ${response.status}`),
+        );
+        defaultProviderBackend.value = data.default_backend || null;
+        providerMessage.value = `默认模型服务已保存：${selectedProvider.value?.name || providerId} / ${model}`;
+      } catch (error) {
+        providerError.value = true;
+        providerMessage.value = `默认设置保存失败：${error?.message || "未知错误"}`;
+      } finally {
+        providerDefaultBusy.value = false;
+      }
+    }
+
+    async function clearProviderDefault() {
+      if (providerDefaultBusy.value) return;
+      providerDefaultBusy.value = true;
+      providerError.value = false;
+      providerMessage.value = "正在清除默认模型服务…";
+      try {
+        const response = await fetch("/api/llm-providers/default", {
+          method: "DELETE",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(
+          providerApiErrorText(data, `HTTP ${response.status}`),
+        );
+        defaultProviderBackend.value = null;
+        providerMessage.value = "已清除默认模型服务；未显式选择时将使用角色配置。";
+      } catch (error) {
+        providerError.value = true;
+        providerMessage.value = `清除默认设置失败：${error?.message || "未知错误"}`;
+      } finally {
+        providerDefaultBusy.value = false;
       }
     }
 
@@ -3748,7 +3815,7 @@ createApp({
       models.value = d.models;
       selectedJudges.value = defaultJudgeSelection(mode.value);
       selectedModel.value = d.models[0] || "";
-      await loadProviders();
+      await loadProviders(true);
       loadHistory();
     });
 
@@ -3762,10 +3829,12 @@ createApp({
       workspacePage, taskModule,
       modes, mode, modeLabel, historyModeLabel, switchTaskModule, isVideoMode, isMultiGroupMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       llmProviders, selectedProviderId, selectedProviderModel, selectedProvider,
+      defaultProviderBackend, providerDefaultBusy, selectedProviderIsDefault,
       defaultJudgeBaseUrl, defaultJudgeModel,
       selectedProviderModels, providerModelOptions, providerManagerOpen, providerForm, providerBusy,
       providerMessage, providerError, onProviderChange, loadProviders, newProvider,
       editProvider, saveProvider, deleteProvider, testProvider,
+      saveProviderDefault, clearProviderDefault,
       concurrency, rateLimitRequests, rateLimitWindowSeconds, evalTimeout,
       running, progress, total, results, summary, taskId, runError,
       submitMode, appendTargetTaskId, appendTargetMeta, appendTargetCandidates, selectedAppendTarget,

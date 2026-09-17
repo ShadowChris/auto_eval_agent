@@ -7,7 +7,11 @@ from auto_eval.config import AppConfig, EvalOptions, JudgeConfig
 from auto_eval.llm_stream import ProviderStreamError
 from auto_eval.web import server
 from auto_eval.web.history import jsonl_export_rows
-from auto_eval.web.llm_providers import LLMProviderPayload, LLMProviderStore
+from auto_eval.web.llm_providers import (
+    LLMProviderDefaultPayload,
+    LLMProviderPayload,
+    LLMProviderStore,
+)
 
 
 def _cfg() -> AppConfig:
@@ -85,6 +89,43 @@ def test_provider_update_with_empty_key_keeps_existing_secret(tmp_path: Path):
     assert resolved.api_key == "key-1"
     assert resolved.base_url == "https://two.test/v1"
     assert resolved.model == "m2"
+
+
+def test_default_provider_and_model_persist_without_secret(tmp_path: Path):
+    settings_dir = tmp_path / "settings"
+    store = LLMProviderStore(settings_dir)
+    store.create(_payload("p1", "https://one.test/v1", "m1", "key-1"))
+
+    saved = store.set_default(
+        LLMProviderDefaultPayload(provider_id="p1", model="m1"),
+        _cfg(),
+    )
+
+    assert saved["provider_id"] == "p1"
+    assert saved["model"] == "m1"
+    assert saved["valid"] is True
+    raw = store.default_path.read_text(encoding="utf-8")
+    assert "key-1" not in raw
+    restarted = LLMProviderStore(settings_dir)
+    resolved = restarted.resolve_default(_cfg())
+    assert resolved is not None
+    assert resolved.id == "p1"
+    assert resolved.model == "m1"
+    assert resolved.api_key == "key-1"
+    assert restarted.clear_default() is True
+    assert restarted.resolve_default(_cfg()) is None
+
+
+def test_deleting_provider_clears_its_saved_default(tmp_path: Path):
+    store = LLMProviderStore(tmp_path / "settings")
+    store.create(_payload("p1", "https://one.test/v1", "m1", "key-1"))
+    store.set_default(
+        LLMProviderDefaultPayload(provider_id="p1", model="m1"),
+        _cfg(),
+    )
+
+    assert store.delete("p1") is True
+    assert store.default_path.exists() is False
 
 
 def test_builtin_providers_are_grouped_by_connection_not_judge_role(
@@ -175,6 +216,65 @@ def test_task_runtime_provider_binding_is_sanitized_and_isolated(
     }
 
 
+def test_saved_default_applies_when_request_omits_backend(
+    tmp_path: Path,
+    monkeypatch,
+):
+    store = LLMProviderStore(tmp_path / "settings")
+    store.create(_payload("p1", "https://one.test/v1", "m1", "key-1"))
+    store.set_default(
+        LLMProviderDefaultPayload(provider_id="p1", model="m1"),
+        _cfg(),
+    )
+    monkeypatch.setattr(server, "_llm_provider_store", lambda: store)
+
+    options, runtime = server._normalize_eval_options(
+        _cfg(),
+        {"judges": ["judge_2"]},
+    )
+
+    assert options["judge_backend"]["provider_id"] == "p1"
+    assert options["judge_backend"]["model"] == "m1"
+    assert runtime.judges[0].base_url == "https://one.test/v1"
+    assert runtime.judges[0].model == "m1"
+
+
+def test_explicit_backend_overrides_saved_default(tmp_path: Path, monkeypatch):
+    store = LLMProviderStore(tmp_path / "settings")
+    store.create(_payload("p1", "https://one.test/v1", "m1", "key-1"))
+    store.create(_payload("p2", "https://two.test/v1", "m2", "key-2"))
+    store.set_default(
+        LLMProviderDefaultPayload(provider_id="p1", model="m1"),
+        _cfg(),
+    )
+    monkeypatch.setattr(server, "_llm_provider_store", lambda: store)
+
+    options, runtime = server._normalize_eval_options(
+        _cfg(),
+        {"judge_backend": {"provider_id": "p2", "model": "m2"}},
+    )
+
+    assert options["judge_backend"]["provider_id"] == "p2"
+    assert runtime.judges[0].model == "m2"
+
+
+def test_default_provider_api_round_trip(tmp_path: Path, monkeypatch):
+    store = LLMProviderStore(tmp_path / "settings")
+    store.create(_payload("p1", "https://one.test/v1", "m1", "key-1"))
+    monkeypatch.setattr(server, "_llm_provider_store", lambda: store)
+    monkeypatch.setattr(server, "cfg", _cfg)
+
+    saved = server.api_llm_provider_default_update(
+        LLMProviderDefaultPayload(provider_id="p1", model="m1"),
+    )
+    listed = server.api_llm_providers()
+    cleared = server.api_llm_provider_default_delete()
+
+    assert saved["default_backend"]["provider_id"] == "p1"
+    assert listed["default_backend"]["model"] == "m1"
+    assert cleared == {"ok": True, "cleared": True, "default_backend": None}
+
+
 def test_frontend_exposes_provider_switch_and_management():
     root = Path(__file__).resolve().parents[1]
     html = (root / "src/auto_eval/web/static/index.html").read_text(encoding="utf-8")
@@ -183,7 +283,10 @@ def test_frontend_exposes_provider_switch_and_management():
     assert "Provider：" in html
     assert "Provider / 模型" in html
     assert "管理模型服务" in html
+    assert "保存为默认" in html
+    assert "清除默认" in html
     assert 'fetch("/api/llm-providers")' in js
+    assert 'fetch("/api/llm-providers/default"' in js
     assert "judge_backend" in js
     assert "providerModelOptions" in js
     assert "providerApiErrorText" in js
