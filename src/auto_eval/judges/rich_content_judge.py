@@ -124,7 +124,7 @@ class RichContentJudge:
         context: str,
         answer_text: str,
         frames: list[str],
-        reference_answer: str = "",
+        competitor_answer: str = "",
         attachments: list[str] | None = None,
         stream_callback=None,
     ) -> dict[str, Any]:
@@ -138,7 +138,7 @@ class RichContentJudge:
             question=question,
             context=context,
             answer_text=answer_text,
-            reference_answer=reference_answer,
+            competitor_answer=competitor_answer,
             frame_count=len(frames),
             attachment_count=len(attachments),
         )
@@ -189,8 +189,8 @@ class RichContentJudge:
                 model=self.client.model,
             ) from exc
 
-        if not reference_answer.strip():
-            # 未提供参考答案：事实冲突两字段强制省略（防裁判幻觉输出 yes/内容），
+        if not competitor_answer.strip():
+            # 未提供竞品答案：事实冲突两字段强制省略（防裁判幻觉输出 yes/内容），
             # 归一化后为 "no"/空。此处在 trace/result/汇总扩散之前改写，全下游生效。
             observation.factual_conflict = ""
             observation.factual_conflict_detail = ""

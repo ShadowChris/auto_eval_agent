@@ -978,9 +978,9 @@ async def _eval_one(
         answer_text = str(item_dict.get("answer_text") or "").strip()
         if answer_text:
             out["answer_text"] = answer_text
-        # 事实参考答案（仅用于 factual_conflict 判定，不代表正确答案；
+        # 竞品答案（仅用于 factual_conflict 判定，不代表正确答案、不作评分依据；
         # 空值时裁判侧省略该维度，结果归一为 no）
-        reference_answer = str(item_dict.get("reference_answer") or "").strip()
+        competitor_answer = str(item_dict.get("competitor_answer") or "").strip()
         # 视觉事实列表不做多裁判模糊合并；使用用户选择顺序中的第一位裁判，
         # 保证 presence/count/items 始终来自同一份自洽观察。
         attachments = [
@@ -990,7 +990,7 @@ async def _eval_one(
             question=item.question,
             context=(item.context or "").strip(),
             answer_text=answer_text,
-            reference_answer=reference_answer,
+            competitor_answer=competitor_answer,
             frames=frames,
             attachments=attachments,
         )
@@ -1103,7 +1103,7 @@ def _summarize_rich_content(task: Task) -> dict:
     solved_ok = [row for row in ok if row.get("problem_solved") == "ok"]
     solved_nok = [row for row in ok if row.get("problem_solved") == "nok"]
     solved_review = [row for row in ok if row.get("problem_solved") == "need_review"]
-    # 事实冲突（仅与 reference_answer 比对；无参考答案的行归一为 no，不计入）
+    # 事实冲突（仅与 competitor_answer 比对；无竞品答案的行归一为 no，不计入）
     factual_conflict_yes = [
         row for row in ok if row.get("factual_conflict") == "yes"
     ]

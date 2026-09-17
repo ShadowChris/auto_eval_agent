@@ -4,7 +4,7 @@
   compare:      {query, context?, video1, video2, answer1?, answer2?,
                  context1?, context2?, task_start_time?, task_end_time?}
   rich_content: {id?, query, context?, video_path, answer_text?,
-                 reference_answer?, task_start_time?, task_end_time?, category?,
+                 competitor_answer?, task_start_time?, task_end_time?, category?,
                  attachment_path?}
 """
 from __future__ import annotations
@@ -179,16 +179,18 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             if answer_text is not None and not isinstance(answer_text, str):
                 errors.append(f"第 {ln} 行 answer_text 必须是字符串")
                 continue
-            # 事实参考答案：仅用于 factual_conflict（事实冲突）判定，不代表正确答案
-            reference_answer = obj.get("reference_answer")
-            if reference_answer is not None and not isinstance(reference_answer, str):
-                errors.append(f"第 {ln} 行 reference_answer 必须是字符串")
+            # 竞品答案：仅用于 factual_conflict（事实冲突）判定，不代表正确答案、不作评分依据
+            competitor_answer = obj.get("competitor_answer")
+            if competitor_answer is None:
+                competitor_answer = obj.get("reference_answer")  # 兼容旧键
+            if competitor_answer is not None and not isinstance(competitor_answer, str):
+                errors.append(f"第 {ln} 行 competitor_answer 必须是字符串")
                 continue
             item["category"] = obj.get("category") or "default"
             if answer_text and answer_text.strip():
                 item["answer_text"] = answer_text.strip()
-            if reference_answer and reference_answer.strip():
-                item["reference_answer"] = reference_answer.strip()
+            if competitor_answer and competitor_answer.strip():
+                item["competitor_answer"] = competitor_answer.strip()
         if obj.get("category"):
             item["category"] = obj["category"]
         # 原始字段仅用于历史追溯和导出，不会进入 EvalItem 或裁判 prompt。
@@ -324,9 +326,12 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                 or f"{group_id}-t{turn}"
             )
             answer_text = _csv_clean(row.get("回复内容"))
-            # 事实参考答案：中文列头优先、英文列头回退（仅用于 factual_conflict 判定）
-            reference_answer = _csv_clean(row.get("事实参考答案")) or _csv_clean(
-                row.get("reference_answer")
+            # 竞品答案：新中文列头「竞品答案」优先，回退旧「事实参考答案」，再回退英文列头（仅用于 factual_conflict 判定）
+            competitor_answer = (
+                _csv_clean(row.get("竞品答案"))
+                or _csv_clean(row.get("事实参考答案"))
+                or _csv_clean(row.get("competitor_answer"))
+                or _csv_clean(row.get("reference_answer"))
             )
             context = _build_csv_context(
                 _csv_clean(row.get("开始时间节点")),
@@ -349,8 +354,8 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             }
             if answer_text:
                 item["answer_text"] = answer_text
-            if reference_answer:
-                item["reference_answer"] = reference_answer
+            if competitor_answer:
+                item["competitor_answer"] = competitor_answer
             if attachment_path:
                 item["attachment_path"] = [
                     p.strip()
