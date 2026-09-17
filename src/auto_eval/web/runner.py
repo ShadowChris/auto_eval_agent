@@ -34,7 +34,7 @@ from .video_prepare import (
     prepare_session_visual_compare_item,
 )
 from .scheduler import MODEL_LIMITER, PIPELINE_LIMITER, get_settings
-from .tasks import Task, retire_task, upsert_result_by_index
+from .tasks import EvalStopped, Task, retire_task, upsert_result_by_index
 
 
 logger = logging.getLogger(__name__)
@@ -175,6 +175,17 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
         _persist_task(task, force=True)
         try:
             await _run(task, cfg)
+            if task.stopped:
+                # 用户停止：非崩溃终态。已完成条目保留，未评估条目已在各门控处
+                # 落「评测已停止」结果；置 error 让前端/历史收敛到终态。
+                task.summary = _summarize(task)
+                task.status = "error"
+                task.error = task.error or "用户停止评测，保留已完成结果"
+                await task.publish(
+                    "error", {"message": task.error, "stopped": True}
+                )
+                _persist_task(task, force=True)
+                return
             task.summary = _summarize(task)
             task.status = "done"
             await task.publish("done", {"summary": task.summary, "total": len(task.items)})
@@ -303,6 +314,24 @@ def _make_item_evaluator(
 
         item_id = item_dict.get("id") or f"q{idx}"
 
+        # 运行控制门（题内闭环）：暂停阻塞在此（不发起新的预处理/模型调用），
+        # 停止则本题直接落「评测已停止」结果返回——已占上流水线槽但尚未发起
+        # 模型调用的题，也会在暂停/停止时被这条门拦截，而不是钻各循环层
+        # 门控与真正模型调用之间的小空窗继续跑。
+        try:
+            await task.wait_runnable()
+        except EvalStopped:
+            stopped_res = {
+                "index": idx,
+                "item_id": item_id,
+                "query": item_dict.get("query", ""),
+                "error": "评测已停止",
+            }
+            if item_dict.get("context"):
+                stopped_res["context"] = item_dict["context"]
+            await finish(idx, stopped_res, time.perf_counter())
+            return stopped_res
+
         def collect_judge_trace(trace_path: str, record: dict) -> None:
             pending_judge_traces.append((trace_path, record))
 
@@ -419,6 +448,13 @@ def _make_item_evaluator(
                     async with MODEL_LIMITER.slot(
                         priority=priority and attempt == 0
                     ):
+                        # 已停止但恰在拿到模型槽时：不再发起模型调用（排队期间
+                        # stop 已触发），本题落「评测已停止」，交由 res is None
+                        # 分支返回；暂停不在此处阻塞（暂停只卡调度边界，已入在途
+                        # 的继续跑完）。
+                        if task.stopped:
+                            last_error = EvalStopped("评测已停止")
+                            break
                         try:
                             if attempt:
                                 log_event(
@@ -471,7 +507,11 @@ def _make_item_evaluator(
                     "index": idx,
                     "item_id": item_id,
                     "query": item_dict.get("query", ""),
-                    "error": f"{type(last_error).__name__}: {last_error}",
+                    "error": (
+                        "评测已停止"
+                        if isinstance(last_error, EvalStopped)
+                        else f"{type(last_error).__name__}: {last_error}"
+                    ),
                 }
                 if item_dict.get("context"):
                     res["context"] = item_dict["context"]
@@ -567,6 +607,14 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         total = len(idxs)
         prior_summary = ""
         for turn_no, idx in enumerate(idxs, 1):
+            # 运行控制门：暂停停在本轮入口（不掉总结链），停止将本轮及后续轮
+            # 落「评测已停止」并终止该会话（否则连坐逻辑会误标「同组前序轮次失败」）
+            try:
+                await task.wait_runnable()
+            except EvalStopped:
+                for later_idx in idxs[turn_no - 1:]:
+                    await fail(later_idx, task.items[later_idx], "评测已停止")
+                return
             it = task.items[idx]
             is_last = "是" if turn_no == total else "否"
             turn_marker = f"【轮次】第 {turn_no} 轮 / 共 {total} 轮 / 是否最后一轮：{is_last}"
@@ -576,6 +624,11 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             )
             it["context"] = f"{base_ctx}\n\n{turn_marker}{history_part}"
             res = await one(idx, it, priority=turn_no > 1)  # 第 2+ 轮模型槽插队头
+            if task.stopped:
+                # 停止：本轮已落「评测已停止」，剩余轮同样标停，不级联连坐文案
+                for later_idx in idxs[turn_no:]:
+                    await fail(later_idx, task.items[later_idx], "评测已停止")
+                return
             if res.get("error") and turn_no < len(idxs):
                 reason = f"同组前序轮次失败：{res['error']}"
                 for later_idx in idxs[turn_no:]:
@@ -597,6 +650,14 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             await run_session(idxs)
 
     async def _standalone_job(i: int) -> None:
+        # 运行控制门：暂停/停止时在获取流水线准入槽之前拦截——暂停的任务不占
+        # 全局流水线槽位（standalone 题量多，占满会挤压其他任务的新工作），
+        # 停止则本题直接落「评测已停止」。
+        try:
+            await task.wait_runnable()
+        except EvalStopped:
+            await fail(i, task.items[i], "评测已停止")
+            return
         # 整题占一个流水线准入槽（预处理 + 模型同占，封顶关键帧内存）
         async with PIPELINE_LIMITER:
             await one(i, task.items[i])
@@ -818,6 +879,14 @@ async def _run_update_batch_body(
             prior_summary = initial_summary
             for pos, (idx, item_dict) in enumerate(batch, 1):
                 turn_no = pos + initial_turn  # 总结链编号延续原组轮次
+                # 运行控制门（整批占一个流水线槽，暂停/停止在槽内等待/终止）：
+                # 停止将本批剩余条目落「评测已停止」并提前退出，不走连坐失败文案。
+                try:
+                    await task.wait_runnable()
+                except EvalStopped:
+                    for later_idx, later_item in batch[pos - 1:]:
+                        await fail(later_idx, later_item, "评测已停止")
+                    break
                 current = (idx, item_dict)
                 if prior_summary:
                     base_ctx = (item_dict.get("context") or "").strip()
@@ -831,6 +900,11 @@ async def _run_update_batch_body(
                     res = await one(idx, item_dict, priority=pos > 1)
                 finally:
                     task.in_flight_indexes.discard(idx)
+                if task.stopped and pos < len(batch):
+                    # 停止：本条已落「评测已停止」，剩余条同样标停，不级联连坐文案
+                    for later_idx, later_item in batch[pos:]:
+                        await fail(later_idx, later_item, "评测已停止")
+                    break
                 if res.get("error") and pos < len(batch):
                     reason = f"同组前序轮次失败：{res['error']}"
                     for later_idx, later_item in batch[pos:]:
@@ -844,7 +918,12 @@ async def _run_update_batch_body(
                     if summary
                     else f"【第{turn_no}轮】（未生成总结）\n"
                 )
-        if manage_status:
+        if manage_status and task.stopped:
+            task.status = "error"
+            task.error = task.error or "用户停止评测，保留已完成结果"
+            await task.publish("error", {"message": task.error, "stopped": True})
+            _persist_task(task, force=True)
+        elif manage_status:
             task.status = "done"
             task.summary = _summarize(task)  # publish 前重算（节流后不再每题重算）
             await task.publish(
@@ -891,7 +970,14 @@ async def run_update_batch(
         task.active_runs -= 1
         idle = task.active_runs <= 0
         interrupted = _mark_interrupted_if_stuck(task) if idle else False
-        if idle and not manage_status and task.status == "error" and _all_items_healthy(task):
+        if idle and task.stopped:
+            # 用户停止：非崩溃终态，保留已完成结果。manage_status 批的 error
+            # 终态已在 body 发过，此处只兜底非 manage_status 批并跳过 heal——
+            # 停止产生的「评测已停止」error 行本就非全健康。
+            if task.status != "error":
+                task.status = "error"
+            task.error = task.error or "用户停止评测，保留已完成结果"
+        elif idle and not manage_status and task.status == "error" and _all_items_healthy(task):
             # 重跑修复全部坏项：error 任务 heal 为 done，让下方 R4 补发
             # done+新 summary；否则中断过的任务重跑成功后仍挂着 error 终态。
             # manage_status 批的终态由 body 自己发过，不在 heal 范围内。

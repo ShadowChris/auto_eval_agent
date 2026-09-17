@@ -80,6 +80,9 @@ createApp({
     const settingsMessage = ref("");
     const settingsMessageOk = ref(true);
     const running = ref(false);
+    // 运行控制：暂停在下一题边界停住（可继续），停止为终态
+    const taskPaused = ref(false);
+    const taskStopped = ref(false);
     const progress = ref(0);
     const total = ref(0);
     const results = ref([]);
@@ -465,6 +468,8 @@ createApp({
         runError.value = "";
         running.value = true;
         rerunMode.value = true;
+        taskPaused.value = false;
+        taskStopped.value = false;
         total.value = indexes.length;
         progress.value = 0;
         // 与 submit() 同形预置所选行 pending：mergeItemProgress 的 stage_rank
@@ -1012,6 +1017,8 @@ createApp({
       );
       running.value = true;
       rerunMode.value = false; // 全量跑：计数器回到全量口径
+      taskPaused.value = false;
+      taskStopped.value = false;
       const body = {
         mode: mode.value,
         items: items.value,
@@ -1041,6 +1048,30 @@ createApp({
       }
       taskId.value = d.task_id;
       connectSSE();
+    }
+
+    // —— 运行控制：暂停 / 继续 / 停止 ——
+    async function pauseTask() {
+      if (!taskId.value) return;
+      const r = await fetch(`/api/eval/${encodeURIComponent(taskId.value)}/pause`, { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { runError.value = "暂停失败：" + (d.detail || "未知错误"); return; }
+      taskPaused.value = true;
+    }
+    async function resumeTask() {
+      if (!taskId.value) return;
+      const r = await fetch(`/api/eval/${encodeURIComponent(taskId.value)}/resume`, { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { runError.value = "继续失败：" + (d.detail || "未知错误"); return; }
+      taskPaused.value = false;
+    }
+    async function stopTask() {
+      if (!taskId.value) return;
+      if (!confirm("确定停止评估？未完成的题将标记为已停止，已完成结果保留。")) return;
+      const r = await fetch(`/api/eval/${encodeURIComponent(taskId.value)}/stop`, { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { runError.value = "停止失败：" + (d.detail || "未知错误"); return; }
+      taskStopped.value = true;
     }
 
     async function reconcileTaskAfterError(message) {
@@ -1119,6 +1150,12 @@ createApp({
         const d = JSON.parse(e.data);
         mergeItemProgress(d);
       });
+      es.addEventListener("control", (e) => {
+        // 暂停/继续/停止：多标签页同步控制态
+        const d = JSON.parse(e.data);
+        if (typeof d.paused === "boolean") taskPaused.value = d.paused;
+        if (d.stopped) taskStopped.value = true;
+      });
       es.addEventListener("progress_event", (e) => {
         appendProgressEvent(JSON.parse(e.data));
       });
@@ -1156,6 +1193,8 @@ createApp({
         resultPage.value = 1;
         running.value = false;
         rerunMode.value = false;
+        taskPaused.value = false;
+        taskStopped.value = false;
         es.close();
         loadHistory();
       });
@@ -1163,15 +1202,19 @@ createApp({
         // 原生 EventSource 网络错误没有 data，让浏览器按协议自动重连并回放状态。
         if (!e.data) return;
         let message = "未知错误";
+        let stopped = false;
         try {
           const d = JSON.parse(e.data);
           message = d.message || message;
+          stopped = Boolean(d.stopped);
         } catch (_) {}
         running.value = false;
         rerunMode.value = false;
+        taskPaused.value = false;
+        if (stopped) taskStopped.value = true;
         es.close();
         await reconcileTaskAfterError(message);
-        runError.value = "评估出错：" + message;
+        runError.value = "评估" + (stopped ? "已停止：" : "出错：") + message;
       });
     }
 
@@ -1326,6 +1369,8 @@ createApp({
         taskId.value = "";
         results.value = [];
         summary.value = null;
+        taskPaused.value = false;
+        taskStopped.value = false;
       }
       if (comparisonSelectedItems.value[id]) {
         const next = { ...comparisonSelectedItems.value };
@@ -1551,10 +1596,14 @@ createApp({
           total.value = pendingCount || total.value;
         }
         running.value = true;
+        taskPaused.value = Boolean(d.paused);
+        taskStopped.value = Boolean(d.stopped);
         connectSSE();
       } else {
         running.value = false;
         rerunMode.value = false;
+        taskPaused.value = false;
+        taskStopped.value = false;
       }
       activeSkill.value = "";
       resultQuery.value = "";
@@ -1614,6 +1663,7 @@ createApp({
       settingsJudgeDisplay,
       loadSettings, saveSettings, onSettingsToggle,
       running, progress, total, results, summary, taskId, runError,
+      taskPaused, taskStopped, pauseTask, resumeTask, stopTask,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, historyNoteDrafts, historyNoteEditing, loadingHistory, pageSize,
       historyPage, historyPageSize, historyPageCount, pagedHistoryItems, historyJumpPage,

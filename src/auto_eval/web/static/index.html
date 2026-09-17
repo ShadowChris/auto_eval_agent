@@ -212,7 +212,12 @@
 
   <section>
     <button class="primary" @click="submit" :disabled="running || !canSubmit">▶ 开始评估</button>
-    <span v-if="running" class="running">{{ rerunMode ? "重跑中" : "评估中" }}… {{ progress }}/{{ total }}</span>
+    <span v-if="running" class="running">
+      {{ rerunMode ? "重跑中" : "评估中" }}… {{ progress }}/{{ total }}
+      <button v-if="taskId" @click="taskPaused ? resumeTask() : pauseTask()"
+              :disabled="taskStopped" title="暂停停在下一题边界，可继续">{{ taskPaused ? "继续" : "暂停" }}</button>
+      <button v-if="taskId" class="btn-danger" @click="stopTask" :disabled="taskStopped">停止</button>
+    </span>
     <p v-if="runError" class="run-error">{{ runError }}</p>
   </section>
 

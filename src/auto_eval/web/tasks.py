@@ -14,6 +14,10 @@ from .history import load_snapshot, make_session_name, save_task
 _MAX_SUB_QUEUE = 500
 
 
+class EvalStopped(Exception):
+    """评测被用户「停止」：非崩溃，用于门控处终止剩余评测（结果态异常）。"""
+
+
 @dataclass
 class Task:
     id: str
@@ -41,6 +45,42 @@ class Task:
     # 退休判定用计数而非 status：run_update_batch(manage_status=False)
     # 全程 status=done，只有计数能 pin 住运行中的任务对象。
     active_runs: int = 0
+    # 用户运行控制（运行时状态，不进快照，重启即失效）：
+    #   paused  —— 暂停：停在下一题边界，恢复（resume）后继续，可再次暂停/停止；
+    #   stopped —— 停止：终态，唤醒暂停等待并终止剩余条目，已保留结果不丢。
+    # _control_event 为暂停/恢复/停止的唤醒信号（Gate 语义：clear=开口，
+    # pause 清空、resume/stop 置位），跨事件循环安全（asyncio.Event 惰性建 future）。
+    paused: bool = False
+    stopped: bool = False
+    _control_event: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False, compare=False
+    )
+
+    async def wait_runnable(self) -> None:
+        """评测门槛：每次开始评测单个条目前调用。
+
+        暂停中阻塞等待恢复或停止（恢复后继续，停止则取消当前协程并抛
+        EvalStopped 让调用方标记剩余条目）；未暂停且未停止时直接返回。
+        """
+        while self.paused and not self.stopped:
+            await self._control_event.wait()
+        if self.stopped:
+            raise EvalStopped
+
+    def pause(self) -> None:
+        """暂停：停在下一题边界。"""
+        self.paused = True
+        self._control_event.clear()
+
+    def resume(self) -> None:
+        """恢复：解除暂停，唤醒所有在 wait_runnable 阻塞的评测。"""
+        self.paused = False
+        self._control_event.set()
+
+    def stop(self) -> None:
+        """停止：终态。置 stopped 并唤醒暂停等待者，让其走到 EvalStopped。"""
+        self.stopped = True
+        self._control_event.set()
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=_MAX_SUB_QUEUE)

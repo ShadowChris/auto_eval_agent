@@ -358,6 +358,61 @@ async def api_eval(req: EvalReq):
     return {"task_id": task.id}
 
 
+def _control_task(task_id: str):
+    """取运行中任务（active_runs>0 才可控制），否则 404/409。"""
+    task = TASKS.get(task_id)
+    if not task:
+        raise HTTPException(404, "task not found")
+    if task.active_runs <= 0:
+        raise HTTPException(409, "任务未在评测中，无法暂停或停止")
+    return task
+
+
+@app.post("/api/eval/{task_id}/pause")
+async def api_eval_pause(task_id: str):
+    """暂停：停在下一题边界，已完成结果保留；可再次暂停/继续/停止。"""
+    task = _control_task(task_id)
+    task.pause()
+    await task.publish("control", {"paused": True, "stopped": False})
+    return {
+        "task_id": task.id,
+        "paused": task.paused,
+        "stopped": task.stopped,
+        "status": task.status,
+    }
+
+
+@app.post("/api/eval/{task_id}/resume")
+async def api_eval_resume(task_id: str):
+    """继续：解除暂停，被 gate 住的评测继续跑。停止后不可继续。"""
+    task = _control_task(task_id)
+    if task.stopped:
+        raise HTTPException(409, "任务已停止，无法继续")
+    task.resume()
+    await task.publish("control", {"paused": task.paused, "stopped": False})
+    return {
+        "task_id": task.id,
+        "paused": task.paused,
+        "stopped": task.stopped,
+        "status": task.status,
+    }
+
+
+@app.post("/api/eval/{task_id}/stop")
+async def api_eval_stop(task_id: str):
+    """停止：终态。未评估条目落「评测已停止」，已完成结果保留，任务转 error。"""
+    task = _control_task(task_id)
+    task.stop()
+    # 唤醒暂停等待者；停止过程由各评测路径将剩余条目标记后收敛到 error 终态
+    await task.publish("control", {"paused": False, "stopped": True})
+    return {
+        "task_id": task.id,
+        "paused": task.paused,
+        "stopped": task.stopped,
+        "status": task.status,
+    }
+
+
 @app.post("/api/eval/items")
 async def api_eval_items(req: EvalItemsReq):
     """向 task 批量更新/追加 items：按 id 匹配，命中原位替换、未命中追加末尾。
@@ -630,6 +685,8 @@ def api_history_detail(task_id: str):
     # 供前端判断"仍在跑（重跑/全量）需重连 SSE"：peek 命中的是活对象，
     # 直接取字段；快照本身不含运行态。
     payload["active_runs"] = task.active_runs
+    payload["paused"] = task.paused
+    payload["stopped"] = task.stopped
     return payload
 
 
