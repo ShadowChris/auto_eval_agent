@@ -117,6 +117,9 @@ def test_history_note_ui_supports_multiline_editing_and_full_display():
     assert 'v-for="h in pagedHistoryItems"' in html
     assert 'cancelHistoryTask(h)' in html
     assert "historyStatusLabel(h.status)" in html
+    assert 'partial_completed: "部分完成"' in js
+    assert 'failed: "失败"' in js
+    assert 'cancelled: "取消"' in js
     assert 'class="history-duration-cell">耗时</th>' in html
     assert "formatHistoryDuration(h)" in html
     assert "function formatHistoryDuration(item)" in js

@@ -276,6 +276,9 @@ async def test_single_eval_api_creates_operation_task_with_end_user(monkeypatch)
         "id": "simple_001",
         "status": "success",
         "evaluation_status": "running",
+        "progress": 0,
+        "processed": 0,
+        "total": 1,
         "action": "created",
         "dataset_size": 1,
     }

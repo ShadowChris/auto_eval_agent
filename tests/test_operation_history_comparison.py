@@ -396,7 +396,7 @@ def test_history_comparison_ui_links_to_comparison_workspace() -> None:
     assert "comparisonIssueDeltaText" in js
     assert 'item?.mode === "operation"' in js
     assert 'item?.operation_layout !== "multi_group"' in js
-    assert 'item?.status === "done"' in js
+    assert '["completed", "partial_completed", "done"].includes(item?.status)' in js
     assert "加入对比分析" in html
     assert "taskModule==='comparison'" in html
     assert "第一组为对照组" in html

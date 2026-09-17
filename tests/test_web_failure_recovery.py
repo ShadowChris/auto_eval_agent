@@ -239,6 +239,32 @@ def test_running_snapshot_exposes_explicit_total_progress():
     assert payload["total"] == 3
 
 
+def test_snapshot_exposes_public_terminal_batch_status_and_processed_count():
+    task = Task(
+        id="partial-progress",
+        mode="operation",
+        items=[
+            {"id": "q0", "query": "q0"},
+            {"id": "q1", "query": "q1"},
+            {"id": "q2", "query": "q2"},
+        ],
+        options={},
+        status="done",
+        results=[
+            {"index": 0, "item_id": "q0", "correctness": "ok"},
+            {"index": 1, "item_id": "q1", "error": "provider failed"},
+        ],
+        done_total=2,
+    )
+
+    payload = history.snapshot_payload(history.task_to_snapshot(task))
+
+    assert payload["status"] == "partial_completed"
+    assert payload["done_total"] == 1
+    assert payload["processed_total"] == 2
+    assert payload["total"] == 3
+
+
 def test_compact_snapshot_omits_heavy_item_media_and_limits_progress_events():
     task = Task(
         id="compact-history",

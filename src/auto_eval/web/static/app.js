@@ -2133,7 +2133,9 @@ createApp({
         };
       });
       results.value = snapshotResults;
-      progress.value = snapshotResults.length;
+      progress.value = Number.isFinite(Number(snapshot?.done_total))
+        ? Number(snapshot.done_total)
+        : snapshotResults.filter((result) => !result?.error).length;
       itemProgress.value = reconciled;
       if (snapshot?.summary) summary.value = snapshot.summary;
     }
@@ -2754,13 +2756,16 @@ createApp({
     function canCompareHistoryItem(item) {
       return item?.mode === "operation"
         && item?.operation_layout !== "multi_group"
-        && item?.status === "done";
+        && ["completed", "partial_completed", "done"].includes(item?.status);
     }
 
     function canAppendHistoryItem(item) {
       return item?.mode === "operation"
         && item?.operation_layout !== "multi_group"
-        && ["done", "error", "cancelled"].includes(item?.status);
+        && [
+          "completed", "partial_completed", "failed", "cancelled",
+          "done", "error",
+        ].includes(item?.status);
     }
 
     function hasOperationInputForAppend() {
@@ -3235,11 +3240,14 @@ createApp({
     function historyStatusLabel(status) {
       return ({
         pending: "等待中",
-        running: "评估中",
+        running: "进行中",
         rerunning: "重跑中",
-        done: "已完成",
+        done: "完成",
+        completed: "完成",
+        partial_completed: "部分完成",
         error: "失败",
-        cancelled: "已中断",
+        failed: "失败",
+        cancelled: "取消",
       }[status] || status || "未知");
     }
 
@@ -3291,7 +3299,7 @@ createApp({
           ? Number(d.done_total)
           : results.value.length;
         running.value = isActiveHistoryStatus(d.status);
-        runKind.value = d.status === "rerunning"
+        runKind.value = d.active_rerun || d.status === "rerunning"
           ? "rerun"
           : d.active_append
             ? "append"
@@ -3304,13 +3312,13 @@ createApp({
           || [];
         rerunProgressIndices.value = [...restoredRerunIndices];
         progressView.value = restoredRerunIndices.length
-          && (d.status === "rerunning" || keepRerunView)
+          && (d.active_rerun || d.status === "rerunning" || keepRerunView)
           ? "rerun"
           : "all";
         selectedRerunIndices.value = new Set();
         runError.value = d.status === "cancelled"
-          ? (d.error || "任务已中断")
-          : d.status === "error"
+          ? (d.error || "任务已取消")
+          : ["failed", "error"].includes(d.status)
             ? (d.error ? `评估出错：${d.error}` : "评估出错")
             : "";
         activeSkill.value = "";

@@ -313,7 +313,7 @@ async def test_immediate_rerun_cancel_restores_parent_status(monkeypatch):
         response = await server.api_eval_cancel(task.id)
 
         assert entered is False
-        assert response["status"] == "done"
+        assert response["status"] == "partial_completed"
         assert task.status == "done"
         assert task.active_rerun is None
         assert task.rerun_history[-1]["status"] == "cancelled"

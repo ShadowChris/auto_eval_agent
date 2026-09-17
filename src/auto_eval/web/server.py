@@ -72,6 +72,7 @@ from .dataset_revision import (
     EXCLUDED as DATASET_EXCLUDED,
     active_result_count,
     active_total,
+    batch_run_state,
     is_item_active,
     tracked_item,
 )
@@ -1259,6 +1260,7 @@ async def api_eval(req: EvalReq):
         if req.conflict_policy == "preview":
             return {
                 "task_id": task.id,
+                **batch_run_state(task.status, task.items, task.results),
                 "action": "preview",
                 "dataset_size": active_total(task.items),
                 "merge_preview": public_preview,
@@ -1503,6 +1505,7 @@ async def api_eval(req: EvalReq):
                 raise HTTPException(500, "追加记录写入历史快照失败")
             return {
                 "task_id": task.id,
+                **batch_run_state(task.status, task.items, task.results),
                 "action": "skipped",
                 "item_indices": [],
                 "dataset_size": active_total(task.items),
@@ -1570,8 +1573,10 @@ async def api_eval(req: EvalReq):
             task.execution = None
 
     execution.add_done_callback(clear_execution)
+    run_state = batch_run_state(task.status, task.items, task.results)
     return {
         "task_id": task.id,
+        **run_state,
         "action": action,
         "item_indices": item_indices,
         "dataset_size": active_total(task.items),
@@ -1711,11 +1716,15 @@ async def api_eval_single(req: SingleEvalReq):
         ),
     )
     task.item_executions[item_id] = execution
+    run_state = batch_run_state(task.status, task.items, task.results)
     return {
         "task_id": task.id,
         "id": item_id,
         "status": "success",
-        "evaluation_status": task.status,
+        "evaluation_status": run_state["status"],
+        "progress": run_state["progress"],
+        "processed": run_state["processed"],
+        "total": run_state["total"],
         "action": action,
         "dataset_size": active_total(task.items),
     }
@@ -1891,12 +1900,11 @@ async def api_stream(
         try:
             # 先回放任务级状态，新标签页无需等待下一条结果即可
             # 显示“评估中 done/total”。
+            run_state = batch_run_state(task.status, task.items, task.results)
             yield _sse(
                 "task_state",
                 {
-                    "status": task.status,
-                    "progress": active_result_count(task.items, task.results),
-                    "total": active_total(task.items),
+                    **run_state,
                     "started_at": task.started_at,
                     "finished_at": task.finished_at,
                     "duration_s": task.elapsed_s(),
@@ -1971,25 +1979,39 @@ async def api_stream(
             if task.status in {"done", "error", "cancelled"}:
                 if not terminal_replayed:
                     if task.status == "done":
+                        terminal_state = batch_run_state(
+                            task.status, task.items, task.results,
+                        )
                         yield _sse(
                             "done",
                             {
+                                **terminal_state,
                                 "summary": task.summary,
-                                "total": active_total(task.items),
                                 "duration_s": task.duration_s,
                             },
                             event_id=task.event_cursor or None,
                         )
                     elif task.status == "error":
+                        terminal_state = batch_run_state(
+                            task.status, task.items, task.results,
+                        )
                         yield _sse(
                             "error",
-                            {"message": task.error, "duration_s": task.duration_s},
+                            {
+                                **terminal_state,
+                                "message": task.error,
+                                "duration_s": task.duration_s,
+                            },
                             event_id=task.event_cursor or None,
                         )
                     else:
+                        terminal_state = batch_run_state(
+                            task.status, task.items, task.results,
+                        )
                         yield _sse(
                             "cancelled",
                             {
+                                **terminal_state,
                                 "message": task.error or "任务已中断",
                                 "duration_s": task.duration_s,
                             },
@@ -2051,13 +2073,18 @@ def api_history(
         live = get_live_task(str(row.get("task_id") or ""))
         if live is None:
             continue
+        run_state = batch_run_state(live.status, live.items, live.results)
+        live_progress = int(run_state["progress"])
+        if not live.results:
+            live_progress = min(
+                max(live_progress, int(live.done_total or 0)),
+                int(run_state["total"]),
+            )
         row.update({
-            "status": live.status,
-            "total": active_total(live.items),
-            "done": max(
-                live.done_total,
-                active_result_count(live.items, live.results),
-            ),
+            "status": run_state["status"],
+            "total": run_state["total"],
+            "done": live_progress,
+            "processed": run_state["processed"],
             "started_at": live.started_at,
             "finished_at": live.finished_at,
             "duration_s": live.elapsed_s(),
@@ -2568,12 +2595,17 @@ async def api_eval_cancel(task_id: str):
                     "finished_at": finished_at,
                 }
             await task.publish("cancelled", {
+                **batch_run_state(task.status, task.items, task.results),
                 "message": task.error,
                 "duration_s": task.duration_s,
                 "append": attempt,
             })
             save_task(task)
-        return {"ok": True, "task_id": task.id, "status": task.status}
+        return {
+            "ok": True,
+            "task_id": task.id,
+            **batch_run_state(task.status, task.items, task.results),
+        }
     if task.status == "rerunning":
         execution = task.execution
         if execution is not None and not execution.done():
@@ -2600,14 +2632,20 @@ async def api_eval_cancel(task_id: str):
             await task.publish("rerun_cancelled", {
                 "attempt": attempt,
                 "summary": task.summary,
-                "status": task.status,
-                "progress": task.done_total,
-                "total": active_total(task.items),
+                **batch_run_state(task.status, task.items, task.results),
             })
             save_task(task)
-        return {"ok": True, "task_id": task.id, "status": task.status}
+        return {
+            "ok": True,
+            "task_id": task.id,
+            **batch_run_state(task.status, task.items, task.results),
+        }
     if task.status not in {"pending", "running"}:
-        return {"ok": True, "task_id": task.id, "status": task.status}
+        return {
+            "ok": True,
+            "task_id": task.id,
+            **batch_run_state(task.status, task.items, task.results),
+        }
 
     reason = "用户手动中断批跑"
     task.status = "cancelled"
@@ -2643,11 +2681,19 @@ async def api_eval_cancel(task_id: str):
             item_execution.cancel()
     await task.publish(
         "cancelled",
-        {"message": reason, "duration_s": task.duration_s},
+        {
+            **batch_run_state(task.status, task.items, task.results),
+            "message": reason,
+            "duration_s": task.duration_s,
+        },
     )
     if not save_task(task):
         raise HTTPException(500, "任务已中断，但历史状态保存失败")
-    return {"ok": True, "task_id": task.id, "status": task.status}
+    return {
+        "ok": True,
+        "task_id": task.id,
+        **batch_run_state(task.status, task.items, task.results),
+    }
 
 
 @app.post("/api/eval/{task_id}/rerun")
@@ -2725,7 +2771,7 @@ async def api_eval_rerun(task_id: str, req: RerunReq):
     return {
         "ok": True,
         "task_id": task.id,
-        "status": task.status,
+        **batch_run_state(task.status, task.items, task.results),
         "item_indices": indices,
         "judge_backend": rerun_backend,
         "request_rate_limit": normalized_rerun_options.get("request_rate_limit") or {},

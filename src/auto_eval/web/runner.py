@@ -51,6 +51,7 @@ from .dataset_revision import (
     active_result_count,
     active_results,
     active_total,
+    batch_run_state,
 )
 from .operation_media import (
     prepare_operation_query_images,
@@ -163,8 +164,8 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
         await task.publish(
             "done",
             {
+                **batch_run_state(task.status, task.items, task.results),
                 "summary": task.summary,
-                "total": active_total(task.items),
                 "duration_s": task.duration_s,
             },
         )
@@ -175,7 +176,11 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
         _persist_task(task, force=True)
         await task.publish(
             "error",
-            {"message": task.error, "duration_s": task.duration_s},
+            {
+                **batch_run_state(task.status, task.items, task.results),
+                "message": task.error,
+                "duration_s": task.duration_s,
+            },
         )
     finally:
         prune_task_cache(keep_task_ids={task.id})
@@ -325,9 +330,7 @@ async def run_rerun(
             {
                 "attempt": attempt,
                 "summary": task.summary,
-                "status": task.status,
-                "progress": task.done_total,
-                "total": active_total(task.items),
+                **batch_run_state(task.status, task.items, task.results),
             },
         )
         prune_task_cache(keep_task_ids={task.id})
@@ -436,9 +439,8 @@ async def run_append(
         task.summary = _summarize(task, cfg)
         _persist_task(task, force=True)
         payload = {
+            **batch_run_state(task.status, task.items, task.results),
             "summary": task.summary,
-            "total": active_total(task.items),
-            "progress": task.done_total,
             "duration_s": task.duration_s,
             "append": attempt,
         }
@@ -535,15 +537,19 @@ async def run_single_api_item(
             await task.publish(
                 "done",
                 {
+                    **batch_run_state(task.status, task.items, task.results),
                     "summary": task.summary,
-                    "total": active_total(task.items),
                     "duration_s": task.duration_s,
                 },
             )
         elif not task.item_executions and task.status == "error":
             await task.publish(
                 "error",
-                {"message": task.error, "duration_s": task.duration_s},
+                {
+                    **batch_run_state(task.status, task.items, task.results),
+                    "message": task.error,
+                    "duration_s": task.duration_s,
+                },
             )
         prune_task_cache(keep_task_ids={task.id})
 
@@ -1062,8 +1068,7 @@ async def _run(
             await task.publish(
                 "result",
                 {
-                    "progress": task.done_total,
-                    "total": active_total(task.items),
+                    **batch_run_state(task.status, task.items, task.results),
                     "result": res,
                     "rerun": rerun is not None,
                     "rerun_progress": (rerun or {}).get("done"),

@@ -631,9 +631,10 @@ tr.result-warning-detail td {
 .dataset-change-history > summary { cursor: pointer; color: #475569; }
 .history-note-cell { width: 300px; min-width: 300px !important; max-width: 300px !important; }
 .history-status { white-space: nowrap; }
-.history-status-pending, .history-status-running { color: #1d4ed8; }
-.history-status-done { color: #047857; }
-.history-status-error { color: #b91c1c; }
+.history-status-pending, .history-status-running, .history-status-rerunning { color: #1d4ed8; }
+.history-status-done, .history-status-completed { color: #047857; }
+.history-status-partial_completed { color: #b45309; }
+.history-status-error, .history-status-failed { color: #b91c1c; }
 .history-status-cancelled { color: #b45309; }
 .history-note-display { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
 .history-note-text {
