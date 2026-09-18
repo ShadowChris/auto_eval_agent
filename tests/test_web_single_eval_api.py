@@ -5,13 +5,16 @@ import pytest
 from fastapi import HTTPException
 
 from auto_eval.web import runner, server
+from auto_eval.web.llm_providers import LLMProviderStore
 from auto_eval.web.server import SingleEvalReq
 from auto_eval.web.tasks import Task
 
 
 @pytest.fixture(autouse=True)
-def _default_single_eval_concurrency(monkeypatch):
+def _default_single_eval_concurrency(monkeypatch, tmp_path):
     monkeypatch.delenv("AUTO_EVAL_SINGLE_CONCURRENCY", raising=False)
+    provider_store = LLMProviderStore(tmp_path / "web_settings")
+    monkeypatch.setattr(server, "_llm_provider_store", lambda: provider_store)
 
 
 def _config():

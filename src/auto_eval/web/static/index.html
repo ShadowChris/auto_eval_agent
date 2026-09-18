@@ -743,7 +743,7 @@
     </div>
   </section>
 
-  <section v-if="results.length || summary">
+  <section v-if="results.length || summary || unfinishedRerunRows.length">
     <h2>③ 结果
       <button @click="exportCsv" :disabled="!taskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId">导出任务快照 JSON</button>
@@ -974,6 +974,27 @@
         </template>
       </div>
     </details>
+    <div v-if="unfinishedRerunRows.length" class="unfinished-rerun-panel">
+      <div class="unfinished-rerun-heading">
+        <strong>未完成/已取消项（{{ unfinishedRerunRows.length }}）</strong>
+        <span class="hint">这些条目没有评估结果，不计入失败结果统计；可勾选后重新评估。</span>
+      </div>
+      <div class="unfinished-rerun-scroll">
+        <table class="grid auto-table unfinished-rerun-table">
+          <thead><tr><th>选择</th><th>数据集序号</th><th>题目标识</th><th>Query</th><th>状态</th><th>原因</th></tr></thead>
+          <tbody>
+            <tr v-for="row in unfinishedRerunRows" :key="'unfinished-'+row.index">
+              <td><input type="checkbox" :checked="isRerunSelected(row)" :disabled="running" @change="setRerunSelected(row,$event.target.checked)"></td>
+              <td>{{ row.index + 1 }}</td>
+              <td>{{ row.item_id }}</td>
+              <td>{{ row.query || '—' }}</td>
+              <td>{{ row.status_label }}</td>
+              <td>{{ row.message }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
     <div v-if="isMultiGroupMode" ref="resultBrowser" class="result-browser multi-group-results">
       <div v-if="summary?.group_summaries?.length" class="table-scroll">
         <table class="grid auto-table">
@@ -984,8 +1005,8 @@
           </tr></tbody>
         </table>
       </div>
-      <div v-if="taskId && results.length" class="rerun-toolbar">
-        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败 Case</button>
+      <div v-if="taskId && (results.length || unfinishedRerunRows.length)" class="rerun-toolbar">
+        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败/未完成 Case</button>
         <button type="button" class="primary" @click="startRerun([...selectedRerunIndices])" :disabled="running || !selectedRerunCount">重跑选中 Case（{{ selectedRerunCount }}）</button>
         <button type="button" @click="clearRerunSelection" :disabled="running || !selectedRerunCount">清空选择</button>
         <span class="hint">重跑一个 Case 时会按当前对齐策略重跑该 Case 的所有可用实验组。</span>
@@ -1029,13 +1050,13 @@
           {{ s.label }} {{ s.count }}
         </button>
       </div>
-      <div v-if="taskId && results.length" class="rerun-toolbar">
-        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败项</button>
+      <div v-if="taskId && (results.length || unfinishedRerunRows.length)" class="rerun-toolbar">
+        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败/未完成项</button>
         <button type="button" class="primary" @click="startRerun([...selectedRerunIndices])" :disabled="running || !selectedRerunCount">
           重跑选中项（{{ selectedRerunCount }}）
         </button>
         <button type="button" @click="clearRerunSelection" :disabled="running || !selectedRerunCount">清空选择</button>
-        <span class="hint">失败项指模型调用、超时、抽帧等技术失败；判定为 NOK 不会自动选中。</span>
+        <span class="hint">自动选择技术失败及没有结果的取消/遗漏项；判定为 NOK 不会自动选中。</span>
       </div>
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">

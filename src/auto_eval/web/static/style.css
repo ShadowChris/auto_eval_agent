@@ -530,6 +530,19 @@ pre { background: #fef2f2; padding: 10px; border-radius: 6px; font-size: 12px; w
 .result-select-column input:disabled { cursor: not-allowed; }
 .rerun-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .rerun-toolbar .hint { margin-left: 4px; }
+.unfinished-rerun-panel {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid #fbbf24;
+  border-radius: 8px;
+  background: #fffbeb;
+}
+.unfinished-rerun-heading { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.unfinished-rerun-scroll { max-height: 320px; overflow: auto; border: 1px solid #fde68a; border-radius: 6px; background: #fff; }
+.unfinished-rerun-table { margin-top: 0; }
+.unfinished-rerun-table th { position: sticky; top: 0; z-index: 1; white-space: nowrap; }
+.unfinished-rerun-table td:nth-child(1),
+.unfinished-rerun-table td:nth-child(2) { text-align: center; white-space: nowrap; }
 .progress-table-wrap .progress-table th,
 .progress-table-wrap .progress-table td {
   position: static;

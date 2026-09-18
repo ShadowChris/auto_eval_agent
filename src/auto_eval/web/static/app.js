@@ -1240,6 +1240,37 @@ createApp({
       return value === "control" ? "对照组" : "实验组";
     }
     const selectedRerunCount = computed(() => selectedRerunIndices.value.size);
+    const unfinishedRerunRows = computed(() => {
+      if (!taskId.value || running.value) return [];
+      const resultIndexes = new Set(
+        results.value
+          .map((result) => Number(result?.index))
+          .filter((index) => Number.isInteger(index) && index >= 0),
+      );
+      return items.value
+        .map((item, index) => ({ item, index }))
+        .filter(({ item, index }) => (
+          item?.dataset_status !== "excluded" && !resultIndexes.has(index)
+        ))
+        .map(({ item, index }) => {
+          const current = itemProgress.value[index] || {};
+          const status = String(current.status || "").toLowerCase();
+          return {
+            index,
+            item_id: item?.id || item?.item_id || item?.case_id || `q${index}`,
+            query: item?.query || item?.question || "",
+            status,
+            status_label: status === "cancelled"
+              ? "已取消"
+              : ["error", "failed"].includes(status)
+                ? "评估失败"
+                : "未完成",
+            message: current.message || (
+              status === "cancelled" ? "任务已手动中断" : "本条目尚未产生评估结果"
+            ),
+          };
+        });
+    });
     const allPagedResultsSelected = computed(() => {
       const indexes = pagedResults.value
         .map((result) => Number(result.index))
@@ -3468,13 +3499,14 @@ createApp({
     }
 
     function selectFailedResults() {
+      const failedResultIndices = results.value
+        .filter((result) => Boolean(result?.error) || (
+          isMultiGroupMode.value
+          && (result?.group_results || []).some((group) => group?.evaluation_status === "error")
+        ))
+        .map((result) => Number(result.index));
       selectedRerunIndices.value = new Set(
-        results.value
-          .filter((result) => Boolean(result?.error) || (
-            isMultiGroupMode.value
-            && (result?.group_results || []).some((group) => group?.evaluation_status === "error")
-          ))
-          .map((result) => Number(result.index))
+        [...failedResultIndices, ...unfinishedRerunRows.value.map((row) => row.index)]
           .filter((index) => Number.isInteger(index) && index >= 0),
       );
     }
@@ -3845,7 +3877,7 @@ createApp({
       operationStatistics, visibleOperationIssueStats, issueStatsExpanded,
       runKind, rerunProgress, rerunTotal, rerunProgressIndices, progressView,
       hasRerunProgress, visibleProgressRows, selectedRerunIndices,
-      selectedRerunCount, allPagedResultsSelected,
+      selectedRerunCount, unfinishedRerunRows, allPagedResultsSelected,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, loadingHistoryTaskId, historyTotal, pageSize,
       comparisonSelectedItems, comparisonSelectedList, comparisonSelectedCount,
