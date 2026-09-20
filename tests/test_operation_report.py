@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from io import BytesIO
 
 import pandas as pd
@@ -12,7 +14,7 @@ from auto_eval.analysis.operation_comparison import compare_operation_batches
 from auto_eval.analysis.operation_report import (
     build_comparison_report, report_case, safe_report_url,
 )
-from auto_eval.report.operation import build_operation_report_html
+from auto_eval.report.operation import OPERATION_REPORT_ASSETS, build_operation_report_html
 from auto_eval.web import server
 from auto_eval.web.history import operation_comparison_batch
 from auto_eval.web.operation_comparison_import import import_operation_comparison_file
@@ -216,8 +218,72 @@ def test_comparison_html_and_live_report_share_statistics(monkeypatch, tmp_path)
     exported = decode_report(document.content)
     assert exported["pairs"] == live.json()["report"]["pairs"]
     assert exported["groups"] == live.json()["report"]["groups"]
+    assert exported["views"] == live.json()["report"]["views"]
+    assert set(exported["views"]) == {"all_valid", "common_decidable"}
+    assert all("cases" not in g for v in exported["views"].values() for g in v["groups"])
+    filtered_body = {**body, "scope": "common_decidable"}
+    filtered = client.post("/api/operation/comparison/analyze", json=filtered_body).json()
+    assert filtered["scope"] == "common_decidable"
+    assert filtered["pairwise"] == live.json()["comparison_views"]["common_decidable"]["pairwise"]
+    filtered_html = client.post("/api/operation/comparison/export?format=html", json=filtered_body)
+    assert decode_report(filtered_html.content)["scope"] == "common_decidable"
+    xlsx = client.post("/api/operation/comparison/export?format=xlsx", json=filtered_body)
+    assert xlsx.status_code == 200
+    overview = pd.read_excel(BytesIO(xlsx.content), sheet_name="对比概览", header=None)
+    assert "所有选中组均为 OK/NOK" in overview.iloc[1, 1]
+    issue_sheet = pd.read_excel(BytesIO(xlsx.content), sheet_name="Issue Type对比", header=None)
+    assert "缺少前置条件" not in issue_sheet.to_string()
     (tmp_path / "comparison.html").write_bytes(document.content)
     assert client.post("/api/operation/comparison/export?format=csv", json=body).status_code == 422
+
+
+def test_report_scope_switch_updates_issues_case_pool_and_transition_labels(monkeypatch):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js unavailable")
+    snapshots = {key: snapshot(key) for key in ("control", "experiment")}
+    monkeypatch.setattr(server, "get_live_task", lambda _: None)
+    monkeypatch.setattr(server, "load_snapshot", snapshots.get)
+    payload = server.api_operation_comparison_analyze(server.OperationComparisonAnalyzeReq(
+        control_source_id="control",
+        sources=[{"source_id": key, "source_type": "history", "task_id": key} for key in snapshots],
+    ))["report"]
+    script = r'''
+const fs = require('fs'), assert = require('assert');
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
+const nodes = new Map(), handlers = {}, events = [];
+globalThis.CustomEvent = class { constructor(type, options) { this.type = type; this.detail = options.detail; } };
+globalThis.cancelAnimationFrame = () => {};
+const root = {
+  classList: { add() {} }, innerHTML: '',
+  querySelector(key) { if (!nodes.has(key)) nodes.set(key, {}); return nodes.get(key); },
+  addEventListener(key, handler) { handlers[key] = handler; }, removeEventListener() {},
+  contains() { return true; }, replaceChildren() {}, dispatchEvent(e) { events.push(e); },
+};
+const viewer = AutoEvalOperationReport.mount(root, payload);
+const read = name => root.querySelector(`[data-or="${name}"]`);
+const clickScope = scope => handlers.click({ target: { closest: selector => selector === 'button' ? {dataset: {scope}} : null } });
+assert(read('issues').innerHTML.includes('缺少前置条件'));
+clickScope('common_decidable');
+assert(!read('issues').innerHTML.includes('缺少前置条件'));
+assert(read('issues').innerHTML.includes('任务结果错误'));
+assert(read('case-count').textContent.includes('30 条'));
+assert(root.innerHTML.includes('NOK→OK'));
+assert(!read('cases').innerHTML.includes('>no_support<'));
+assert.strictEqual(events.at(-1).detail, 'common_decidable');
+clickScope('all_valid');
+assert(read('issues').innerHTML.includes('缺少前置条件'));
+assert(read('case-count').textContent.includes('60 条'));
+assert(root.innerHTML.includes('其他→OK'));
+assert.strictEqual(events.at(-1).detail, 'all_valid');
+viewer.destroy();
+'''
+    result = subprocess.run(
+        [node, "-e", script, str(OPERATION_REPORT_ASSETS / "operation_report.js")],
+        input=json.dumps(payload), text=True, capture_output=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_web_includes_versioned_shared_report_assets() -> None:

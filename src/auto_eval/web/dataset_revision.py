@@ -47,7 +47,47 @@ def active_success_count(
     items: list[dict[str, Any]],
     results: list[dict[str, Any]],
 ) -> int:
-    return sum("error" not in row for row in active_results(items, results))
+    return len({
+        index for row in active_results(items, results)
+        if "error" not in row and (index := result_index(row)) is not None
+    })
+
+
+def batch_run_state(
+    status: str | None,
+    items: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> dict[str, int | str]:
+    """将内部执行状态转换为稳定的对外批跑状态。
+
+    ``progress`` 只统计成功生成评估结果的题目；``processed`` 同时包含
+    成功和逐题失败结果。这样部分完成与整批失败可以由 ``progress/total``
+    明确定义，同时不丢失已经执行过的题目数量。
+    """
+    raw_status = str(status or "").strip().lower()
+    total = active_total(items)
+    progress = min(active_success_count(items, results), total)
+    processed = min(active_result_count(items, results), total)
+
+    if raw_status in {"pending", "running", "rerunning"}:
+        public_status = "running"
+    elif raw_status in {"cancelled", "canceled"}:
+        public_status = "cancelled"
+    elif total == 0:
+        public_status = "failed" if raw_status in {"error", "failed"} else "completed"
+    elif progress >= total:
+        public_status = "completed"
+    elif progress > 0:
+        public_status = "partial_completed"
+    else:
+        public_status = "failed"
+
+    return {
+        "status": public_status,
+        "progress": progress,
+        "processed": processed,
+        "total": total,
+    }
 
 
 def tracked_item(

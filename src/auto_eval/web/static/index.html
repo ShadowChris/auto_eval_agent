@@ -543,6 +543,17 @@
         <option v-for="model in providerModelOptions" :key="model" :value="model">{{ model }}</option>
       </select>
       <button type="button" @click="testProvider()" :disabled="providerBusy || !selectedProviderId">测试连接</button>
+      <button
+        type="button"
+        @click="saveProviderDefault"
+        :disabled="providerBusy || providerDefaultBusy || !selectedProviderId || !selectedProviderModel || selectedProviderIsDefault"
+      >{{ selectedProviderIsDefault ? '当前默认' : '保存为默认' }}</button>
+      <button
+        v-if="defaultProviderBackend"
+        type="button"
+        @click="clearProviderDefault"
+        :disabled="providerBusy || providerDefaultBusy"
+      >清除默认</button>
       <button type="button" @click="providerManagerOpen=!providerManagerOpen">管理模型服务</button>
     </div>
     <template v-if="!(mode==='operation' && submitMode==='append')">
@@ -732,7 +743,7 @@
     </div>
   </section>
 
-  <section v-if="results.length || summary">
+  <section v-if="results.length || summary || unfinishedRerunRows.length">
     <h2>③ 结果
       <button @click="exportCsv" :disabled="!taskId">导出 CSV</button>
       <button @click="exportJson" :disabled="!taskId">导出任务快照 JSON</button>
@@ -963,6 +974,27 @@
         </template>
       </div>
     </details>
+    <div v-if="unfinishedRerunRows.length" class="unfinished-rerun-panel">
+      <div class="unfinished-rerun-heading">
+        <strong>未完成/已取消项（{{ unfinishedRerunRows.length }}）</strong>
+        <span class="hint">这些条目没有评估结果，不计入失败结果统计；可勾选后重新评估。</span>
+      </div>
+      <div class="unfinished-rerun-scroll">
+        <table class="grid auto-table unfinished-rerun-table">
+          <thead><tr><th>选择</th><th>数据集序号</th><th>题目标识</th><th>Query</th><th>状态</th><th>原因</th></tr></thead>
+          <tbody>
+            <tr v-for="row in unfinishedRerunRows" :key="'unfinished-'+row.index">
+              <td><input type="checkbox" :checked="isRerunSelected(row)" :disabled="running" @change="setRerunSelected(row,$event.target.checked)"></td>
+              <td>{{ row.index + 1 }}</td>
+              <td>{{ row.item_id }}</td>
+              <td>{{ row.query || '—' }}</td>
+              <td>{{ row.status_label }}</td>
+              <td>{{ row.message }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
     <div v-if="isMultiGroupMode" ref="resultBrowser" class="result-browser multi-group-results">
       <div v-if="summary?.group_summaries?.length" class="table-scroll">
         <table class="grid auto-table">
@@ -973,8 +1005,8 @@
           </tr></tbody>
         </table>
       </div>
-      <div v-if="taskId && results.length" class="rerun-toolbar">
-        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败 Case</button>
+      <div v-if="taskId && (results.length || unfinishedRerunRows.length)" class="rerun-toolbar">
+        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败/未完成 Case</button>
         <button type="button" class="primary" @click="startRerun([...selectedRerunIndices])" :disabled="running || !selectedRerunCount">重跑选中 Case（{{ selectedRerunCount }}）</button>
         <button type="button" @click="clearRerunSelection" :disabled="running || !selectedRerunCount">清空选择</button>
         <span class="hint">重跑一个 Case 时会按当前对齐策略重跑该 Case 的所有可用实验组。</span>
@@ -1018,13 +1050,13 @@
           {{ s.label }} {{ s.count }}
         </button>
       </div>
-      <div v-if="taskId && results.length" class="rerun-toolbar">
-        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败项</button>
+      <div v-if="taskId && (results.length || unfinishedRerunRows.length)" class="rerun-toolbar">
+        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败/未完成项</button>
         <button type="button" class="primary" @click="startRerun([...selectedRerunIndices])" :disabled="running || !selectedRerunCount">
           重跑选中项（{{ selectedRerunCount }}）
         </button>
         <button type="button" @click="clearRerunSelection" :disabled="running || !selectedRerunCount">清空选择</button>
-        <span class="hint">失败项指模型调用、超时、抽帧等技术失败；判定为 NOK 不会自动选中。</span>
+        <span class="hint">自动选择技术失败及没有结果的取消/遗漏项；判定为 NOK 不会自动选中。</span>
       </div>
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
@@ -1305,7 +1337,7 @@
           <button @click="exportHistoryComparison('html')" :disabled="historyComparisonLoading">导出 HTML 报告</button>
         </div>
       </div>
-      <operation-report v-if="historyComparison.report" :report="historyComparison.report"></operation-report>
+      <operation-report v-if="historyComparison.report" :report="historyComparison.report" @scope-change="changeComparisonScope"></operation-report>
       <details class="operation-statistics-legacy" :open="!historyComparison.report">
       <summary>完整对比表（含问题类型筛选、排序）</summary>
       <div class="summary">
@@ -1316,7 +1348,7 @@
       <div class="history-comparison-group-map">
         <span v-for="group in historyComparison.groups" :key="'comparison-map-'+group.task_id"><strong>{{ group.group_label }}</strong>：{{ group.group_name }}</span>
       </div>
-      <p class="hint">Correctness 使用所有选中结果集共有且均评估有效的 Case。</p>
+      <p class="hint">{{ historyComparison.scope==='common_decidable' ? '当前口径：所有选中组均为 OK/NOK；Correctness、组间对比、Issue Type 和 Case 明细使用同一集合。' : 'Correctness 使用所有选中结果集共有且均评估有效的 Case。' }}</p>
       <h4>各批次 Correctness 对比</h4>
       <div class="table-scroll">
         <table class="grid auto-table">
@@ -1332,13 +1364,13 @@
       <h4>相对对照组的共同 Case 对比</h4>
       <div class="table-scroll">
         <table class="grid auto-table">
-          <thead><tr><th>对比关系</th><th>共同 Case</th><th>共同有效 Case</th><th>对照组OK/NOK数</th><th>对照组OK/NOK率</th><th>实验组OK/NOK数</th><th>实验组OK/NOK率</th><th>其他→OK</th><th>OK→其他</th><th>OK净变化</th><th>OK率差值</th><th>结论</th></tr></thead>
+          <thead><tr><th>对比关系</th><th>共同 Case</th><th>共同有效 Case</th><th>对照组OK/NOK数</th><th>对照组OK/NOK率</th><th>实验组OK/NOK数</th><th>实验组OK/NOK率</th><th>{{ historyComparison.scope==='common_decidable' ? 'NOK→OK' : '其他→OK' }}</th><th>{{ historyComparison.scope==='common_decidable' ? 'OK→NOK' : 'OK→其他' }}</th><th>OK净变化</th><th>OK率差值</th><th>结论</th></tr></thead>
           <tbody><tr v-for="pair in historyComparison.pairwise" :key="'comparison-pair-'+pair.target_task_id">
             <td><strong>{{ pair.baseline_label }}</strong> / <strong>{{ pair.target_label }}</strong></td><td>{{ pair.matched_count }}</td><td>{{ pair.valid_pair_count }}</td><td>{{ pair.baseline_ok_count }}/{{ pair.baseline_nok_count }}</td><td>{{ pair.baseline_ok_rate!=null ? (pair.baseline_ok_rate*100).toFixed(2)+'% / '+(pair.baseline_nok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.target_ok_count }}/{{ pair.target_nok_count }}</td><td>{{ pair.target_ok_rate!=null ? (pair.target_ok_rate*100).toFixed(2)+'% / '+(pair.target_nok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ pair.to_ok_count }}</td><td>{{ pair.from_ok_count }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}</td><td class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ comparisonPairChangeLabel(pair) }}</td>
           </tr></tbody>
         </table>
       </div>
-      <p class="hint">OK/NOK 率统一以各组 <code>ok+nok</code> 为分母；“其他→OK”中的“其他”表示 <code>nok</code>、<code>no_support</code> 或 <code>others</code>。OK率差值超过 ±{{ ((historyComparison.ok_rate_close_threshold ?? 0.01)*100).toFixed(2) }}pp 判定为优化或劣化，范围内判定为接近。</p>
+      <p class="hint">OK/NOK 率统一以各组 <code>ok+nok</code> 为分母；{{ historyComparison.scope==='common_decidable' ? '当前口径的“其他”仅指 NOK，所有组分母一致。' : '“其他”表示 nok、no_support 或 others。' }}OK率差值超过 ±{{ ((historyComparison.ok_rate_close_threshold ?? 0.01)*100).toFixed(2) }}pp 判定为优化或劣化，范围内判定为接近。</p>
       <h4>对照组与实验组 Issue Type 详细对比</h4>
       <details v-for="pair in historyComparison.pairwise" :key="'comparison-issue-detail-'+pair.target_task_id" class="history-comparison-detail">
         <summary><strong>{{ pair.baseline_label }}</strong> vs <strong>{{ pair.target_label }}</strong>｜共同有效 {{ pair.valid_pair_count }} 条</summary>
@@ -1363,8 +1395,8 @@
         <p class="hint">差值=实验组-对照组；负值表示问题减少（优化），正值表示问题增加（劣化）。占比分母为双方共同且均评估有效的 Case；同一 Case 可包含多个 Issue Type。</p>
       </details>
       <div class="history-comparison-conclusion">
-        <p>各组 Correctness 使用所有结果集共有且均有效的 Case；Issue Type 使用对应实验组与对照组的共同有效 Case。</p>
-        <p v-for="pair in historyComparison.pairwise" :key="'comparison-conclusion-'+pair.target_task_id"><strong>{{ pair.target_label }}</strong> 相对 <strong>{{ pair.baseline_label }}</strong>：<strong class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ comparisonPairChangeLabel(pair) }}</strong>，共同有效 {{ pair.valid_pair_count }} 条，OK率相差 {{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}；其他→OK {{ pair.to_ok_count }} 条，OK→其他 {{ pair.from_ok_count }} 条，OK净变化 {{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }} 条。</p>
+        <p>{{ historyComparison.scope==='common_decidable' ? '全部指标使用所有选中组均为 OK/NOK 的共同 Case。' : '各组 Correctness 使用所有结果集共有且均有效的 Case；Issue Type 使用对应实验组与对照组的共同有效 Case。' }}</p>
+        <p v-for="pair in historyComparison.pairwise" :key="'comparison-conclusion-'+pair.target_task_id"><strong>{{ pair.target_label }}</strong> 相对 <strong>{{ pair.baseline_label }}</strong>：<strong class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ comparisonPairChangeLabel(pair) }}</strong>，共同有效 {{ pair.valid_pair_count }} 条，OK率相差 {{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}；{{ historyComparison.scope==='common_decidable' ? 'NOK→OK' : '其他→OK' }} {{ pair.to_ok_count }} 条，{{ historyComparison.scope==='common_decidable' ? 'OK→NOK' : 'OK→其他' }} {{ pair.from_ok_count }} 条，OK净变化 {{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }} 条。</p>
       </div>
       </details>
     </div>

@@ -42,7 +42,7 @@ createApp({
         onUnmounted(() => { disposed = true; controller?.abort(); viewer?.destroy(); viewer = null; });
         return { host, loading, error, refresh };
       },
-      template: '<div><p v-if="loading" class="hint">正在加载图表与 Case…</p><p v-if="error" class="run-error">{{ error }} <button @click="refresh">重试</button></p><div ref="host"></div></div>',
+      template: '<div><p v-if="loading" class="hint">正在加载图表与 Case…</p><p v-if="error" class="run-error">{{ error }} <button @click="refresh">重试</button></p><div ref="host" @report-scope-change="$emit(\'scope-change\', $event.detail)"></div></div>',
     },
   },
   setup() {
@@ -123,6 +123,8 @@ createApp({
     const llmProviders = ref([]);
     const selectedProviderId = ref("");
     const selectedProviderModel = ref("");
+    const defaultProviderBackend = ref(null);
+    const providerDefaultBusy = ref(false);
     const providerManagerOpen = ref(false);
     const providerBusy = ref(false);
     const providerMessage = ref("");
@@ -260,6 +262,12 @@ createApp({
     const selectedProvider = computed(
       () => llmProviders.value.find((item) => item.id === selectedProviderId.value) || null,
     );
+
+    const selectedProviderIsDefault = computed(() => (
+      Boolean(defaultProviderBackend.value?.valid)
+      && defaultProviderBackend.value.provider_id === selectedProviderId.value
+      && defaultProviderBackend.value.model === selectedProviderModel.value.trim()
+    ));
 
     const defaultJudgeBaseUrl = computed(
       () => String(terminalUserJudge()?.base_url || "").trim(),
@@ -1232,6 +1240,37 @@ createApp({
       return value === "control" ? "对照组" : "实验组";
     }
     const selectedRerunCount = computed(() => selectedRerunIndices.value.size);
+    const unfinishedRerunRows = computed(() => {
+      if (!taskId.value || running.value) return [];
+      const resultIndexes = new Set(
+        results.value
+          .map((result) => Number(result?.index))
+          .filter((index) => Number.isInteger(index) && index >= 0),
+      );
+      return items.value
+        .map((item, index) => ({ item, index }))
+        .filter(({ item, index }) => (
+          item?.dataset_status !== "excluded" && !resultIndexes.has(index)
+        ))
+        .map(({ item, index }) => {
+          const current = itemProgress.value[index] || {};
+          const status = String(current.status || "").toLowerCase();
+          return {
+            index,
+            item_id: item?.id || item?.item_id || item?.case_id || `q${index}`,
+            query: item?.query || item?.question || "",
+            status,
+            status_label: status === "cancelled"
+              ? "已取消"
+              : ["error", "failed"].includes(status)
+                ? "评估失败"
+                : "未完成",
+            message: current.message || (
+              status === "cancelled" ? "任务已手动中断" : "本条目尚未产生评估结果"
+            ),
+          };
+        });
+    });
     const allPagedResultsSelected = computed(() => {
       const indexes = pagedResults.value
         .map((result) => Number(result.index))
@@ -2133,7 +2172,9 @@ createApp({
         };
       });
       results.value = snapshotResults;
-      progress.value = snapshotResults.length;
+      progress.value = Number.isFinite(Number(snapshot?.done_total))
+        ? Number(snapshot.done_total)
+        : snapshotResults.filter((result) => !result?.error).length;
       itemProgress.value = reconciled;
       if (snapshot?.summary) summary.value = snapshot.summary;
     }
@@ -2754,13 +2795,16 @@ createApp({
     function canCompareHistoryItem(item) {
       return item?.mode === "operation"
         && item?.operation_layout !== "multi_group"
-        && item?.status === "done";
+        && ["completed", "partial_completed", "done"].includes(item?.status);
     }
 
     function canAppendHistoryItem(item) {
       return item?.mode === "operation"
         && item?.operation_layout !== "multi_group"
-        && ["done", "error", "cancelled"].includes(item?.status);
+        && [
+          "completed", "partial_completed", "failed", "cancelled",
+          "done", "error",
+        ].includes(item?.status);
     }
 
     function hasOperationInputForAppend() {
@@ -3035,6 +3079,7 @@ createApp({
 
     function historyComparisonRequestBody() {
       return {
+        scope: "common_decidable",
         sources: comparisonSources.value.map((source) => ({
           source_id: source.source_id,
           source_type: source.source_type,
@@ -3084,7 +3129,7 @@ createApp({
         const response = await fetch(`/api/operation/comparison/export?format=${format}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(historyComparisonRequestBody()),
+          body: JSON.stringify({ ...historyComparisonRequestBody(), scope: historyComparison.value.scope || "all_valid" }),
         });
         if (!response.ok) {
           const data = await response.json().catch(() => ({}));
@@ -3116,6 +3161,17 @@ createApp({
         (item) => item.correctness === correctness,
       );
       return row?.count || 0;
+    }
+
+    function changeComparisonScope(scope) {
+      const current = historyComparison.value;
+      const view = current?.comparison_views?.[scope];
+      if (!view) return;
+      for (const pair of view.pairwise || []) {
+        pair._issue_sort_by ||= "count_delta";
+        pair._issue_sort_direction ||= "asc";
+      }
+      historyComparison.value = { ...current, ...view };
     }
 
     function comparisonIsBestOkRate(group) {
@@ -3235,11 +3291,14 @@ createApp({
     function historyStatusLabel(status) {
       return ({
         pending: "等待中",
-        running: "评估中",
+        running: "进行中",
         rerunning: "重跑中",
-        done: "已完成",
+        done: "完成",
+        completed: "完成",
+        partial_completed: "部分完成",
         error: "失败",
-        cancelled: "已中断",
+        failed: "失败",
+        cancelled: "取消",
       }[status] || status || "未知");
     }
 
@@ -3291,7 +3350,7 @@ createApp({
           ? Number(d.done_total)
           : results.value.length;
         running.value = isActiveHistoryStatus(d.status);
-        runKind.value = d.status === "rerunning"
+        runKind.value = d.active_rerun || d.status === "rerunning"
           ? "rerun"
           : d.active_append
             ? "append"
@@ -3304,13 +3363,13 @@ createApp({
           || [];
         rerunProgressIndices.value = [...restoredRerunIndices];
         progressView.value = restoredRerunIndices.length
-          && (d.status === "rerunning" || keepRerunView)
+          && (d.active_rerun || d.status === "rerunning" || keepRerunView)
           ? "rerun"
           : "all";
         selectedRerunIndices.value = new Set();
         runError.value = d.status === "cancelled"
-          ? (d.error || "任务已中断")
-          : d.status === "error"
+          ? (d.error || "任务已取消")
+          : ["failed", "error"].includes(d.status)
             ? (d.error ? `评估出错：${d.error}` : "评估出错")
             : "";
         activeSkill.value = "";
@@ -3452,13 +3511,14 @@ createApp({
     }
 
     function selectFailedResults() {
+      const failedResultIndices = results.value
+        .filter((result) => Boolean(result?.error) || (
+          isMultiGroupMode.value
+          && (result?.group_results || []).some((group) => group?.evaluation_status === "error")
+        ))
+        .map((result) => Number(result.index));
       selectedRerunIndices.value = new Set(
-        results.value
-          .filter((result) => Boolean(result?.error) || (
-            isMultiGroupMode.value
-            && (result?.group_results || []).some((group) => group?.evaluation_status === "error")
-          ))
-          .map((result) => Number(result.index))
+        [...failedResultIndices, ...unfinishedRerunRows.value.map((row) => row.index)]
           .filter((index) => Number.isInteger(index) && index >= 0),
       );
     }
@@ -3552,7 +3612,7 @@ createApp({
       if (Number.isInteger(index) && index >= 0) startRerun([index]);
     }
 
-    async function loadProviders() {
+    async function loadProviders(applySavedDefault = false) {
       try {
         const response = await fetch("/api/llm-providers");
         const data = await response.json().catch(() => ({}));
@@ -3560,9 +3620,68 @@ createApp({
           providerApiErrorText(data, `HTTP ${response.status}`),
         );
         llmProviders.value = data.items || [];
+        defaultProviderBackend.value = data.default_backend || null;
+        if (applySavedDefault && data.default_backend?.valid) {
+          selectedProviderId.value = data.default_backend.provider_id || "";
+          onProviderChange();
+          selectedProviderModel.value = data.default_backend.model || selectedProviderModel.value;
+        } else if (applySavedDefault && data.default_backend && !data.default_backend.valid) {
+          providerError.value = true;
+          providerMessage.value = `默认模型服务不可用：${data.default_backend.error || "配置无效"}`;
+        }
       } catch (error) {
         providerError.value = true;
         providerMessage.value = `模型服务加载失败：${error?.message || "未知错误"}`;
+      }
+    }
+
+    async function saveProviderDefault() {
+      const providerId = selectedProviderId.value.trim();
+      const model = selectedProviderModel.value.trim();
+      if (!providerId || !model || providerDefaultBusy.value) return;
+      providerDefaultBusy.value = true;
+      providerError.value = false;
+      providerMessage.value = "正在保存默认模型服务…";
+      try {
+        const response = await fetch("/api/llm-providers/default", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider_id: providerId, model }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(
+          providerApiErrorText(data, `HTTP ${response.status}`),
+        );
+        defaultProviderBackend.value = data.default_backend || null;
+        providerMessage.value = `默认模型服务已保存：${selectedProvider.value?.name || providerId} / ${model}`;
+      } catch (error) {
+        providerError.value = true;
+        providerMessage.value = `默认设置保存失败：${error?.message || "未知错误"}`;
+      } finally {
+        providerDefaultBusy.value = false;
+      }
+    }
+
+    async function clearProviderDefault() {
+      if (providerDefaultBusy.value) return;
+      providerDefaultBusy.value = true;
+      providerError.value = false;
+      providerMessage.value = "正在清除默认模型服务…";
+      try {
+        const response = await fetch("/api/llm-providers/default", {
+          method: "DELETE",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(
+          providerApiErrorText(data, `HTTP ${response.status}`),
+        );
+        defaultProviderBackend.value = null;
+        providerMessage.value = "已清除默认模型服务；未显式选择时将使用角色配置。";
+      } catch (error) {
+        providerError.value = true;
+        providerMessage.value = `清除默认设置失败：${error?.message || "未知错误"}`;
+      } finally {
+        providerDefaultBusy.value = false;
       }
     }
 
@@ -3740,7 +3859,7 @@ createApp({
       models.value = d.models;
       selectedJudges.value = defaultJudgeSelection(mode.value);
       selectedModel.value = d.models[0] || "";
-      await loadProviders();
+      await loadProviders(true);
       loadHistory();
     });
 
@@ -3754,10 +3873,12 @@ createApp({
       workspacePage, taskModule,
       modes, mode, modeLabel, historyModeLabel, switchTaskModule, isVideoMode, isMultiGroupMode, text, items, errors, judges, visibleJudges, models, selectedJudges, visualJudge, selectedModel, datasetName,
       llmProviders, selectedProviderId, selectedProviderModel, selectedProvider,
+      defaultProviderBackend, providerDefaultBusy, selectedProviderIsDefault,
       defaultJudgeBaseUrl, defaultJudgeModel,
       selectedProviderModels, providerModelOptions, providerManagerOpen, providerForm, providerBusy,
       providerMessage, providerError, onProviderChange, loadProviders, newProvider,
       editProvider, saveProvider, deleteProvider, testProvider,
+      saveProviderDefault, clearProviderDefault,
       concurrency, rateLimitRequests, rateLimitWindowSeconds, evalTimeout,
       running, progress, total, results, summary, taskId, runError,
       submitMode, appendTargetTaskId, appendTargetMeta, appendTargetCandidates, selectedAppendTarget,
@@ -3768,7 +3889,7 @@ createApp({
       operationStatistics, visibleOperationIssueStats, issueStatsExpanded,
       runKind, rerunProgress, rerunTotal, rerunProgressIndices, progressView,
       hasRerunProgress, visibleProgressRows, selectedRerunIndices,
-      selectedRerunCount, allPagedResultsSelected,
+      selectedRerunCount, unfinishedRerunRows, allPagedResultsSelected,
       itemProgress, progressEvents, progressRows, pagedProgressRows, progressStages,
       historyItems, pagedHistoryItems, historyNoteDrafts, historyNoteEditing, loadingHistory, loadingHistoryTaskId, historyTotal, pageSize,
       comparisonSelectedItems, comparisonSelectedList, comparisonSelectedCount,
@@ -3816,7 +3937,7 @@ createApp({
       beginComparisonSourceNameEdit, saveComparisonSourceName,
       cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,
       generateHistoryComparison, exportHistoryComparison, exportHtml,
-      comparisonCorrectnessCount, comparisonIsBestOkRate,
+      comparisonCorrectnessCount, comparisonIsBestOkRate, changeComparisonScope,
       comparisonPairChangeClass, comparisonPairChangeLabel, comparisonIssueRows,
       comparisonIssueDeltaClass, comparisonIssueDeltaStyle, comparisonIssueDeltaText,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,

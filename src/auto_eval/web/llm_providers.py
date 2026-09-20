@@ -79,6 +79,29 @@ class LLMProviderPayload(BaseModel):
         return self
 
 
+class LLMProviderDefaultPayload(BaseModel):
+    """持久化的默认 Provider + Model 绑定；不包含密钥。"""
+
+    provider_id: str
+    model: str
+
+    @field_validator("provider_id")
+    @classmethod
+    def validate_provider_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not PROVIDER_ID_RE.fullmatch(normalized):
+            raise ValueError("Provider ID 格式无效")
+        return normalized
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("模型不能为空")
+        return normalized
+
+
 class ProviderResolution(BaseModel):
     id: str
     name: str
@@ -115,6 +138,7 @@ class LLMProviderStore:
     def __init__(self, settings_dir: Path):
         self.settings_dir = Path(settings_dir)
         self.path = self.settings_dir / "llm_providers.json"
+        self.default_path = self.settings_dir / "llm_default.json"
         self.key_path = self.settings_dir / ".llm_provider_key"
 
     def _fernet(self) -> Fernet:
@@ -160,6 +184,21 @@ class LLMProviderStore:
             self.path.chmod(0o600)
         except OSError:
             pass
+
+    def _load_default(self) -> dict[str, Any] | None:
+        if not self.default_path.is_file():
+            return None
+        try:
+            data = json.loads(self.default_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"默认模型服务配置损坏：{self.default_path}") from exc
+        if not isinstance(data, dict):
+            raise ValueError(f"默认模型服务配置必须是对象：{self.default_path}")
+        provider_id = str(data.get("provider_id") or "").strip()
+        model = str(data.get("model") or "").strip()
+        if not provider_id or not model:
+            raise ValueError(f"默认模型服务配置缺少 provider_id 或 model：{self.default_path}")
+        return {**data, "provider_id": provider_id, "model": model}
 
     @staticmethod
     def _public(record: dict[str, Any], *, builtin: bool = False) -> dict[str, Any]:
@@ -304,8 +343,75 @@ class LLMProviderStore:
             remaining = [record for record in records if record.get("id") != provider_id]
             if len(remaining) == len(records):
                 return False
+            default = self._load_default()
             self._save(remaining)
+            if default and default.get("provider_id") == provider_id:
+                self.default_path.unlink(missing_ok=True)
             return True
+
+    def resolve_default(self, cfg: AppConfig) -> ProviderResolution | None:
+        with _STORE_LOCK:
+            default = self._load_default()
+        if default is None:
+            return None
+        return self.resolve(
+            str(default["provider_id"]),
+            str(default["model"]),
+            cfg,
+        )
+
+    def default_public(self, cfg: AppConfig) -> dict[str, Any] | None:
+        with _STORE_LOCK:
+            default = self._load_default()
+        if default is None:
+            return None
+        try:
+            resolution = self.resolve(
+                str(default["provider_id"]),
+                str(default["model"]),
+                cfg,
+            )
+        except (KeyError, ValueError) as exc:
+            return {
+                "provider_id": default["provider_id"],
+                "model": default["model"],
+                "updated_at": default.get("updated_at"),
+                "valid": False,
+                "error": str(exc),
+            }
+        return {
+            "provider_id": resolution.id,
+            "provider_name": resolution.name,
+            "base_url": resolution.base_url,
+            "model": resolution.model,
+            "updated_at": default.get("updated_at"),
+            "valid": True,
+        }
+
+    def set_default(
+        self,
+        payload: LLMProviderDefaultPayload,
+        cfg: AppConfig,
+    ) -> dict[str, Any]:
+        resolution = self.resolve(payload.provider_id, payload.model, cfg)
+        record = {
+            "provider_id": resolution.id,
+            "model": resolution.model,
+            "updated_at": time.time(),
+        }
+        with _STORE_LOCK:
+            _atomic_json_write(self.default_path, record)
+            try:
+                self.default_path.chmod(0o600)
+            except OSError:
+                pass
+        return self.default_public(cfg) or record
+
+    def clear_default(self) -> bool:
+        with _STORE_LOCK:
+            existed = self.default_path.is_file()
+            self.default_path.unlink(missing_ok=True)
+        return existed
 
     def resolve(
         self,

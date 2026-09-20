@@ -41,7 +41,7 @@ from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
 from ..report.operation import OPERATION_REPORT_ASSETS, build_operation_report_html
 from ..table_dataset import convert_table
-from ..llm_stream import build_openai_client, stream_chat_completion
+from ..llm_stream import ProviderStreamError, build_openai_client, stream_chat_completion
 from .parse_input import Mode, parse_jsonl, parse_text
 from .history import (
     build_operation_comparison_xlsx,
@@ -72,6 +72,7 @@ from .dataset_revision import (
     EXCLUDED as DATASET_EXCLUDED,
     active_result_count,
     active_total,
+    batch_run_state,
     is_item_active,
     tracked_item,
 )
@@ -90,7 +91,11 @@ from .operation_comparison_import import (
     import_operation_comparison_file,
     validate_uploaded_comparison_source,
 )
-from .llm_providers import LLMProviderPayload, LLMProviderStore
+from .llm_providers import (
+    LLMProviderDefaultPayload,
+    LLMProviderPayload,
+    LLMProviderStore,
+)
 from .runner import (
     refresh_task_summary,
     run_append,
@@ -222,6 +227,7 @@ class OperationComparisonSourceReq(BaseModel):
 class OperationComparisonAnalyzeReq(BaseModel):
     sources: list[OperationComparisonSourceReq]
     control_source_id: str
+    scope: Literal["all_valid", "common_decidable"] = "all_valid"
 
 
 class RerunReq(BaseModel):
@@ -244,6 +250,16 @@ class ProviderTestReq(BaseModel):
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
+_PROVIDER_TEST_TOKEN_BUDGETS = (512, 2048)
+
+
+def _provider_test_needs_larger_budget(exc: BaseException) -> bool:
+    """Whether a connectivity probe ended before any visible answer appeared."""
+    if not isinstance(exc, ProviderStreamError) or not isinstance(exc.body, dict):
+        return False
+    finish_reason = str(exc.body.get("finish_reason") or "").strip().lower()
+    content = str(exc.body.get("content") or "").strip()
+    return not content and finish_reason in {"length", "max_tokens"}
 
 
 def _operation_video_roots() -> list[Path]:
@@ -340,19 +356,23 @@ def _normalize_eval_options(app_cfg, options: dict) -> tuple[dict, object]:
     normalized = dict(options or {})
     backend = normalized.get("judge_backend") or {}
     provider_id = str(backend.get("provider_id") or "").strip()
+    resolution = None
     if not provider_id:
-        normalized.pop("judge_backend", None)
-        if "request_rate_limit" not in normalized:
-            return normalized, app_cfg
-        normalized["request_rate_limit"] = _normalize_request_rate_limit(
-            normalized.get("request_rate_limit"),
+        resolution = _llm_provider_store().resolve_default(app_cfg)
+        if resolution is None:
+            normalized.pop("judge_backend", None)
+            if "request_rate_limit" not in normalized:
+                return normalized, app_cfg
+            normalized["request_rate_limit"] = _normalize_request_rate_limit(
+                normalized.get("request_rate_limit"),
+            )
+            return normalized, _runtime_config_for_options(app_cfg, normalized)
+    else:
+        resolution = _llm_provider_store().resolve(
+            provider_id,
+            str(backend.get("model") or ""),
+            app_cfg,
         )
-        return normalized, _runtime_config_for_options(app_cfg, normalized)
-    resolution = _llm_provider_store().resolve(
-        provider_id,
-        str(backend.get("model") or ""),
-        app_cfg,
-    )
     normalized["judge_backend"] = {
         "provider_id": resolution.id,
         "provider_name": resolution.name,
@@ -889,7 +909,12 @@ def api_config():
 
 @app.get("/api/llm-providers")
 def api_llm_providers():
-    return {"items": _llm_provider_store().list_public(cfg())}
+    store = _llm_provider_store()
+    app_cfg = cfg()
+    return {
+        "items": store.list_public(app_cfg),
+        "default_backend": store.default_public(app_cfg),
+    }
 
 
 @app.post("/api/llm-providers", status_code=201)
@@ -899,6 +924,26 @@ def api_llm_provider_create(payload: LLMProviderPayload):
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"provider": provider}
+
+
+@app.put("/api/llm-providers/default")
+def api_llm_provider_default_update(payload: LLMProviderDefaultPayload):
+    try:
+        default_backend = _llm_provider_store().set_default(payload, cfg())
+    except KeyError as exc:
+        raise HTTPException(404, "Provider not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"default_backend": default_backend}
+
+
+@app.delete("/api/llm-providers/default")
+def api_llm_provider_default_delete():
+    return {
+        "ok": True,
+        "cleared": _llm_provider_store().clear_default(),
+        "default_backend": None,
+    }
 
 
 @app.put("/api/llm-providers/{provider_id}")
@@ -940,21 +985,31 @@ async def api_llm_provider_test(provider_id: str, req: ProviderTestReq):
             connect_timeout_s=10,
             read_timeout_s=30,
         )
-        response = await stream_chat_completion(
-            client,
-            {
-                "model": provider.model,
-                "messages": [{"role": "user", "content": "请只回复 OK"}],
-                "temperature": 0,
-                "max_tokens": 16,
-            },
-            include_usage=False,
-            total_timeout_s=30,
-            max_attempts=1,
-            rate_limit_key=f"provider:{provider.id}",
-            rate_limit_max_requests=provider.rate_limit_requests,
-            rate_limit_window_s=provider.rate_limit_window_s,
-        )
+        response = None
+        for index, token_budget in enumerate(_PROVIDER_TEST_TOKEN_BUDGETS):
+            try:
+                response = await stream_chat_completion(
+                    client,
+                    {
+                        "model": provider.model,
+                        "messages": [{"role": "user", "content": "请只回复 OK"}],
+                        "temperature": 0,
+                        "max_tokens": token_budget,
+                    },
+                    include_usage=False,
+                    total_timeout_s=30,
+                    max_attempts=1,
+                    rate_limit_key=f"provider:{provider.id}",
+                    rate_limit_max_requests=provider.rate_limit_requests,
+                    rate_limit_window_s=provider.rate_limit_window_s,
+                )
+                break
+            except Exception as exc:
+                has_larger_budget = index + 1 < len(_PROVIDER_TEST_TOKEN_BUDGETS)
+                if not has_larger_budget or not _provider_test_needs_larger_budget(exc):
+                    raise
+        if response is None:
+            raise RuntimeError("模型连接测试未返回响应")
         answer = str(response.choices[0].message.content or "").strip()
     except Exception as exc:
         message = str(exc).replace(provider.api_key, "***")
@@ -1239,6 +1294,7 @@ async def api_eval(req: EvalReq):
         if req.conflict_policy == "preview":
             return {
                 "task_id": task.id,
+                **batch_run_state(task.status, task.items, task.results),
                 "action": "preview",
                 "dataset_size": active_total(task.items),
                 "merge_preview": public_preview,
@@ -1483,6 +1539,7 @@ async def api_eval(req: EvalReq):
                 raise HTTPException(500, "追加记录写入历史快照失败")
             return {
                 "task_id": task.id,
+                **batch_run_state(task.status, task.items, task.results),
                 "action": "skipped",
                 "item_indices": [],
                 "dataset_size": active_total(task.items),
@@ -1550,8 +1607,10 @@ async def api_eval(req: EvalReq):
             task.execution = None
 
     execution.add_done_callback(clear_execution)
+    run_state = batch_run_state(task.status, task.items, task.results)
     return {
         "task_id": task.id,
+        **run_state,
         "action": action,
         "item_indices": item_indices,
         "dataset_size": active_total(task.items),
@@ -1661,14 +1720,17 @@ async def api_eval_single(req: SingleEvalReq):
             task.single_api_attempts[item_id] = rerun_attempt
 
     # 接口和 Web 任务类统一使用终端用户裁判；其余已有运行参数保持不变。
-    task.options = {
+    single_options = {
         **task.options,
         "judges": [judge_name],
         "concurrency": single_concurrency,
         "submission_source": "single_api",
     }
     try:
-        runtime_cfg = _runtime_config_for_options(app_cfg, task.options)
+        task.options, runtime_cfg = _normalize_eval_options(
+            app_cfg,
+            single_options,
+        )
     except KeyError as exc:
         raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
     except ValueError as exc:
@@ -1691,11 +1753,15 @@ async def api_eval_single(req: SingleEvalReq):
         ),
     )
     task.item_executions[item_id] = execution
+    run_state = batch_run_state(task.status, task.items, task.results)
     return {
         "task_id": task.id,
         "id": item_id,
         "status": "success",
-        "evaluation_status": task.status,
+        "evaluation_status": run_state["status"],
+        "progress": run_state["progress"],
+        "processed": run_state["processed"],
+        "total": run_state["total"],
         "action": action,
         "dataset_size": active_total(task.items),
     }
@@ -1871,12 +1937,11 @@ async def api_stream(
         try:
             # 先回放任务级状态，新标签页无需等待下一条结果即可
             # 显示“评估中 done/total”。
+            run_state = batch_run_state(task.status, task.items, task.results)
             yield _sse(
                 "task_state",
                 {
-                    "status": task.status,
-                    "progress": active_result_count(task.items, task.results),
-                    "total": active_total(task.items),
+                    **run_state,
                     "started_at": task.started_at,
                     "finished_at": task.finished_at,
                     "duration_s": task.elapsed_s(),
@@ -1951,25 +2016,39 @@ async def api_stream(
             if task.status in {"done", "error", "cancelled"}:
                 if not terminal_replayed:
                     if task.status == "done":
+                        terminal_state = batch_run_state(
+                            task.status, task.items, task.results,
+                        )
                         yield _sse(
                             "done",
                             {
+                                **terminal_state,
                                 "summary": task.summary,
-                                "total": active_total(task.items),
                                 "duration_s": task.duration_s,
                             },
                             event_id=task.event_cursor or None,
                         )
                     elif task.status == "error":
+                        terminal_state = batch_run_state(
+                            task.status, task.items, task.results,
+                        )
                         yield _sse(
                             "error",
-                            {"message": task.error, "duration_s": task.duration_s},
+                            {
+                                **terminal_state,
+                                "message": task.error,
+                                "duration_s": task.duration_s,
+                            },
                             event_id=task.event_cursor or None,
                         )
                     else:
+                        terminal_state = batch_run_state(
+                            task.status, task.items, task.results,
+                        )
                         yield _sse(
                             "cancelled",
                             {
+                                **terminal_state,
                                 "message": task.error or "任务已中断",
                                 "duration_s": task.duration_s,
                             },
@@ -2031,13 +2110,18 @@ def api_history(
         live = get_live_task(str(row.get("task_id") or ""))
         if live is None:
             continue
+        run_state = batch_run_state(live.status, live.items, live.results)
+        live_progress = int(run_state["progress"])
+        if not live.results:
+            live_progress = min(
+                max(live_progress, int(live.done_total or 0)),
+                int(run_state["total"]),
+            )
         row.update({
-            "status": live.status,
-            "total": active_total(live.items),
-            "done": max(
-                live.done_total,
-                active_result_count(live.items, live.results),
-            ),
+            "status": run_state["status"],
+            "total": run_state["total"],
+            "done": live_progress,
+            "processed": run_state["processed"],
             "started_at": live.started_at,
             "finished_at": live.finished_at,
             "duration_s": live.elapsed_s(),
@@ -2190,9 +2274,31 @@ def _operation_comparison_analysis_payload(
             batches,
             baseline_task_id=request.control_source_id,
             include_union_rows=include_union_rows,
+            scope=request.scope,
         )
         if include_report:
             payload["report"] = build_comparison_report(batches, payload)
+            alternate_scope = "common_decidable" if request.scope == "all_valid" else "all_valid"
+            alternate = compare_operation_batches(
+                batches, baseline_task_id=request.control_source_id, scope=alternate_scope,
+            )
+            alternate_report = build_comparison_report(batches, alternate)
+            # 两种口径共用一份 Case 池，仅保存统计与配对索引。
+            def report_view(report):
+                return {
+                    "groups": [{k: v for k, v in group.items() if k != "cases"}
+                               for group in report["groups"]],
+                    "pairs": report["pairs"],
+                    "all_groups_common_valid_count": report["all_groups_common_valid_count"],
+                }
+            payload["report"]["views"] = {
+                request.scope: report_view(payload["report"]),
+                alternate_scope: report_view(alternate_report),
+            }
+            payload["comparison_views"] = {
+                request.scope: {k: v for k, v in payload.items() if k != "report"},
+                alternate_scope: alternate,
+            }
         return payload
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -2548,12 +2654,17 @@ async def api_eval_cancel(task_id: str):
                     "finished_at": finished_at,
                 }
             await task.publish("cancelled", {
+                **batch_run_state(task.status, task.items, task.results),
                 "message": task.error,
                 "duration_s": task.duration_s,
                 "append": attempt,
             })
             save_task(task)
-        return {"ok": True, "task_id": task.id, "status": task.status}
+        return {
+            "ok": True,
+            "task_id": task.id,
+            **batch_run_state(task.status, task.items, task.results),
+        }
     if task.status == "rerunning":
         execution = task.execution
         if execution is not None and not execution.done():
@@ -2580,14 +2691,20 @@ async def api_eval_cancel(task_id: str):
             await task.publish("rerun_cancelled", {
                 "attempt": attempt,
                 "summary": task.summary,
-                "status": task.status,
-                "progress": task.done_total,
-                "total": active_total(task.items),
+                **batch_run_state(task.status, task.items, task.results),
             })
             save_task(task)
-        return {"ok": True, "task_id": task.id, "status": task.status}
+        return {
+            "ok": True,
+            "task_id": task.id,
+            **batch_run_state(task.status, task.items, task.results),
+        }
     if task.status not in {"pending", "running"}:
-        return {"ok": True, "task_id": task.id, "status": task.status}
+        return {
+            "ok": True,
+            "task_id": task.id,
+            **batch_run_state(task.status, task.items, task.results),
+        }
 
     reason = "用户手动中断批跑"
     task.status = "cancelled"
@@ -2623,11 +2740,19 @@ async def api_eval_cancel(task_id: str):
             item_execution.cancel()
     await task.publish(
         "cancelled",
-        {"message": reason, "duration_s": task.duration_s},
+        {
+            **batch_run_state(task.status, task.items, task.results),
+            "message": reason,
+            "duration_s": task.duration_s,
+        },
     )
     if not save_task(task):
         raise HTTPException(500, "任务已中断，但历史状态保存失败")
-    return {"ok": True, "task_id": task.id, "status": task.status}
+    return {
+        "ok": True,
+        "task_id": task.id,
+        **batch_run_state(task.status, task.items, task.results),
+    }
 
 
 @app.post("/api/eval/{task_id}/rerun")
@@ -2705,7 +2830,7 @@ async def api_eval_rerun(task_id: str, req: RerunReq):
     return {
         "ok": True,
         "task_id": task.id,
-        "status": task.status,
+        **batch_run_state(task.status, task.items, task.results),
         "item_indices": indices,
         "judge_backend": rerun_backend,
         "request_rate_limit": normalized_rerun_options.get("request_rate_limit") or {},

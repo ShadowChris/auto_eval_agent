@@ -22,12 +22,16 @@ def compare_operation_batches(
     *,
     baseline_task_id: str,
     include_union_rows: bool = False,
+    scope: str = "all_valid",
 ) -> dict[str, Any]:
     """比较 2～5 个普通任务类批次。
 
     全组分布只统计所有批次共有且均有效的 Case；相对对照组指标则使用
-    对照组与各实验组各自的共同有效 Case。导出时可额外生成逐题并集。
+    对照组与各实验组各自的共同有效 Case。common_decidable 口径下，
+    所有指标统一使用全组均为 OK/NOK 的交集。导出时可额外生成逐题并集。
     """
+    if scope not in {"all_valid", "common_decidable"}:
+        raise ValueError("未知的对比统计口径")
     if not 2 <= len(batches) <= 5:
         raise ValueError("请选择 2～5 个任务类历史批次")
     task_ids = [str(batch.get("task_id") or "") for batch in batches]
@@ -68,9 +72,18 @@ def compare_operation_batches(
                 (batch.get("rows") or [])[matched_indices[batch["task_id"]][position]].get("result")
                 or {}
             )
+            and (scope == "all_valid" or (
+                (batch.get("rows") or [])[matched_indices[batch["task_id"]][position]].get("result") or {}
+            ).get("correctness") in {"ok", "nok"})
             for batch in ordered
         )
     ]
+    if scope == "common_decidable":
+        pairwise = []
+        for target in ordered[1:]:
+            pair = _compare_pair(baseline, target, allowed_positions=set(valid_common_positions))
+            pair.pop("_match_map")
+            pairwise.append(pair)
     common_results: dict[str, list[dict[str, Any]]] = {}
     groups: list[dict[str, Any]] = []
     for batch in ordered:
@@ -85,13 +98,16 @@ def compare_operation_batches(
     conclusion_lines = [
         (
             f"所有选中批次共有 {len(common_positions)} 条 Case，其中 "
-            f"{len(valid_common_positions)} 条在各批次均有有效评估，"
+            f"{len(valid_common_positions)} 条在各批次均有有效评估"
+            + ("且均为 OK/NOK，" if scope == "common_decidable" else "，") +
             "各批次 Correctness 分布按该统一口径计算。"
         )
     ]
     conclusion_lines.extend(pair["conclusion"] for pair in pairwise)
     payload = {
         "schema_version": 2,
+        "scope": scope,
+        "common_positions": valid_common_positions,
         "comparison_type": "operation_history_batches",
         "baseline_task_id": baseline_task_id,
         "baseline_name": _batch_name(baseline),
@@ -303,7 +319,10 @@ def _paired_issue_rows(
     return rows
 
 
-def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+def _compare_pair(
+    baseline: dict[str, Any], target: dict[str, Any],
+    *, allowed_positions: set[int] | None = None,
+) -> dict[str, Any]:
     baseline_rows = list(baseline.get("rows") or [])
     target_rows = list(target.get("rows") or [])
     matches, _ = _match_rows(baseline_rows, target_rows)
@@ -314,6 +333,8 @@ def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str,
     valid_pairs = []
     transitions: Counter[tuple[str, str]] = Counter()
     for baseline_index, target_index in match_map.items():
+        if allowed_positions is not None and baseline_index not in allowed_positions:
+            continue
         baseline_result = baseline_rows[baseline_index].get("result") or {}
         target_result = target_rows[target_index].get("result") or {}
         if not (_is_valid(baseline_result) and _is_valid(target_result)):
@@ -390,6 +411,8 @@ def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str,
             f"{target_label} 与 {baseline_label} 有 {denominator} 条共同有效 Case，"
             "但至少一组没有 OK 或 NOK，无法计算 OK/NOK 率差值。"
         )
+    if allowed_positions is not None:
+        conclusion = conclusion.replace("其他", "NOK")
     return {
         "baseline_task_id": baseline["task_id"],
         "baseline_name": _batch_name(baseline),

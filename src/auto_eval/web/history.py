@@ -31,8 +31,8 @@ from ..judges.trace_storage import (
 from ..paths import PROJECT_ROOT, RUNS_DIR
 from .dataset_revision import (
     active_result_count,
-    active_success_count,
     active_total,
+    batch_run_state,
     is_item_active,
 )
 
@@ -321,6 +321,11 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             if path.stem != _safe_name(str(task_id))
             else make_session_name(float(created_at or 0), data.get("mode") or "unknown", str(task_id))
         )
+        run_state = batch_run_state(
+            status,
+            data.get("items") or [],
+            data.get("results") or [],
+        )
         rows.append({
             "task_id": task_id,
             "session_name": session_name,
@@ -328,11 +333,10 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "note": data.get("note") or "",
             "mode": data.get("mode"),
             "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
-            "status": status,
-            "total": active_total(data.get("items") or []),
-            "done": active_success_count(
-                data.get("items") or [], data.get("results") or [],
-            ),
+            "status": run_state["status"],
+            "total": run_state["total"],
+            "done": run_state["progress"],
+            "processed": run_state["processed"],
             "created_at": created_at,
             "updated_at": data.get("updated_at") or data.get("created_at"),
             **_stored_timing(data),
@@ -399,6 +403,11 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
                 str(task_id),
             )
         )
+        run_state = batch_run_state(
+            status,
+            data.get("items") or [],
+            data.get("results") or [],
+        )
         rows.append({
             "task_id": task_id,
             "session_name": session_name,
@@ -406,11 +415,10 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             "note": data.get("note") or "",
             "mode": data.get("mode"),
             "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
-            "status": status,
-            "total": active_total(data.get("items") or []),
-            "done": active_success_count(
-                data.get("items") or [], data.get("results") or [],
-            ),
+            "status": run_state["status"],
+            "total": run_state["total"],
+            "done": run_state["progress"],
+            "processed": run_state["processed"],
             "created_at": created_at,
             "updated_at": data.get("updated_at") or created_at,
             **_stored_timing(data),
@@ -494,9 +502,10 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         ]
         if has_excluded else results
     )
-    done_total = active_result_count(items, results)
+    run_state = batch_run_state(data.get("status"), items, results)
+    processed_total = int(run_state["processed"])
     if not has_excluded:
-        done_total = max(saved_done_total, len(results), done_total)
+        processed_total = max(saved_done_total, len(results), processed_total)
     return {
         "task_id": data.get("task_id"),
         "session_name": data.get("session_name"),
@@ -505,7 +514,7 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         "mode": data.get("mode"),
         "items": items,
         "options": data.get("options") or {},
-        "status": data.get("status"),
+        "status": run_state["status"],
         "results": visible_results,
         "item_progress": data.get("item_progress") or {},
         "progress_events": progress_events,
@@ -513,9 +522,10 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
         **_stored_timing(data),
-        # 总进度作为历史详情的显式契约，供新标签页直接恢复。
-        "done_total": done_total,
-        "total": active_total(items),
+        # 成功进度与已处理数分开，供历史恢复和批跑状态统一使用。
+        "done_total": run_state["progress"],
+        "processed_total": processed_total,
+        "total": run_state["total"],
         "event_cursor": int(data.get("event_cursor") or 0),
         "error": data.get("error"),
         "active_rerun": data.get("active_rerun"),
@@ -588,12 +598,20 @@ _LEGACY_SEQUENCE_RE = re.compile(
 def _jsonl_eval_run(snapshot: dict) -> dict:
     options = snapshot.get("options") or {}
     items = snapshot.get("items") or []
+    run_state = batch_run_state(
+        snapshot.get("status"),
+        items,
+        snapshot.get("results") or [],
+    )
     return {
         "task_id": snapshot.get("task_id"),
         "session_name": snapshot.get("session_name") or "",
         "dataset_name": snapshot.get("dataset_name") or "",
         "mode": snapshot.get("mode") or "",
-        "status": snapshot.get("status") or "",
+        "status": run_state["status"],
+        "progress": run_state["progress"],
+        "processed": run_state["processed"],
+        "total": run_state["total"],
         "created_at": _format_ts(snapshot.get("created_at")),
         "updated_at": _format_ts(snapshot.get("updated_at")),
         "judges": list(options.get("judges") or []),
@@ -1815,14 +1833,20 @@ def _all_dim_names(results: list[dict], cfg: Any | None) -> list[str] | None:
 def _run_info(snapshot: dict) -> dict:
     created = snapshot.get("created_at")
     updated = snapshot.get("updated_at")
+    run_state = batch_run_state(
+        snapshot.get("status"),
+        snapshot.get("items") or [],
+        snapshot.get("results") or [],
+    )
     return {
         "task_id": snapshot.get("task_id"),
         "dataset_name": snapshot.get("dataset_name") or "",
         "note": snapshot.get("note") or "",
         "mode": snapshot.get("mode"),
-        "status": snapshot.get("status"),
-        "total": len(snapshot.get("items") or []),
-        "done": len([r for r in (snapshot.get("results") or []) if "error" not in r]),
+        "status": run_state["status"],
+        "total": run_state["total"],
+        "done": run_state["progress"],
+        "processed": run_state["processed"],
         "created_at": _format_ts(created),
         "updated_at": _format_ts(updated),
         "started_at": _format_ts(snapshot.get("started_at")),
@@ -1996,6 +2020,7 @@ def _operation_run_summary(snapshot: dict) -> dict:
     done = len([row for row in results if "error" not in row])
     failed = len([row for row in results if "error" in row])
     total = active_total(items)
+    run_state = batch_run_state(snapshot.get("status"), items, results)
     judges = options.get("judges") or []
     if isinstance(judges, list):
         judges = "；".join(str(judge) for judge in judges)
@@ -2004,7 +2029,8 @@ def _operation_run_summary(snapshot: dict) -> dict:
         "dataset_name": snapshot.get("dataset_name") or "",
         "note": snapshot.get("note") or "",
         "mode": snapshot.get("mode"),
-        "status": snapshot.get("status"),
+        "status": run_state["status"],
+        "processed": run_state["processed"],
         "created_at": _format_ts(snapshot.get("created_at")),
         "updated_at": _format_ts(snapshot.get("updated_at")),
         "started_at": _format_ts(snapshot.get("started_at")),
@@ -2634,15 +2660,20 @@ def build_xlsx(snapshot: dict, cfg: Any | None = None) -> bytes:
 
 def build_operation_comparison_xlsx(payload: dict) -> bytes:
     """导出统一交集统计和逐题横向并集。"""
+    decidable = payload.get("scope") == "common_decidable"
     groups = payload.get("groups") or []
     overview = [
         ["任务类结果集对比"],
         [
             "统计口径",
-            "Correctness 与 Issue Type 仅统计所有选中批次共有且均有效的 Case；"
+            ("当前口径：所有选中组均为 OK/NOK 的共同 Case；全部统计使用同一集合；"
+             "OK/NOK 率和 Issue Type 占比的分母均为该集合大小；逐题横向对比保留原始并集供追溯。"
+             if decidable else
+            "Correctness 仅统计所有选中批次共有且均有效的 Case；"
+            "Issue Type 使用对应两组共同有效 Case；"
             "相对对照组表按每个实验组与对照组各自的共同有效 Case 计算；"
             "OK/NOK 率统一以各组 ok+nok 为分母；"
-            "“其他”表示 nok、no_support 或 others。",
+            "“其他”表示 nok、no_support 或 others。"),
         ],
         ["全组共同 Case", payload.get("all_groups_common_matched_count", 0)],
         ["全组共同有效 Case", payload.get("all_groups_common_valid_count", 0)],
@@ -2677,6 +2708,10 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
     overview.append(["相对对照组的共同 Case 对比"])
     pair_header_row = len(overview) + 1
     overview.append(["对比关系", "共同 Case", "共同有效 Case", "对照组OK数", "对照组NOK数", "对照组率分母", "对照组OK率", "对照组NOK率", "实验组OK数", "实验组NOK数", "实验组率分母", "实验组OK率", "实验组NOK率", "其他→OK", "OK→其他", "OK净变化", "OK率差值", "结论"])
+    if decidable:
+        overview[-1] = ["NOK→OK" if cell == "其他→OK" else
+                        "OK→NOK" if cell == "OK→其他" else cell
+                        for cell in overview[-1]]
     pair_data_start = pair_header_row + 1
     for pair in payload.get("pairwise") or []:
         overview.append([

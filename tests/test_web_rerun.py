@@ -198,11 +198,14 @@ def test_frontend_exposes_manual_and_failed_item_rerun_actions():
         encoding="utf-8",
     )
 
-    assert "选择全部失败项" in html
+    assert "选择全部失败/未完成项" in html
+    assert "未完成/已取消项" in html
     assert "重跑选中项" in html
     assert "rerunOne(r)" in html
     assert 'filter((result) => Boolean(result?.error) || (' in js
     assert 'group?.evaluation_status === "error"' in js
+    assert "unfinishedRerunRows" in js
+    assert 'status === "cancelled"' in js
     assert 'fetch(`/api/eval/${taskId.value}/rerun`' in js
     assert "judge_backend: rerunBackend" in js
     assert "本次使用：${rerunBackendLabel}" in js
@@ -307,13 +310,18 @@ async def test_immediate_rerun_cancel_restores_parent_status(monkeypatch):
 
     monkeypatch.setattr(server, "run_rerun", not_yet_started)
     monkeypatch.setattr(server, "cfg", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        server,
+        "_normalize_eval_options",
+        lambda app_cfg, options: (options, object()),
+    )
     monkeypatch.setattr(server, "save_task", lambda current: True)
     try:
         await server.api_eval_rerun(task.id, RerunReq(item_indices=[1]))
         response = await server.api_eval_cancel(task.id)
 
         assert entered is False
-        assert response["status"] == "done"
+        assert response["status"] == "partial_completed"
         assert task.status == "done"
         assert task.active_rerun is None
         assert task.rerun_history[-1]["status"] == "cancelled"
