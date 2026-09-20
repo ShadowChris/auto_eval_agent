@@ -38,14 +38,24 @@
   }
 
   function mount(root, initialPayload) {
-    let payload, baseline, target, pair, issueRows = [], pairs = [], generation = "", resizeFrame = 0;
+    let payload, sourcePayload, baseline, target, pair, issueRows = [], pairs = [], generation = "", resizeFrame = 0;
     let disposed = false, observedWidth = 0, observer;
-    const state = { group: "", view: "bar", issue: "", change: "all", correctness: "", page: 1, size: 10, open: null, query: "", sort: "default" };
+    const state = { scope: "", group: "", view: "bar", issue: "", change: "all", correctness: "", page: 1, size: 10, open: null, query: "", sort: "default" };
     const $ = name => root.querySelector(`[data-or="${name}"]`);
     const comparison = () => payload.kind === "comparison";
+    const decidable = () => comparison() && state.scope === "common_decidable";
+    const toOkLabel = () => decidable() ? "NOK→OK" : "其他→OK";
+    const fromOkLabel = () => decidable() ? "OK→NOK" : "OK→其他";
     root.classList.add("operation-report");
 
     function prepare() {
+      const view = sourcePayload.views?.[state.scope];
+      payload = view ? {
+        ...sourcePayload, ...view,
+        groups: view.groups.map(group => ({
+          ...group, cases: sourcePayload.groups.find(g => g.task_id === group.task_id).cases,
+        })),
+      } : sourcePayload;
       if (comparison()) {
         baseline = payload.groups.find(g => g.task_id === payload.baseline_task_id);
         pair = payload.pairs.find(p => p.target_task_id === state.group) || payload.pairs[0];
@@ -81,11 +91,12 @@
         <div class="or-heading"><div><div class="or-name">${isCompare ? "任务类对比报告" : "任务类统计报告"}</div><div class="or-muted">${subtitle}</div></div>
           ${isCompare ? `<label>实验组 <select data-or="group">${payload.pairs.map(p => `<option value="${esc(p.target_task_id)}" ${p.target_task_id === state.group ? "selected" : ""}>${esc(p.target_label)}</option>`).join("")}</select></label>` : ""}
         </div>
+        ${isCompare && sourcePayload.views ? `<div class="or-controls"><span class="or-muted">统计口径</span><div class="or-segments">${[["all_valid", "全部有效判定"], ["common_decidable", "均为 OK/NOK"]].map(([value, label]) => `<button data-scope="${value}" aria-pressed="${state.scope === value}">${label}</button>`).join("")}</div></div><p class="or-muted">${decidable() ? "所有选中组均为 OK/NOK 的共同 Case；任一组为 no_support、others、失败或缺失时整条排除。全部统计及 Case 明细使用同一集合。" : "沿用原口径：全组分布使用全组共同有效 Case，组间对比使用双方共同有效 Case；有效判定包含 ok、nok、no_support、others。"}</p>` : ""}
         <div class="or-summary">${isCompare
           ? metric("实验组 OK / NOK 率", `${pct(pair.target_ok_rate)} / ${pct(pair.target_nok_rate)}`, `对照组 ${pct(pair.baseline_ok_rate)} / ${pct(pair.baseline_nok_rate)} · 分母为各组 OK+NOK`)
             + metric("OK 率差值", `<span class="${rateClass(pair)}">${signed(pair.ok_rate_delta, true)}</span>`, esc(pair.ok_rate_change_label))
             + metric("两组共同有效 Case", esc(pair.valid_pair_count), `全组交集 ${esc(payload.all_groups_common_valid_count)} 条`)
-            + metric("OK 净变化", `<span class="${rateClass(pair)}">${signed(pair.net_ok_change)}</span>`, `其他→OK ${pair.to_ok_count} / OK→其他 ${pair.from_ok_count}`)
+            + metric("OK 净变化", `<span class="${rateClass(pair)}">${signed(pair.net_ok_change)}</span>`, `${toOkLabel()} ${pair.to_ok_count} / ${fromOkLabel()} ${pair.from_ok_count}`)
           : metric("OK 率", pct(stats.ok_rate), `${stats.ok_count} / ${stats.rate_denominator} 条 OK+NOK`)
             + metric("NOK 率", pct(stats.nok_rate), `${stats.nok_count} / ${stats.rate_denominator} 条 OK+NOK`)
             + metric("有效评估", `${stats.valid_count} / ${stats.total_cases}`, `覆盖率 ${pct(stats.coverage_rate)}`)
@@ -102,7 +113,7 @@
         </div>
         <p data-or="conclusion" class="or-conclusion"></p>
         ${isCompare ? `<details class="or-panel"><summary>相对对照组的共同 Case 对比</summary><div class="or-table-wrap">${table(
-          ["实验组", "共同有效", "对照组OK率", "实验组OK率", "其他→OK", "OK→其他", "OK净变化", "OK率差值", "结论"],
+          ["实验组", "共同有效", "对照组OK率", "实验组OK率", toOkLabel(), fromOkLabel(), "OK净变化", "OK率差值", "结论"],
           payload.pairs.map(p => [esc(p.target_label), p.valid_pair_count, pct(p.baseline_ok_rate), pct(p.target_ok_rate), p.to_ok_count, p.from_ok_count, signed(p.net_ok_change), signed(p.ok_rate_delta, true), esc(p.ok_rate_change_label)]),
         )}</div></details>` : ""}
         <section class="or-panel">
@@ -110,14 +121,14 @@
           <div data-or="tags" class="or-tags"></div>
           <div class="or-controls">
             <select data-or="issue" aria-label="问题类型"><option value="">全部问题类型 / 全部有效 Case</option>${topIssues(issueRows.length).map(r => `<option value="${esc(r.name)}" ${state.issue === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>
-            <select data-or="correctness-filter" aria-label="${isCompare ? "实验组判定筛选" : "判定筛选"}"><option value="">${isCompare ? "全部实验组判定" : "全部判定"}</option>${TYPES.map(t => `<option value="${t}" ${state.correctness === t ? "selected" : ""}>${t}</option>`).join("")}</select>
+            <select data-or="correctness-filter" aria-label="${isCompare ? "实验组判定筛选" : "判定筛选"}"><option value="">${isCompare ? "全部实验组判定" : "全部判定"}</option>${(decidable() ? TYPES.slice(0, 2) : TYPES).map(t => `<option value="${t}" ${state.correctness === t ? "selected" : ""}>${t}</option>`).join("")}</select>
             <input data-or="search" type="search" placeholder="搜索 index / query / 理由" aria-label="搜索 Case" value="${esc(state.query)}">
           </div>
           ${isCompare ? `<div class="or-segments or-controls">${[["all", "全部命中"], ["new", "新增问题"], ["resolved", "问题消失"], ["persistent", "持续存在"]].map(([v, n]) => `<button data-change="${v}" aria-pressed="${state.change === v}">${n}</button>`).join("")}</div>` : ""}
           <div data-or="cases" class="or-table-wrap"></div>
           <div class="or-footer"><span class="or-muted">原录屏：域名站 / IP站；空链接不显示，访问需相应网络权限。</span><div class="or-row"><label class="or-muted">每页 <select data-or="size">${[10, 20, 50].map(n => `<option value="${n}" ${state.size === n ? "selected" : ""}>${n} 条</option>`).join("")}</select></label><button data-page="-1">上一页</button><span data-or="page-label" class="or-muted"></span><button data-page="1">下一页</button></div></div>
         </section>
-        <p class="or-muted">报告快照 ${esc(payload.generated_at)} · 问题类型按 Case 去重，占比之和可能超过 100%。${isCompare ? "NOK 表示判定 nok；其他→OK 中的“其他”包括 nok、no_support、others。" : ""} 未打包媒体或模型原始调用。</p>`;
+        <p class="or-muted">报告快照 ${esc(payload.generated_at)} · 问题类型按 Case 去重，占比之和可能超过 100%。${isCompare ? (decidable() ? "NOK→OK 和 OK→NOK 仅统计同一共同集合中的判定变化。" : "NOK 表示判定 nok；其他→OK 中的“其他”包括 nok、no_support、others。") : ""} 未打包媒体或模型原始调用。</p>`;
       drawCorrectness(); drawIssues(); renderCases(); renderConclusion();
     }
     function drawCorrectness() {
@@ -269,7 +280,12 @@
       }
       const b = event.target.closest("button");
       if (!b || !root.contains(b)) return;
-      if (b.dataset.view) { state.view = b.dataset.view; render(); }
+      if (b.dataset.scope) {
+        state.scope = b.dataset.scope; state.issue = ""; state.correctness = "";
+        state.change = "all"; resetCasePage(); prepare(); render();
+        root.dispatchEvent(new CustomEvent("report-scope-change", { bubbles: true, detail: state.scope }));
+      }
+      else if (b.dataset.view) { state.view = b.dataset.view; render(); }
       else if (b.dataset.change) { state.change = b.dataset.change; resetCasePage(); render(); }
       else if ("correctness" in b.dataset) { state.correctness = b.dataset.correctness; state.issue = ""; state.change = "all"; resetCasePage(); render(); }
       else if ("detail" in b.dataset) { const key = Number(b.dataset.detail); state.open = state.open === key ? null : key; renderCases(); }
@@ -288,11 +304,12 @@
     }
     function update(next) {
       if (disposed) return;
-      payload = next;
+      sourcePayload = payload = next;
       if (!payload) { root.replaceChildren(); baseline = target = pair = null; pairs = []; issueRows = []; return; }
       const nextGeneration = `${payload.kind}:${payload.task_id || payload.baseline_task_id}`;
+      state.scope = next.scope || "all_valid";
       if (generation !== nextGeneration) {
-        Object.assign(state, { group: "", issue: "", change: "all", correctness: "", query: "", page: 1, open: null });
+        Object.assign(state, { scope: next.scope || "all_valid", group: "", issue: "", change: "all", correctness: "", query: "", page: 1, open: null });
       }
       generation = nextGeneration;
       prepare();
@@ -318,7 +335,7 @@
       destroy() {
         disposed = true; observer?.disconnect(); global.cancelAnimationFrame(resizeFrame);
         root.removeEventListener("click", onClick); root.removeEventListener("change", onChange); root.removeEventListener("input", onInput);
-        root.replaceChildren(); payload = baseline = target = pair = null; pairs = []; issueRows = [];
+        root.replaceChildren(); sourcePayload = payload = baseline = target = pair = null; pairs = []; issueRows = [];
       },
     };
   }

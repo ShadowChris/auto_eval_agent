@@ -111,6 +111,7 @@ def build_comparison_report(
         "issue_type_rows", "conclusion",
     )
     pairs = []
+    allowed_positions = set(comparison.get("common_positions") or [])
     for pair in comparison["pairwise"]:
         target_rows = by_id[pair["target_task_id"]].get("rows") or []
         matches, _ = _match_rows(baseline_rows, target_rows)
@@ -119,6 +120,8 @@ def build_comparison_report(
             for match in matches
             if _is_valid(baseline_rows[match["baseline_index"]].get("result") or {})
             and _is_valid(target_rows[match["target_index"]].get("result") or {})
+            and (comparison.get("scope") != "common_decidable"
+                 or match["baseline_index"] in allowed_positions)
         ]
         pairs.append({
             **{field: pair.get(field) for field in pair_fields},
@@ -127,6 +130,7 @@ def build_comparison_report(
     return {
         "schema_version": 2,
         "kind": "comparison",
+        "scope": comparison.get("scope", "all_valid"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "baseline_task_id": comparison["baseline_task_id"],
         "all_groups_common_valid_count": comparison["all_groups_common_valid_count"],

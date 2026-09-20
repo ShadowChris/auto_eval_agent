@@ -227,6 +227,7 @@ class OperationComparisonSourceReq(BaseModel):
 class OperationComparisonAnalyzeReq(BaseModel):
     sources: list[OperationComparisonSourceReq]
     control_source_id: str
+    scope: Literal["all_valid", "common_decidable"] = "all_valid"
 
 
 class RerunReq(BaseModel):
@@ -2273,9 +2274,31 @@ def _operation_comparison_analysis_payload(
             batches,
             baseline_task_id=request.control_source_id,
             include_union_rows=include_union_rows,
+            scope=request.scope,
         )
         if include_report:
             payload["report"] = build_comparison_report(batches, payload)
+            alternate_scope = "common_decidable" if request.scope == "all_valid" else "all_valid"
+            alternate = compare_operation_batches(
+                batches, baseline_task_id=request.control_source_id, scope=alternate_scope,
+            )
+            alternate_report = build_comparison_report(batches, alternate)
+            # 两种口径共用一份 Case 池，仅保存统计与配对索引。
+            def report_view(report):
+                return {
+                    "groups": [{k: v for k, v in group.items() if k != "cases"}
+                               for group in report["groups"]],
+                    "pairs": report["pairs"],
+                    "all_groups_common_valid_count": report["all_groups_common_valid_count"],
+                }
+            payload["report"]["views"] = {
+                request.scope: report_view(payload["report"]),
+                alternate_scope: report_view(alternate_report),
+            }
+            payload["comparison_views"] = {
+                request.scope: {k: v for k, v in payload.items() if k != "report"},
+                alternate_scope: alternate,
+            }
         return payload
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc

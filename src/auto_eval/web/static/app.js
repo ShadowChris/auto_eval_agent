@@ -42,7 +42,7 @@ createApp({
         onUnmounted(() => { disposed = true; controller?.abort(); viewer?.destroy(); viewer = null; });
         return { host, loading, error, refresh };
       },
-      template: '<div><p v-if="loading" class="hint">正在加载图表与 Case…</p><p v-if="error" class="run-error">{{ error }} <button @click="refresh">重试</button></p><div ref="host"></div></div>',
+      template: '<div><p v-if="loading" class="hint">正在加载图表与 Case…</p><p v-if="error" class="run-error">{{ error }} <button @click="refresh">重试</button></p><div ref="host" @report-scope-change="$emit(\'scope-change\', $event.detail)"></div></div>',
     },
   },
   setup() {
@@ -3079,6 +3079,7 @@ createApp({
 
     function historyComparisonRequestBody() {
       return {
+        scope: "common_decidable",
         sources: comparisonSources.value.map((source) => ({
           source_id: source.source_id,
           source_type: source.source_type,
@@ -3128,7 +3129,7 @@ createApp({
         const response = await fetch(`/api/operation/comparison/export?format=${format}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(historyComparisonRequestBody()),
+          body: JSON.stringify({ ...historyComparisonRequestBody(), scope: historyComparison.value.scope || "all_valid" }),
         });
         if (!response.ok) {
           const data = await response.json().catch(() => ({}));
@@ -3160,6 +3161,17 @@ createApp({
         (item) => item.correctness === correctness,
       );
       return row?.count || 0;
+    }
+
+    function changeComparisonScope(scope) {
+      const current = historyComparison.value;
+      const view = current?.comparison_views?.[scope];
+      if (!view) return;
+      for (const pair of view.pairwise || []) {
+        pair._issue_sort_by ||= "count_delta";
+        pair._issue_sort_direction ||= "asc";
+      }
+      historyComparison.value = { ...current, ...view };
     }
 
     function comparisonIsBestOkRate(group) {
@@ -3925,7 +3937,7 @@ createApp({
       beginComparisonSourceNameEdit, saveComparisonSourceName,
       cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,
       generateHistoryComparison, exportHistoryComparison, exportHtml,
-      comparisonCorrectnessCount, comparisonIsBestOkRate,
+      comparisonCorrectnessCount, comparisonIsBestOkRate, changeComparisonScope,
       comparisonPairChangeClass, comparisonPairChangeLabel, comparisonIssueRows,
       comparisonIssueDeltaClass, comparisonIssueDeltaStyle, comparisonIssueDeltaText,
       editHistoryNote, cancelHistoryNote, saveHistoryNote, formatTime, formatHistoryDuration,

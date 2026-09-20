@@ -40,6 +40,51 @@ def _batch(task_id: str, name: str, rows: list[dict]) -> dict:
     }
 
 
+def test_decidable_scope_uses_all_groups_intersection_for_every_metric():
+    judgments = [
+        ["ok", "nok", "ok", "ok", "ok", "ok"],
+        ["nok", "ok", "ok", "no_support", "ok", "ok"],
+        ["ok", "ok", "others", "ok", "ok", "ok"],
+    ]
+    batches = [
+        _batch(str(group), str(group), [
+            _row(i, f"query {i}", verdict, data_index=i,
+                 issue_types=["保留问题" if i < 2 else "排除问题"])
+            for i, verdict in enumerate(verdicts)
+        ]) for group, verdicts in enumerate(judgments)
+    ]
+    batches[2]["rows"][4]["result"]["error"] = "timeout"
+    batches[2]["rows"].pop()  # 第六条在第三组缺失。
+    original = compare_operation_batches(batches, baseline_task_id="0")
+    filtered = compare_operation_batches(batches, baseline_task_id="0", scope="common_decidable")
+    assert original["all_groups_common_valid_count"] == 4
+    assert filtered["common_positions"] == [0, 1]
+    assert [g["statistics"]["rate_denominator"] for g in filtered["groups"]] == [2, 2, 2]
+    for pair in filtered["pairwise"]:
+        assert pair["valid_pair_count"] == 2
+        assert pair["baseline_rate_denominator"] == pair["target_rate_denominator"] == 2
+        assert [r["issue_type"] for r in pair["issue_type_rows"]] == ["保留问题"]
+        assert pair["issue_type_rows"][0]["baseline_rate"] == 1
+    assert filtered["pairwise"][0]["to_ok_count"] == 1
+    assert filtered["pairwise"][0]["from_ok_count"] == 1
+    assert filtered["pairwise"][1]["ok_rate_delta"] == .5
+    from auto_eval.analysis.operation_report import build_comparison_report
+    report = build_comparison_report(batches, filtered)
+    assert all(p["matches"] == [[0, 0], [1, 1]] for p in report["pairs"])
+
+
+def test_decidable_scope_empty_intersection_has_no_rates():
+    batches = [
+        _batch("a", "a", [_row(0, "q", "ok")]),
+        _batch("b", "b", [_row(0, "q", "others")]),
+    ]
+    result = compare_operation_batches(batches, baseline_task_id="a", scope="common_decidable")
+    assert result["all_groups_common_valid_count"] == 0
+    assert result["pairwise"][0]["target_ok_rate"] is None
+    assert result["pairwise"][0]["issue_type_rows"] == []
+    assert result["pairwise"][0]["ok_rate_change"] == "unavailable"
+
+
 def test_history_comparison_matches_by_index_then_unique_query() -> None:
     baseline = _batch("baseline", "对照组", [
         _row(0, "打开蓝牙", "ok", case_id="c1"),

@@ -2660,15 +2660,20 @@ def build_xlsx(snapshot: dict, cfg: Any | None = None) -> bytes:
 
 def build_operation_comparison_xlsx(payload: dict) -> bytes:
     """导出统一交集统计和逐题横向并集。"""
+    decidable = payload.get("scope") == "common_decidable"
     groups = payload.get("groups") or []
     overview = [
         ["任务类结果集对比"],
         [
             "统计口径",
-            "Correctness 与 Issue Type 仅统计所有选中批次共有且均有效的 Case；"
+            ("当前口径：所有选中组均为 OK/NOK 的共同 Case；全部统计使用同一集合；"
+             "OK/NOK 率和 Issue Type 占比的分母均为该集合大小；逐题横向对比保留原始并集供追溯。"
+             if decidable else
+            "Correctness 仅统计所有选中批次共有且均有效的 Case；"
+            "Issue Type 使用对应两组共同有效 Case；"
             "相对对照组表按每个实验组与对照组各自的共同有效 Case 计算；"
             "OK/NOK 率统一以各组 ok+nok 为分母；"
-            "“其他”表示 nok、no_support 或 others。",
+            "“其他”表示 nok、no_support 或 others。"),
         ],
         ["全组共同 Case", payload.get("all_groups_common_matched_count", 0)],
         ["全组共同有效 Case", payload.get("all_groups_common_valid_count", 0)],
@@ -2703,6 +2708,10 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
     overview.append(["相对对照组的共同 Case 对比"])
     pair_header_row = len(overview) + 1
     overview.append(["对比关系", "共同 Case", "共同有效 Case", "对照组OK数", "对照组NOK数", "对照组率分母", "对照组OK率", "对照组NOK率", "实验组OK数", "实验组NOK数", "实验组率分母", "实验组OK率", "实验组NOK率", "其他→OK", "OK→其他", "OK净变化", "OK率差值", "结论"])
+    if decidable:
+        overview[-1] = ["NOK→OK" if cell == "其他→OK" else
+                        "OK→NOK" if cell == "OK→其他" else cell
+                        for cell in overview[-1]]
     pair_data_start = pair_header_row + 1
     for pair in payload.get("pairwise") or []:
         overview.append([
