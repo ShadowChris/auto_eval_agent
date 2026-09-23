@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>auto_eval 评估台</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260912_pipeline_wait">
+  <link rel="stylesheet" href="/static/style.css?v=20260912_window2s">
   <link rel="stylesheet" href="/report-assets/operation_report.css?v=20260911_report_sync">
   <style>
     .op-cards { display:flex; flex-direction:column; gap:12px; }
@@ -44,11 +44,11 @@
 
   <div v-show="page==='eval'">
   <details class="settings-section" @toggle="onSettingsToggle">
-    <summary>系统设置（模型限流 {{ sysSettings.queue.limit }}/秒 · 在途 {{ sysSettings.queue.running }}/{{ sysSettings.max_in_flight }} · 排队 {{ sysSettings.queue.queued }} · 预处理并发 {{ sysSettings.waiting_capacity }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }}）</summary>
+    <summary>系统设置（模型限流 {{ sysSettings.queue.limit }}/每2秒 · 在途 {{ sysSettings.queue.running }}/{{ sysSettings.max_in_flight }} · 排队 {{ sysSettings.queue.queued }} · 等待容量 {{ sysSettings.waiting_capacity }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }}）</summary>
     <div class="row">
-      <span class="lbl">每秒请求数：</span>
+      <span class="lbl">每2秒请求数：</span>
       <input type="number" min="1" max="64" v-model.number="settingsForm.concurrency" style="width:70px">
-      <span class="hint">模型调用速率限流：每秒最多发起 N 次请求（默认 10），不等待完成。</span>
+      <span class="hint">模型调用速率限流：每 2 秒最多发起 N 次请求（默认 10），不等待完成。</span>
     </div>
     <div class="row">
       <span class="lbl">最大在途：</span>
@@ -580,6 +580,6 @@
 </div>
 
   <script src="/report-assets/operation_report.js?v=20260911_report_sync"></script>
-  <script type="module" src="/static/app.js?v=20260912_pipeline_wait"></script>
+  <script type="module" src="/static/app.js?v=20260912_window2s"></script>
 </body>
 </html>

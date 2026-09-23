@@ -199,7 +199,7 @@ async def test_limiter_priority_cancelled_waiter_leaks_no_slot():
 # ---------- TokenBucketRateLimiter（模型速率限流） ----------
 
 async def test_rate_limiter_burst_then_block_until_refill():
-    """每秒 rate 个令牌（突发=rate）：突发内立即可用，超突发需等按率生成。"""
+    """每窗口 rate 个令牌（窗口=2s，突发=rate）：突发内立即可用，超突发需等按率生成。"""
     lim = TokenBucketRateLimiter(2)
     for _ in range(2):
         await lim.acquire()       # 突发 2 个立刻到账
@@ -207,7 +207,7 @@ async def test_rate_limiter_burst_then_block_until_refill():
     assert lim.stats()["running"] == 2
 
     third = asyncio.create_task(lim.acquire())
-    await asyncio.wait_for(third, 1.5)   # ~0.5s 后按率生成新令牌
+    await asyncio.wait_for(third, 1.5)   # 窗口 2s、rate=2 → 每秒补 1 个，约 1s 后到账
     assert third.done() and not third.cancelled()
 
     lim.release()
@@ -227,7 +227,7 @@ async def test_rate_limiter_priority_waiter_served_first():
     await asyncio.sleep(0)
     assert lim.stats()["queued"] == 2
 
-    await asyncio.wait_for(head, 2.5)   # ~1s 后首枚令牌按率生成 → 喂队头(priority)
+    await asyncio.wait_for(head, 3.0)   # 窗口2s、rate=1 → 每秒0.5个，约2s 后首枚令牌 → 喂队头(priority)
     assert head.done() and not head.cancelled()
     await asyncio.sleep(0)
     assert not normal.done()            # 普通等待者仍未轮到
@@ -695,7 +695,7 @@ def test_apply_settings_clamps_out_of_range():
 
 
 def test_settings_panel_static_asserts():
-    """前端设置面板接线静态断言：每秒请求数/预处理并发输入 + 限流计数展示。"""
+    """前端设置面板接线静态断言：每2秒请求数/等待容量输入 + 限流计数展示。"""
     project_root = Path(__file__).resolve().parents[1]
     app_js = (project_root / "src/auto_eval/web/static/app.js").read_text(
         encoding="utf-8"
@@ -708,7 +708,7 @@ def test_settings_panel_static_asserts():
     assert "max_in_flight: maxInFlight" in app_js
     assert "sysSettings.waiting_capacity" in index_html
     assert "sysSettings.max_in_flight" in index_html
-    assert "每秒请求数" in index_html            # concurrency 显示「每秒请求数」
+    assert "每2秒请求数" in index_html            # concurrency 显示「每2秒请求数」
     assert "最大在途" in index_html             # 新增最大在途输入/展示
 
 

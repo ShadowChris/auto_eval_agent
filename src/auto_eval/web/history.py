@@ -451,7 +451,7 @@ _RICH_CONTENT_EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("card_suitability", "卡片是否合适"),
     ("card_suitability_reason", "卡片不合适原因"),
     ("needs_review_label", "识别是否需要人工复查"),
-    ("review_reason", "需要复核的原因"),
+    ("review_reason", "need_review_cate"),
     ("problem_solved", "correctness"),
     ("problem_solved_reason", "评价的原因"),
     ("answer_issues", "error_type"),
@@ -467,7 +467,7 @@ _RICH_CONTENT_LIST_FIELDS = {"card_types", "card_contents", "superlink_texts"}
 # 枚举值 → 展示值映射
 _RICH_CONTENT_DISPLAY_MAP: dict[str, dict[str, str]] = {
     "card_suitability": {"ok": "OK", "nok": "NOK"},
-    "problem_solved": {"ok": "OK", "nok": "NOK", "need_review": "需复查"},
+    "problem_solved": {"ok": "OK", "nok": "NOK", "need_review": "no_support"},
     "factual_conflict": {"yes": "是", "no": "否"},
 }
 

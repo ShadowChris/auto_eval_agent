@@ -6,10 +6,11 @@
   ≤ waiting_capacity、在途 ≤ max_in_flight，从而已准备好的关键帧总内存被封顶
   （防止抽完帧堆在模型闸前等太久导致内存暴涨）。已带 frames 的重跑题不走预处理，
   仅等模型、仍可占名额。
-- MODEL_LIMITER（速率 = concurrency 令牌/秒 + 最大在途 = max_in_flight）：
-  模型调用级限流，每次实际模型请求（含重试的每一次尝试）同时满足「一个速率
-  令牌」与「一个在途名额」才发出——速率限制每秒请求数，在途上限防范模型
-  服务商的在途并发限制。组第 2+ 轮 / 批第 2+ 条首次尝试 priority=True 插队头。
+- MODEL_LIMITER（速率 = concurrency 令牌/每 RATE_WINDOW_S 秒 + 最大在途 =
+  max_in_flight）：模型调用级限流，每次实际模型请求（含重试的每一次尝试）
+  同时满足「一个速率令牌」与「一个在途名额」才发出——速率限制每窗口请求数
+  （默认窗口 2 秒），在途上限防范模型服务商的在途并发限制。组第 2+ 轮 / 批
+  第 2+ 条首次尝试 priority=True 插队头。
 
 速率（concurrency）、最大在途（max_in_flight）、预处理并发（waiting_capacity）、
 单题超时与裁判由 GET/PUT /api/settings 全局管理，持久化到
@@ -33,7 +34,8 @@ from ..paths import RUNS_DIR
 logger = logging.getLogger(__name__)
 
 SETTINGS_PATH = RUNS_DIR / "web_settings.json"
-DEFAULT_CONCURRENCY = 10  # 模型调用速率限流：每秒至多 10 次请求
+DEFAULT_CONCURRENCY = 10  # 模型调用速率限流：每 2 秒至多 10 次请求
+RATE_WINDOW_S = 2.0  # 速率限流窗口：concurrency 表示「每窗口窗口内 N 次」
 DEFAULT_MAX_IN_FLIGHT = 50  # 模型调用最大在途上限（模型服务商有在途并发限制）
 DEFAULT_WAITING_CAPACITY = 10  # 视频预处理并发上限：同时抽帧的评测数
 DEFAULT_EVAL_TIMEOUT_S = 300.0
@@ -161,10 +163,11 @@ class _LimiterSlot:
 
 
 class TokenBucketRateLimiter:
-    """模型调用级限流：令牌桶速率（每秒 `rate` 个，突发 = rate）+ 最大在途上限。
+    """模型调用级限流：令牌桶速率（每 RATE_WINDOW_S 秒 `rate` 个，突发 = rate）
+    + 最大在途上限。
 
     每次实际模型请求（含重试的每一次 `_eval_one`）在 acquire 时须同时满足：
-    - 一个速率令牌（按 `rate` 逐秒生成）；
+    - 一个速率令牌（每 RATE_WINDOW_S 秒生成 `rate` 个，折算每秒 rate/窗口）；
     - 一个在途名额（`in_flight < max_in_flight`，模型服务商有在途并发限制）。
 
     两者都满足才会发出请求：`_in_flight` 即当前在途的模型调用数，随请求开始
@@ -182,9 +185,10 @@ class TokenBucketRateLimiter:
         rate: int,
         max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
     ) -> None:
-        self._rate = max(1, int(rate))
+        self._rate = max(1, int(rate))  # 每窗口内的令牌数（窗口 = RATE_WINDOW_S）
+        self._rate_per_sec = self._rate / RATE_WINDOW_S  # 折算每秒补币速率
         self._max_in_flight = max(1, int(max_in_flight))
-        self._tokens = float(self._rate)  # 突发 = rate；时间制，无持有
+        self._tokens = float(self._rate)  # 突发 = 整窗口额度；时间制，无持有
         self._last: float | None = None  # 上次补币的 loop 时间戳（None=未初始化）
         self._in_flight = 0  # 当前在途模型调用数（受 max_in_flight 约束）
         self._waiters: deque[asyncio.Future] = deque()
@@ -206,6 +210,7 @@ class TokenBucketRateLimiter:
         new = max(1, int(rate))
         if new != self._rate:
             self._rate = new
+            self._rate_per_sec = new / RATE_WINDOW_S
             # 已有等待者时立即泵送一次：新 rate 可能让存量令牌立即可喂
             self._pump(_loop_time())
             self._ensure_minter()
@@ -233,7 +238,8 @@ class TokenBucketRateLimiter:
             self._last = now  # 首次基线：只记录时间戳，不凭空补突发
         elapsed = now - self._last
         if elapsed > 0:
-            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
+            # 每秒补 rate_per_sec 个（= 每 RATE_WINDOW_S 秒补 rate 个）
+            self._tokens = min(self._rate, self._tokens + elapsed * self._rate_per_sec)
         self._last = now
 
     def _feed_front(self) -> None:
@@ -296,7 +302,7 @@ class TokenBucketRateLimiter:
                 await asyncio.sleep(0.02)
                 continue
             if self._tokens < 1.0:
-                await asyncio.sleep((1.0 - self._tokens) / self._rate)
+                await asyncio.sleep((1.0 - self._tokens) / self._rate_per_sec)
                 continue  # 循环顶部重补币；rate/priority 可随后续请求变化
             await asyncio.sleep(0)  # _servable 已满足但未喂到（理论不会到这里）
 
@@ -355,7 +361,7 @@ def apply_settings(
 ) -> RuntimeSettings:
     """更新运行时设置并即时对齐限流器（越界值 clamp 到合法区间）。
 
-    concurrency = 模型调用速率（令牌/秒）→ MODEL_LIMITER.set_rate；
+    concurrency = 模型调用速率（每 RATE_WINDOW_S 秒的令牌数）→ MODEL_LIMITER.set_rate；
     max_in_flight = 模型最大在途（模型服务商并发限制）→ MODEL_LIMITER.set_max_in_flight；
     waiting_capacity = 「预处理并发 + 预处理后等模型」的额度 → PIPELINE_LIMITER。
     流水线准入 = max_in_flight + waiting_capacity（整题持有至模型结束），

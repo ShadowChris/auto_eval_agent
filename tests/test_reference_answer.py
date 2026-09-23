@@ -324,6 +324,17 @@ def test_system_template_declares_detail_binding():
 
 # ---------- 导出与汇总 ----------
 
+def test_export_rows_translate_correctness_column():
+    """correctness 列的 problem_solved 翻译：need_review → no_support。"""
+    rows = _rich_content_export_rows([
+        {"item_id": "q1", "problem_solved": "ok"},
+        {"item_id": "q2", "problem_solved": "nok"},
+        {"item_id": "q3", "problem_solved": "need_review"},
+        {"item_id": "q4"},  # 无键 → 空单元格
+    ])
+    assert [row["correctness"] for row in rows] == ["OK", "NOK", "no_support", ""]
+
+
 def test_export_rows_translate_conflict_column():
     rows = _rich_content_export_rows([
         {"item_id": "q1", "factual_conflict": "yes"},
@@ -331,6 +342,15 @@ def test_export_rows_translate_conflict_column():
         {"item_id": "q3"},  # 旧任务结果行无该键 → 空单元格
     ])
     assert [row["事实冲突"] for row in rows] == ["是", "否", ""]
+
+
+def test_export_rows_include_review_reason_column():
+    # review_reason 导出列名为 need_review_cate
+    rows = _rich_content_export_rows([
+        {"item_id": "q1", "review_reason": "需要多轮确认"},
+        {"item_id": "q2"},  # 无键 → 空单元格
+    ])
+    assert [row["need_review_cate"] for row in rows] == ["需要多轮确认", ""]
 
 
 def test_export_rows_include_conflict_detail_column():

@@ -247,9 +247,9 @@ async def api_settings_get():
 
 @app.put("/api/settings")
 async def api_settings_put(req: SettingsReq):
-    """更新全局速率/预处理并发/单题超时/裁判：即时生效（concurrency 为模型
-    每秒请求数，调大立即放行限流队列、调小软生效；waiting_capacity 为视频
-    预处理并发）并持久化到 runs/web_settings.json。"""
+    """更新全局速率/流水线准入/单题超时/裁判：即时生效（concurrency 为模型
+    每 2 秒请求数，调大立即放行限流队列、调小软生效；waiting_capacity 为
+    流水线「等待/预处理」额度）并持久化到 runs/web_settings.json。"""
     if (
         req.concurrency is None
         and req.max_in_flight is None

@@ -219,7 +219,7 @@ def _make_item_evaluator(
 
     两级限流：调用方（_run / _run_update_batch_body）已持有 PIPELINE_LIMITER
     流水线准入槽（预处理 + 等模型 + 模型同一名额，封顶关键帧内存）；one 内部
-    模型调用走 MODEL_LIMITER 速率+在途限流（每秒至多 N 次、在途至多
+    模型调用走 MODEL_LIMITER 速率+在途限流（每 2 秒至多 N 次、在途至多
     max_in_flight，含重试）。priority=True（组第 2+ 轮 / 批第 2+ 条）首次
     尝试取限流令牌时插队头，保留组内轮次不被排到队尾的语义。限流等待不计入
     单题耗时，纯模型时长另有 latency_s 口径。速率、在途、预处理并发、单题

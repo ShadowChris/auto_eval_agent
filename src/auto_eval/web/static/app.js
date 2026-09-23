@@ -72,7 +72,7 @@ createApp({
       waiting_capacity: 10,
       eval_timeout_s: 300,
       judges: [],
-      queue: { limit: 10, running: 0, queued: 0 },       // 模型限流：limit=每秒请求数，running=在途，max_in_flight=在途上限
+      queue: { limit: 10, running: 0, queued: 0 },       // 模型限流：limit=每2秒请求数，running=在途，max_in_flight=在途上限
       pipeline: { limit: 10, running: 0, queued: 0 },     // 预处理并发级
     });
     const settingsForm = ref({ concurrency: 10, max_in_flight: 50, waiting_capacity: 10, eval_timeout_s: 300, judges: [] });
