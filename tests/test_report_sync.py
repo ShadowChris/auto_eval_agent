@@ -32,7 +32,7 @@ def _snapshot(task_id: str, rows: list[dict]) -> dict:
 def _batch_a():
     return _snapshot("tz1", [
         {"_id": "q0", "_q": "天气", "problem_solved": "ok"},
-        {"_id": "q1", "_q": "闹钟", "problem_solved": "nok", "answer_issues": "执行/操作失败:没设提醒\n逻辑矛盾:前后矛盾"},
+        {"_id": "q1", "_q": "闹钟", "problem_solved": "nok", "answer_issues": "执行/操作失败:没设提醒\n回答矛盾:前后矛盾"},
         {"_id": "q2", "_q": "音乐", "problem_solved": "need_review", "answer_issues": "执行/操作失败:不清楚"},
         {"_id": "q3", "_q": "失败", "error": "Timeout"},
     ])
@@ -56,7 +56,7 @@ def test_statistics_issue_types_deduped_per_case():
     rows = {row["issue_type"]: row["case_count"] for row in stats["issue_type_rows"]}
     assert rows == {  # 执行/操作失败 只在 q1、q2 各计一次
         "执行/操作失败": 2,
-        "逻辑矛盾": 1,
+        "回答矛盾": 1,
     }
 
 
@@ -69,7 +69,7 @@ def test_single_report_cases_only_valid_and_whitelisted():
     assert ids == {"q0", "q1", "q2"}
     case = next(case for case in rep["cases"] if case["item_id"] == "q1")
     assert case["correctness"] == "nok"
-    assert case["issue_types"] == ["执行/操作失败", "逻辑矛盾"]
+    assert case["issue_types"] == ["执行/操作失败", "回答矛盾"]
     # 投影只含白名单字段，不含原始错误/帧数据
     assert "error" not in case
     assert "traceback" not in case
@@ -80,23 +80,27 @@ def test_comparison_pairing_and_report():
     comparison = comparison_report(
         [_batch_a(), _snapshot("tz2", [
             {"_id": "q0", "_q": "天气", "problem_solved": "ok"},
-            {"_id": "q1", "_q": "闹钟", "problem_solved": "nok", "answer_issues": "错误1:没设"},
+            {"_id": "q1", "_q": "闹钟", "problem_solved": "ok"},
             {"_id": "q2", "_q": "音乐", "problem_solved": "ok"},
         ])],
         baseline_task_id="tz1",
     )
     assert comparison["group_count"] == 2
+    # 3 条都按 index 匹配上
     assert comparison["all_groups_common_matched_count"] == 3
-    assert comparison["all_groups_common_valid_count"] == 3
+    # 共同有效排除 need_review（baseline q2 为 need_review）→ 只剩 q0、q1
+    assert comparison["all_groups_common_valid_count"] == 2
     pair = comparison["pairwise"][0]
-    # tz1: q0→ok,q1→nok,q2→review(1/3 ok)；tz2: q0→ok,q1→nok,q2→ok(2/3 ok)
-    assert pair["baseline_ok_rate"] == pytest.approx(1 / 3, abs=1e-4)
-    assert pair["target_ok_rate"] == pytest.approx(2 / 3, abs=1e-4)
+    assert pair["valid_pair_count"] == 2
+    # q0、q1：baseline=ok,nok → 1/2 ok；target=ok,ok → 1/1 ok
+    assert pair["baseline_ok_rate"] == pytest.approx(0.5, abs=1e-4)
+    assert pair["target_ok_rate"] == pytest.approx(1.0, abs=1e-4)
     assert pair["ok_rate_change"] == "improved"
     report = comparison["report"]
     assert report["kind"] == "comparison"
     assert len(report["pairs"]) == 1
-    assert report["pairs"][0]["matches"] == [[0, 0], [1, 1], [2, 2]]
+    # 对比报告配对也只含 q0、q1（q2 因 need_review 被排除）
+    assert report["pairs"][0]["matches"] == [[0, 0], [1, 1]]
 
 
 def test_offline_html_smoke():
@@ -136,8 +140,8 @@ def test_issue_labels_whitelist_keeps_enum_members():
     from auto_eval.web.report_payload import _issue_labels
 
     # 枚举内标签原样保留、同题去重
-    labels = _issue_labels("答非所问：跑了题\n事实/计算错误：算错\n答非所问：重复")
-    assert labels == ["答非所问", "事实/计算错误"]
+    labels = _issue_labels("回答内容不相关：跑了题\n挂卡/资源缺失：缺卡\n回答内容不相关：重复")
+    assert labels == ["回答内容不相关", "挂卡/资源缺失"]
 
 
 def test_issue_labels_whitelist_normalizes_unknown():

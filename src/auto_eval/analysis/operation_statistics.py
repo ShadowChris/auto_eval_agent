@@ -13,6 +13,10 @@ from typing import Any, Iterable
 
 OPERATION_CORRECTNESS = ("ok", "nok", "need_review")
 
+# 对比分析的判定闭包：多组对比的「共同有效」只用 ok/nok，排除 need_review 等
+# 待核验项（单批统计仍用 OPERATION_CORRECTNESS，保留 need_review）。
+OPERATION_COMPARISON_CORRECTNESS = ("ok", "nok")
+
 # 问题类型封闭枚举：answer_issues 只允许取以下单个标签（prompt 与代码共用
 # 同一来源），禁止自造/组合/近似词。语义重叠项已归并；「需求未闭环」仅在
 # 末轮（含单轮）可报。
@@ -49,20 +53,26 @@ def summarize_operation_results(
     results: Iterable[dict[str, Any]],
     *,
     total_cases: int | None = None,
+    correctness: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """汇总一批垂域视觉评测结果。
 
     OK 率和各类占比只以具有合法 correctness 的有效评估 Case 为分母；
     运行错误与尚无合法判定的条目分别计入失败、待评估，不伪装成 nok。
     每个 issue type 在同一 Case 中最多计一次。
+
+    ``correctness`` 用于指定「视为有效」的判定闭包：对比分析传
+    OPERATION_COMPARISON_CORRECTNESS（只 ok/nok）即排除 need_review；
+    缺省用 OPERATION_CORRECTNESS（单批统计保留 need_review）。
     """
+    correctness_set = tuple(correctness) if correctness else OPERATION_CORRECTNESS
     rows = list(results)
     total = max(int(total_cases if total_cases is not None else len(rows)), 0)
     failed = sum(1 for row in rows if row.get("error"))
     valid = [
         row
         for row in rows
-        if not row.get("error") and row.get("correctness") in OPERATION_CORRECTNESS
+        if not row.get("error") and row.get("correctness") in correctness_set
     ]
     valid_count = len(valid)
     pending = max(total - valid_count - failed, 0)
@@ -78,7 +88,7 @@ def summarize_operation_results(
                 else None
             ),
         }
-        for correctness in OPERATION_CORRECTNESS
+        for correctness in correctness_set
     ]
 
     issue_case_counts: Counter[str] = Counter()

@@ -5,7 +5,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-from .operation_comparison import _is_valid, _match_rows
+from .operation_comparison import _is_comparison_valid, _is_valid, _match_rows
 from .operation_statistics import normalize_operation_issue_types
 
 
@@ -102,8 +102,8 @@ def build_comparison_report(
         valid_matches = [
             [match["baseline_index"], match["target_index"]]
             for match in matches
-            if _is_valid(baseline_rows[match["baseline_index"]].get("result") or {})
-            and _is_valid(target_rows[match["target_index"]].get("result") or {})
+            if _is_comparison_valid(baseline_rows[match["baseline_index"]].get("result") or {})
+            and _is_comparison_valid(target_rows[match["target_index"]].get("result") or {})
         ]
         pairs.append({
             **{field: pair.get(field) for field in pair_fields},

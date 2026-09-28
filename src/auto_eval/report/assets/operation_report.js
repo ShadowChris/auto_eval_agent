@@ -92,14 +92,14 @@
           <div data-or="tags" class="or-tags"></div>
           <div class="or-controls">
             <select data-or="issue" aria-label="问题类型"><option value="">全部问题类型 / 全部有效 Case</option>${topIssues(issueRows.length).map(r => `<option value="${esc(r.name)}" ${state.issue === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>
-            <select data-or="correctness-filter" aria-label="${isCompare ? "实验组判定筛选" : "判定筛选"}"><option value="">${isCompare ? "全部实验组判定" : "全部判定"}</option>${TYPES.map(t => `<option value="${t}" ${state.correctness === t ? "selected" : ""}>${t}</option>`).join("")}</select>
+            <select data-or="correctness-filter" aria-label="${isCompare ? "实验组判定筛选" : "判定筛选"}"><option value="">${isCompare ? "全部实验组判定" : "全部判定"}</option>${(isCompare ? ["ok", "nok"] : TYPES).map(t => `<option value="${t}" ${state.correctness === t ? "selected" : ""}>${t}</option>`).join("")}</select>
             <input data-or="search" type="search" placeholder="搜索题号 / query / 评价原因 / 回答" aria-label="搜索 Case" value="${esc(state.query)}">
           </div>
           ${isCompare ? `<div class="or-segments or-controls">${[["all", "全部命中"], ["new", "新增问题"], ["resolved", "问题消失"], ["persistent", "持续存在"]].map(([v, n]) => `<button data-change="${v}" aria-pressed="${state.change === v}">${n}</button>`).join("")}</div>` : ""}
           <div data-or="cases" class="or-table-wrap"></div>
           <div class="or-footer"><span class="or-muted">问题类型取 answer_issues 每行“：”前的标签，同题去重。</span><div class="or-row"><label class="or-muted">每页 <select data-or="size">${[10, 20, 50].map(n => `<option value="${n}" ${state.size === n ? "selected" : ""}>${n} 条</option>`).join("")}</select></label><button data-page="-1">上一页</button><span data-or="page-label" class="or-muted"></span><button data-page="1">下一页</button></div></div>
         </section>
-        <p class="or-muted">报告快照 ${esc(payload.generated_at)} · 问题类型按 Case 去重，占比之和可能超过 100%。${isCompare ? "其他→OK 中的“其他”包括 nok、need_review。" : ""} 未打包媒体或模型原始调用。</p>`;
+        <p class="or-muted">报告快照 ${esc(payload.generated_at)} · 问题类型按 Case 去重，占比之和可能超过 100%。${isCompare ? "对比的共同有效仅计 ok/nok（排除 need_review 等问题）；“其他→OK”中的“其他”指 nok。" : ""} 未打包媒体或模型原始调用。</p>`;
       drawCorrectness(); drawIssues(); renderCases(); renderConclusion();
     }
     function drawCorrectness() {
@@ -118,8 +118,9 @@
           const s = group.statistics;
           body += `<div class="or-stack-group"><div class="or-stack-head"><span>${esc(group.group_label)}</span><span style="font-weight:${s.ok_rate != null && s.ok_rate === max ? 700 : 400}">OK ${pct(s.ok_rate)}</span></div><div class="or-stack">${s.correctness_rows.map((r, i) => `<span style="width:${(r.rate || 0) * 100}%;background:${COLORS[i]}" title="${r.correctness}：${r.count} 条 · ${pct(r.rate)}">${r.rate >= .1 ? pct(r.rate) : ""}</span>`).join("")}</div>${!s.valid_count ? '<span class="or-muted">无全组共同有效数据</span>' : ""}</div>`;
         }
-        body += `<div class="or-legend">${TYPES.map((t, i) => `<span><i class="or-dot" style="background:${COLORS[i]}"></i>${t}</span>`).join("")}</div>`;
-        body += `<details><summary>查看各组统计表</summary><div class="or-table-wrap">${table(["组别", "原始量", "共同有效量", ...TYPES, "OK率"], payload.groups.map(g => [esc(g.group_label), g.original_count, g.common_valid_count, ...g.statistics.correctness_rows.map(r => r.count), pct(g.statistics.ok_rate)]))}</div></details>`;
+        const labels = payload.groups[0]?.statistics.correctness_rows.map(r => r.correctness) || [];
+        body += `<div class="or-legend">${labels.map((t, i) => `<span><i class="or-dot" style="background:${COLORS[i]}"></i>${t}</span>`).join("")}</div>`;
+        body += `<details><summary>查看各组统计表</summary><div class="or-table-wrap">${table(["组别", "原始量", "共同有效量", ...labels, "OK率"], payload.groups.map(g => [esc(g.group_label), g.original_count, g.common_valid_count, ...g.statistics.correctness_rows.map(r => r.count), pct(g.statistics.ok_rate)]))}</div></details>`;
       }
       $("correctness").innerHTML = body;
     }

@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from .operation_statistics import (
+    OPERATION_COMPARISON_CORRECTNESS,
     OPERATION_CORRECTNESS,
     normalize_operation_issue_types,
     summarize_operation_results,
@@ -64,7 +65,7 @@ def compare_operation_batches(
         position
         for position in sorted(common_positions)
         if all(
-            _is_valid(
+            _is_comparison_valid(
                 (batch.get("rows") or [])[matched_indices[batch["task_id"]][position]].get("result")
                 or {}
             )
@@ -143,6 +144,7 @@ def _group_statistics(
     statistics = summarize_operation_results(
         common_results,
         total_cases=len(common_results),
+        correctness=OPERATION_COMPARISON_CORRECTNESS,
     )
     return {
         "task_id": batch["task_id"],
@@ -257,9 +259,18 @@ def _match_rows(
 
 
 def _is_valid(result: dict[str, Any]) -> bool:
+    """单批口径：ok / nok / need_review 都算有效评估。"""
     return (
         not result.get("error")
         and result.get("correctness") in OPERATION_CORRECTNESS
+    )
+
+
+def _is_comparison_valid(result: dict[str, Any]) -> bool:
+    """对比口径：共同有效只算 ok / nok，排除 need_review 等待核验项。"""
+    return (
+        not result.get("error")
+        and result.get("correctness") in OPERATION_COMPARISON_CORRECTNESS
     )
 
 
@@ -316,7 +327,7 @@ def _compare_pair(baseline: dict[str, Any], target: dict[str, Any]) -> dict[str,
     for baseline_index, target_index in match_map.items():
         baseline_result = baseline_rows[baseline_index].get("result") or {}
         target_result = target_rows[target_index].get("result") or {}
-        if not (_is_valid(baseline_result) and _is_valid(target_result)):
+        if not (_is_comparison_valid(baseline_result) and _is_comparison_valid(target_result)):
             continue
         valid_pairs.append((baseline_result, target_result))
         transitions[(
