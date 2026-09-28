@@ -29,6 +29,7 @@ MAX_TERMINAL_EVENT_LOG_SIZE = 200
 MAX_SSE_QUEUE_SIZE = 2_000
 MAX_CACHED_COMPLETED_TASKS = 8
 COMPLETED_TASK_CACHE_TTL_S = 1800.0
+DEFAULT_OPERATION_CONCURRENCY = 35
 _ACTIVE_STATUSES = {"pending", "running", "rerunning"}
 _TERMINAL_EVENTS = {"done", "error", "cancelled", "rerun_done", "rerun_cancelled"}
 

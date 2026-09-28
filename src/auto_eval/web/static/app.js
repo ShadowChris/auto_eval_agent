@@ -130,7 +130,7 @@ createApp({
     const providerMessage = ref("");
     const providerError = ref(false);
     const providerForm = ref(emptyProviderForm());
-    const concurrency = ref(8);
+    const concurrency = ref(35);
     const rateLimitRequests = ref(9);
     const rateLimitWindowSeconds = ref(1);
     const evalTimeout = ref(300);
