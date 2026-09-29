@@ -1,7 +1,7 @@
 /* Web 与离线 HTML 共用；仅渲染投影后的报告数据，不访问网络或执行源数据。 */
 (function (global) {
   "use strict";
-  const TYPES = ["ok", "nok", "need_review"];
+  const TYPES = ["ok", "nok", "no_support"];
   const COLORS = ["var(--or-green)", "var(--or-red)", "var(--or-amber)"];
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -99,7 +99,7 @@
           <div data-or="cases" class="or-table-wrap"></div>
           <div class="or-footer"><span class="or-muted">问题类型取 answer_issues 每行“：”前的标签，同题去重。</span><div class="or-row"><label class="or-muted">每页 <select data-or="size">${[10, 20, 50].map(n => `<option value="${n}" ${state.size === n ? "selected" : ""}>${n} 条</option>`).join("")}</select></label><button data-page="-1">上一页</button><span data-or="page-label" class="or-muted"></span><button data-page="1">下一页</button></div></div>
         </section>
-        <p class="or-muted">报告快照 ${esc(payload.generated_at)} · 问题类型按 Case 去重，占比之和可能超过 100%。${isCompare ? "对比的共同有效仅计 ok/nok（排除 need_review 等问题）；“其他→OK”中的“其他”指 nok。" : ""} 未打包媒体或模型原始调用。</p>`;
+        <p class="or-muted">报告快照 ${esc(payload.generated_at)} · 问题类型按 Case 去重，占比之和可能超过 100%。${isCompare ? "对比的共同有效仅计 ok/nok（排除 no_support 等）；“其他→OK”中的“其他”指 nok。" : "单批有效评估仅计 ok/nok，no_support（原 need_review）不计入。"} 未打包媒体或模型原始调用。</p>`;
       drawCorrectness(); drawIssues(); renderCases(); renderConclusion();
     }
     function drawCorrectness() {
@@ -109,7 +109,7 @@
         if (!stats.valid_count) {
           $("correctness").innerHTML = '<div class="or-empty">暂无有效判定</div>'; return;
         }
-        body = `<div class="or-columns">${stats.correctness_rows.map((r, i) => `<div class="or-column"><div class="or-col-label">${r.count}<br><span class="or-muted">${pct(r.rate)}</span></div><button data-correctness="${r.correctness}" aria-label="查看 ${r.correctness} 的 Case" class="or-col-fill" style="height:${r.rate * 100}%;background:${COLORS[i]};min-height:${r.count ? 3 : 0}px"></button></div>`).join("")}</div><div class="or-col-names">${TYPES.map(t => `<span>${t}</span>`).join("")}</div>`;
+        body = `<div class="or-columns">${stats.correctness_rows.map((r, i) => `<div class="or-column"><div class="or-col-label">${r.count}<br><span class="or-muted">${pct(r.rate)}</span></div><button data-correctness="${r.correctness}" aria-label="查看 ${r.correctness} 的 Case" class="or-col-fill" style="height:${(r.rate || 0) * 100}%;background:${COLORS[i]};min-height:${r.count ? 3 : 0}px"></button></div>`).join("")}</div><div class="or-col-names">${stats.correctness_rows.map(r => `<span>${esc(r.correctness)}</span>`).join("")}</div>`;
         body += `<details><summary>查看统计表</summary>${table(["判定", "频次", "占比"], stats.correctness_rows.map(r => [esc(r.correctness), r.count, pct(r.rate)]))}</details>`;
       } else {
         const max = Math.max(...payload.groups.map(g => g.statistics.ok_rate ?? -1));

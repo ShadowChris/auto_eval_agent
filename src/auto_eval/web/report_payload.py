@@ -120,6 +120,8 @@ def operation_statistics_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "statistics": summarize_operation_results(
             [row["result"] for row in rows],
             total_cases=len(rows),
+            correctness=("ok", "nok"),
+            extra_correctness=(("need_review", "no_support"),),
         ),
     }
 

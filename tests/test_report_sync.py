@@ -41,21 +41,26 @@ def _batch_a():
 def test_statistics_denominator_and_classes():
     stats = single_report(_batch_a())["statistics"]
     assert stats["total_cases"] == 4
-    assert stats["valid_count"] == 3
+    # 有效评估只计 ok/nok：q0(ok)+q1(nok)；q2(need_review→no_support) 排除
+    assert stats["valid_count"] == 2
     assert stats["failed_count"] == 1
     assert stats["pending_count"] == 0
     assert stats["ok_count"] == 1
     assert stats["nok_count"] == 1
-    assert stats["ok_rate"] == pytest.approx(1 / 3, abs=1e-4)  # 负载四舍五入到 4 位
+    assert stats["ok_rate"] == pytest.approx(0.5, abs=1e-4)
     correctness = {row["correctness"]: row["count"] for row in stats["correctness_rows"]}
-    assert correctness == {"ok": 1, "nok": 1, "need_review": 1}
+    assert correctness == {"ok": 1, "nok": 1, "no_support": 1}
+    # no_support 行不进有效分母（rate 为 None）
+    no_support = next(r for r in stats["correctness_rows"] if r["correctness"] == "no_support")
+    assert no_support["rate"] is None
 
 
 def test_statistics_issue_types_deduped_per_case():
     stats = single_report(_batch_a())["statistics"]
     rows = {row["issue_type"]: row["case_count"] for row in stats["issue_type_rows"]}
-    assert rows == {  # 执行/操作失败 只在 q1、q2 各计一次
-        "执行/操作失败": 2,
+    # 问题统计只计入有效评估(ok/nok= q0,q1)；q2 为 no_support 不计入
+    assert rows == {
+        "执行/操作失败": 1,
         "回答矛盾": 1,
     }
 
@@ -70,6 +75,10 @@ def test_single_report_cases_only_valid_and_whitelisted():
     case = next(case for case in rep["cases"] if case["item_id"] == "q1")
     assert case["correctness"] == "nok"
     assert case["issue_types"] == ["执行/操作失败", "回答矛盾"]
+    # need_review 的 case 在单批报告展示为 no_support、valid=false
+    excluded = next(case for case in rep["cases"] if case["item_id"] == "q2")
+    assert excluded["correctness"] == "no_support"
+    assert excluded["valid"] is False
     # 投影只含白名单字段，不含原始错误/帧数据
     assert "error" not in case
     assert "traceback" not in case

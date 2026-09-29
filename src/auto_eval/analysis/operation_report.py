@@ -59,6 +59,20 @@ def report_case(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_single_report(batch: dict[str, Any], statistics: dict[str, Any]) -> dict[str, Any]:
+    """单批报告：有效评估仅指 ok/nok。
+
+    need_review 的行展示为 no_support 且不计入有效（对齐统计口径与导出说法）。
+    """
+    cases = []
+    for row in batch.get("rows") or []:
+        result = row.get("result") or {}
+        if not _is_valid(result):
+            continue
+        case = report_case(row)
+        case["valid"] = case.get("correctness") in ("ok", "nok")
+        if case.get("correctness") == "need_review":
+            case["correctness"] = "no_support"
+        cases.append(case)
     return {
         "schema_version": 1,
         "kind": "single",
@@ -66,10 +80,7 @@ def build_single_report(batch: dict[str, Any], statistics: dict[str, Any]) -> di
         "dataset_name": batch.get("dataset_name") or "",
         "task_id": batch.get("task_id") or "",
         "statistics": statistics,
-        "cases": [
-            report_case(row) for row in batch.get("rows") or []
-            if _is_valid(row.get("result") or {})
-        ],
+        "cases": cases,
     }
 
 

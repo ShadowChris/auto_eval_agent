@@ -54,6 +54,7 @@ def summarize_operation_results(
     *,
     total_cases: int | None = None,
     correctness: Iterable[str] | None = None,
+    extra_correctness: Iterable[tuple[str, str]] = (),
 ) -> dict[str, Any]:
     """汇总一批垂域视觉评测结果。
 
@@ -61,11 +62,17 @@ def summarize_operation_results(
     运行错误与尚无合法判定的条目分别计入失败、待评估，不伪装成 nok。
     每个 issue type 在同一 Case 中最多计一次。
 
-    ``correctness`` 用于指定「视为有效」的判定闭包：对比分析传
-    OPERATION_COMPARISON_CORRECTNESS（只 ok/nok）即排除 need_review；
-    缺省用 OPERATION_CORRECTNESS（单批统计保留 need_review）。
+    ``correctness`` 指定「视为有效」的判定闭包（denominator）：对比分析传
+    OPERATION_COMPARISON_CORRECTNESS（只 ok/nok）即排除 need_review；缺省用
+    OPERATION_CORRECTNESS。
+
+    ``extra_correctness`` 是「展示但不计入有效」的额外分类：每元素为
+    (原始判定值, 展示名)，如 (("need_review", "no_support"),)。这些 Case 会在
+    correctness_rows 里出现一行（rate 为 None），但不进 valid_count / ok_rate /
+    pending，也不进 issue 分母。
     """
     correctness_set = tuple(correctness) if correctness else OPERATION_CORRECTNESS
+    extra_map = {raw.strip(): label for raw, label in extra_correctness}
     rows = list(results)
     total = max(int(total_cases if total_cases is not None else len(rows)), 0)
     failed = sum(1 for row in rows if row.get("error"))
@@ -75,7 +82,13 @@ def summarize_operation_results(
         if not row.get("error") and row.get("correctness") in correctness_set
     ]
     valid_count = len(valid)
-    pending = max(total - valid_count - failed, 0)
+    extra_counts: Counter[str] = Counter(
+        row.get("correctness")
+        for row in rows
+        if not row.get("error") and str(row.get("correctness") or "") in extra_map
+    )
+    extra_total = sum(extra_counts.values())
+    pending = max(total - valid_count - failed - extra_total, 0)
     correctness_counts = Counter(row["correctness"] for row in valid)
 
     correctness_rows = [
@@ -90,6 +103,12 @@ def summarize_operation_results(
         }
         for correctness in correctness_set
     ]
+    for raw_value, label in extra_correctness:
+        correctness_rows.append({
+            "correctness": label,
+            "count": extra_counts.get(raw_value, 0),
+            "rate": None,
+        })
 
     issue_case_counts: Counter[str] = Counter()
     issue_case_count = 0
@@ -122,6 +141,8 @@ def summarize_operation_results(
         valid_count=valid_count,
         failed=failed,
         pending=pending,
+        extra_total=extra_total,
+        extra_labels=[label for _raw, label in extra_correctness],
         correctness_counts=correctness_counts,
         issue_type_rows=issue_type_rows,
     )
@@ -152,6 +173,8 @@ def _operation_statistics_conclusion(
     valid_count: int,
     failed: int,
     pending: int,
+    extra_total: int = 0,
+    extra_labels: list[str] | None = None,
     correctness_counts: Counter[str],
     issue_type_rows: list[dict[str, Any]],
 ) -> str:
@@ -197,6 +220,9 @@ def _operation_statistics_conclusion(
         parts.append(
             f"另有 {failed} 条评估失败，已从有效评估数据及相关指标计算中排除"
         )
+    if extra_total:
+        labels = "、".join(extra_labels or ["其他"]) or "其他"
+        parts.append(f"另有 {extra_total} 条 {labels}，不计入有效评估")
     if pending:
         parts.append(f"另有 {pending} 条待评估")
     return "；".join(parts) + "。"
