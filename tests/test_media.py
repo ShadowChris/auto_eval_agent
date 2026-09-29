@@ -73,7 +73,7 @@ def test_keyframe_config_rejects_invalid_sampling_values():
 
 
 def test_keyframe_algorithm_version_is_frozen_baseline():
-    assert KEYFRAME_ALGORITHM_VERSION == "hybrid-state-v3.2.0"
+    assert KEYFRAME_ALGORITHM_VERSION == "hybrid-state-v3.3.0"
 
 
 def test_keyframe_config_uses_expanded_protected_window_and_frame_limit():

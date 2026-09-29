@@ -213,19 +213,18 @@ createApp({
       const incomingRank = progressStageRank(incoming);
       const terminal = incoming.status === "done" || incoming.status === "error";
       const updatedAt = Date.parse(incoming.updated_at || "");
-      itemProgress.value = {
-        ...itemProgress.value,
-        [index]: {
-          ...previous,
-          ...incoming,
-          // Agent Loop 总轮数未知，宏观阶段只前进、不倒退。
-          stage_rank: incoming.status === "done"
-            ? 4
-            : Math.max(previousRank, incomingRank),
-          finished_at: terminal
-            ? (previous.finished_at || (Number.isFinite(updatedAt) ? updatedAt : Date.now()))
-            : previous.finished_at,
-        },
+      // 按 key 原地更新（deep reactive，仅触发该 key 依赖），避免每次事件
+      // 全量 spread 整个 itemProgress 字典 —— SSE 重连回放时是 O(n²) 主线程阻塞
+      itemProgress.value[index] = {
+        ...previous,
+        ...incoming,
+        // Agent Loop 总轮数未知，宏观阶段只前进、不倒退。
+        stage_rank: incoming.status === "done"
+          ? 4
+          : Math.max(previousRank, incomingRank),
+        finished_at: terminal
+          ? (previous.finished_at || (Number.isFinite(updatedAt) ? updatedAt : Date.now()))
+          : previous.finished_at,
       };
     }
 
@@ -240,10 +239,8 @@ createApp({
             incoming.judge, incoming.round, incoming.message,
           ].join("|");
       if (previous.some((entry) => entry._key === eventKey)) return;
-      progressEvents.value = {
-        ...progressEvents.value,
-        [index]: [...previous, { ...incoming, _key: eventKey }].slice(-100),
-      };
+      // 按 key 原地更新，不同步 spread 整个 progressEvents 字典
+      progressEvents.value[index] = [...previous, { ...incoming, _key: eventKey }].slice(-100);
     }
 
     function progressStageClass(row, stageIndex) {
@@ -475,10 +472,8 @@ createApp({
         // 与 submit() 同形预置所选行 pending：mergeItemProgress 的 stage_rank
         // 只前进、finished_at 一经设置就保留，不重置会永远停在上一轮「完成」。
         // 与后端 reset_item_progress 互为幂等（SSE 回放也会推来 pending 态）。
-        const nextProgress = { ...itemProgress.value };
-        const nextEvents = { ...progressEvents.value };
         indexes.forEach((index) => {
-          nextProgress[index] = {
+          itemProgress.value[index] = {
             item_index: index,
             item_id: items.value[index]?.id || `q${index}`,
             status: "pending",
@@ -486,10 +481,8 @@ createApp({
             message: "排队中（重跑）",
             stage_rank: 0,
           };
-          delete nextEvents[index];
+          delete progressEvents.value[index];
         });
-        itemProgress.value = nextProgress;
-        progressEvents.value = nextEvents;
         connectSSE();
       } finally {
         rerunSubmitting.value = false;
@@ -1174,16 +1167,13 @@ createApp({
         }
         if (index != null) {
           const previous = itemProgress.value[index] || {};
-          itemProgress.value = {
-            ...itemProgress.value,
-            [index]: {
-              ...previous,
-              status: d.result.error ? "error" : "done",
-              percent: 100,
-              message: d.result.error ? "评测失败" : "评测完成",
-              stage_rank: d.result.error ? (previous.stage_rank ?? 0) : 4,
-              finished_at: Date.now(),
-            },
+          itemProgress.value[index] = {
+            ...previous,
+            status: d.result.error ? "error" : "done",
+            percent: 100,
+            message: d.result.error ? "评测失败" : "评测完成",
+            stage_rank: d.result.error ? (previous.stage_rank ?? 0) : 4,
+            finished_at: Date.now(),
           };
         }
       });

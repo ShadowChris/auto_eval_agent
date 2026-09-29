@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 
-KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.2.0"
+KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.3.0"
 DEFAULT_TASK_START_TIME = 7.0
 
 
@@ -58,10 +58,9 @@ class KeyframeConfig:
     protected_end_window: float = 5.0       # 从 algorithm_end 止的后 N 秒
     protected_sample_dedup_rms: float = 0.002    # 受保护帧的去重 RMS 阈值
     protected_sample_dedup_cf: float = 0.002      # 受保护帧的去重变化比例阈值
-    # 稳定 run 内部"关键中间帧"保留：清晰图签名相对最近已保留帧差异超过阈值时，
-    # 额外放行该中间帧（标 stable-state-mid）。设为 0 即关闭（兼容旧行为）。
-    stable_mid_keep_rms: float = 0.06     # 0 = 关闭；>0 则相邻差异 RMS 达到该值才保留
-    stable_mid_keep_changed_fraction: float = 0.05  # 变化像素占比阈值
+    # 快速变化段（fast-change-span）代表帧保留门槛：连续不稳定 run 的代表帧，与前后
+    # 稳定状态差异 RMS 需达到该值才保留（滤噪），设为 0 即关闭（兼容旧行为）。
+    stable_mid_keep_rms: float = 0.06
 
     def __post_init__(self) -> None:
         """规范化并校验任务时间参数。"""
@@ -101,8 +100,6 @@ class KeyframeConfig:
             raise ValueError("protected_end_window 不能小于 0")
         if self.stable_mid_keep_rms < 0:
             raise ValueError("stable_mid_keep_rms 不能小于 0")
-        if self.stable_mid_keep_changed_fraction < 0:
-            raise ValueError("stable_mid_keep_changed_fraction 不能小于 0")
 
 
 @dataclass
@@ -711,29 +708,50 @@ def _deduplicate_states(
                 selected_indices.add(last)
                 candidates[last].keep_reason = "stable-state-end"
 
-        # 稳定 run 内部"关键中间帧"：仅依赖首/尾帧会把 run 中间的 UI 变化吞掉
-        # （关键操作帧常落在 run 内部）。逐帧用清晰图签名与“本 run 最近已保留帧”比较，
-        # 差异超过阈值则放行并标 stable-state-mid。仅当 stable_mid_keep_rms > 0 时启用；
-        # 这些帧不是 mandatory，随后仍进入 max_frames 预算与最终严格去重。
-        if (
-            config.stable_mid_keep_rms > 0
-            and len(run) > 2
-            and len(selected_indices) < len(candidates)
-        ):
-            last_kept_index = first
-            for mid_index in run[1:-1]:
-                mid_rms, mid_changed = _visual_difference(
-                    _signature(candidates[last_kept_index].path),
-                    _signature(candidates[mid_index].path),
+    # 快速变化段兜底：连续不具备稳定性（<stable_min_duration_s）的 run 串，整体只取一帧
+    # “代表帧”。用于捕获“跳转其他应用”这类短暂但重要的页面（单个短 run），同时避免
+    # 视频播放这类长期连续变化把每个变化帧都截出来（整串只保一帧，证明在播放即可）。
+    # 仅当该代表帧与前后稳定状态都差异足够明显（>= stable_mid_keep_rms）才保留，用于滤噪。
+    if config.stable_mid_keep_rms > 0 and len(runs) > 2:
+        run_index = 1
+        while run_index < len(runs) - 1:
+            if run_index in stable_runs:
+                run_index += 1
+                continue
+            span_end = run_index
+            while span_end < len(runs) - 1 and span_end not in stable_runs:
+                span_end += 1
+            span_indices = [
+                candidate_index
+                for run in runs[run_index:span_end]
+                for candidate_index in run
+            ]
+            # 该段若已有帧被保留（稳定首/尾、transient 峰值、受保护帧等），不再追加代表帧
+            if not any(index in selected_indices for index in span_indices):
+                before_sig = _signature(candidates[runs[run_index - 1][-1]].path)
+                after_sig = _signature(candidates[runs[span_end][0]].path)
+                best_index = max(
+                    span_indices,
+                    key=lambda candidate_index: min(
+                        _visual_difference(
+                            before_sig,
+                            _signature(candidates[candidate_index].path),
+                        )[0],
+                        _visual_difference(
+                            after_sig,
+                            _signature(candidates[candidate_index].path),
+                        )[0],
+                    ),
                 )
-                if (
-                    mid_rms >= config.stable_mid_keep_rms
-                    or mid_changed
-                    >= config.stable_mid_keep_changed_fraction
-                ):
-                    selected_indices.add(mid_index)
-                    candidates[mid_index].keep_reason = "stable-state-mid"
-                    last_kept_index = mid_index
+                best_sig = _signature(candidates[best_index].path)
+                best_min_rms = min(
+                    _visual_difference(before_sig, best_sig)[0],
+                    _visual_difference(after_sig, best_sig)[0],
+                )
+                if best_min_rms >= config.stable_mid_keep_rms:
+                    selected_indices.add(best_index)
+                    candidates[best_index].keep_reason = "fast-change-span"
+            run_index = span_end
 
     return [candidates[index] for index in sorted(selected_indices)]
 
