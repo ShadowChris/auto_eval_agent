@@ -31,13 +31,13 @@ category_display:
   weather: 天气
 
 extraction:
-  algorithm_version: rich-content-v1.1.0
+  algorithm_version: rich-content-v1.2.0
   default_start_time: 0.0
   max_frames: 20
   sample_fps: 1.5
-  scene_threshold: 0.03
+  scene_threshold: 0.06
   scene_min_gap_s: 0.5
-  state_layout_threshold: 0.025
+  state_layout_threshold: 0.05
   stable_min_duration_s: 0.8
   max_edge: 1280
   jpeg_quality: 85

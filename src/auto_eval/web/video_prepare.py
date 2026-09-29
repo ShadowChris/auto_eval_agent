@@ -175,6 +175,9 @@ def _rich_content_timing(
             "state_layout_threshold": extraction.state_layout_threshold,
             "stable_min_duration_s": extraction.stable_min_duration_s,
             "max_edge": extraction.max_edge,
+            # 稳定 run 内部关键中间帧保留阈值：参与缓存键，改动时应使旧缓存失效
+            "stable_mid_keep_rms": config.stable_mid_keep_rms,
+            "stable_mid_keep_changed_fraction": config.stable_mid_keep_changed_fraction,
         },
     }
     cache_key = json.dumps(

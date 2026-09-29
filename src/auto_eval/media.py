@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 
-KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.1.0"
+KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.2.0"
 DEFAULT_TASK_START_TIME = 7.0
 
 
@@ -58,6 +58,10 @@ class KeyframeConfig:
     protected_end_window: float = 5.0       # 从 algorithm_end 止的后 N 秒
     protected_sample_dedup_rms: float = 0.002    # 受保护帧的去重 RMS 阈值
     protected_sample_dedup_cf: float = 0.002      # 受保护帧的去重变化比例阈值
+    # 稳定 run 内部"关键中间帧"保留：清晰图签名相对最近已保留帧差异超过阈值时，
+    # 额外放行该中间帧（标 stable-state-mid）。设为 0 即关闭（兼容旧行为）。
+    stable_mid_keep_rms: float = 0.06     # 0 = 关闭；>0 则相邻差异 RMS 达到该值才保留
+    stable_mid_keep_changed_fraction: float = 0.05  # 变化像素占比阈值
 
     def __post_init__(self) -> None:
         """规范化并校验任务时间参数。"""
@@ -95,6 +99,10 @@ class KeyframeConfig:
             raise ValueError("protected_begin_window 不能小于 0")
         if self.protected_end_window < 0:
             raise ValueError("protected_end_window 不能小于 0")
+        if self.stable_mid_keep_rms < 0:
+            raise ValueError("stable_mid_keep_rms 不能小于 0")
+        if self.stable_mid_keep_changed_fraction < 0:
+            raise ValueError("stable_mid_keep_changed_fraction 不能小于 0")
 
 
 @dataclass
@@ -702,6 +710,30 @@ def _deduplicate_states(
             ):
                 selected_indices.add(last)
                 candidates[last].keep_reason = "stable-state-end"
+
+        # 稳定 run 内部"关键中间帧"：仅依赖首/尾帧会把 run 中间的 UI 变化吞掉
+        # （关键操作帧常落在 run 内部）。逐帧用清晰图签名与“本 run 最近已保留帧”比较，
+        # 差异超过阈值则放行并标 stable-state-mid。仅当 stable_mid_keep_rms > 0 时启用；
+        # 这些帧不是 mandatory，随后仍进入 max_frames 预算与最终严格去重。
+        if (
+            config.stable_mid_keep_rms > 0
+            and len(run) > 2
+            and len(selected_indices) < len(candidates)
+        ):
+            last_kept_index = first
+            for mid_index in run[1:-1]:
+                mid_rms, mid_changed = _visual_difference(
+                    _signature(candidates[last_kept_index].path),
+                    _signature(candidates[mid_index].path),
+                )
+                if (
+                    mid_rms >= config.stable_mid_keep_rms
+                    or mid_changed
+                    >= config.stable_mid_keep_changed_fraction
+                ):
+                    selected_indices.add(mid_index)
+                    candidates[mid_index].keep_reason = "stable-state-mid"
+                    last_kept_index = mid_index
 
     return [candidates[index] for index in sorted(selected_indices)]
 
