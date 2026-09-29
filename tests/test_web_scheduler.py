@@ -198,17 +198,20 @@ async def test_limiter_priority_cancelled_waiter_leaks_no_slot():
 
 # ---------- TokenBucketRateLimiter（模型速率限流） ----------
 
-async def test_rate_limiter_burst_then_block_until_refill():
-    """每窗口 rate 个令牌（窗口=2s，突发=rate）：突发内立即可用，超突发需等按率生成。"""
+async def test_rate_limiter_paces_requests_evenly():
+    """平滑逐拍发射：rate=2（窗口2s → interval=1s）时快速连发 3 个请求，
+    相邻放行间隔 ≈ interval，无瞬时突发（第二个不再与第一个同时发出）。"""
     lim = TokenBucketRateLimiter(2)
-    for _ in range(2):
-        await lim.acquire()       # 突发 2 个立刻到账
-    assert lim.would_block()      # 第 3 个暂无可发令牌
-    assert lim.stats()["running"] == 2
+    loop = asyncio.get_running_loop()
+    await lim.acquire()              # 首个立即放行（t≈0）
+    t_second = loop.time()
+    await asyncio.wait_for(lim.acquire(), 2.5)   # 约 t≈1s
+    dt2 = loop.time() - t_second
+    await asyncio.wait_for(lim.acquire(), 2.5)   # 约 t≈2s
+    dt3 = loop.time() - t_second
 
-    third = asyncio.create_task(lim.acquire())
-    await asyncio.wait_for(third, 1.5)   # 窗口 2s、rate=2 → 每秒补 1 个，约 1s 后到账
-    assert third.done() and not third.cancelled()
+    assert 0.8 <= dt2 <= 1.7         # 第二枚约一个 interval，非瞬时突发
+    assert 1.8 <= dt3 <= 2.8         # 第三枚约两个 interval
 
     lim.release()
     lim.release()
@@ -218,20 +221,22 @@ async def test_rate_limiter_burst_then_block_until_refill():
 
 
 async def test_rate_limiter_priority_waiter_served_first():
-    """等待令牌者中 priority 插队头：下一枚令牌先喂优先等待者（不排到普通者后）。"""
-    lim = TokenBucketRateLimiter(1)
-    await lim.acquire()           # 突发 1 用完，tokens=0
-    normal = asyncio.create_task(lim.acquire())
-    await asyncio.sleep(0.05)     # normal 入队，minter 起跑但按率等待
+    """等待令牌者中 priority 插队头：下一发射节拍先喂优先等待者（不排到普通者后）。"""
+    lim = TokenBucketRateLimiter(1)  # interval = 2s
+    await lim.acquire()              # 首个持有者立即放行（t≈0，占 1 在途）
+    normal = asyncio.create_task(lim.acquire())          # 将在下一节拍尾部
+    await asyncio.sleep(0.05)
     head = asyncio.create_task(lim.acquire(priority=True))  # 插队头
     await asyncio.sleep(0)
     assert lim.stats()["queued"] == 2
 
-    await asyncio.wait_for(head, 3.0)   # 窗口2s、rate=1 → 每秒0.5个，约2s 后首枚令牌 → 喂队头(priority)
+    # 下一发射节拍（首枚令牌已备，interval 到点）喂队头 = priority(head)
+    await asyncio.wait_for(head, 3.0)
     assert head.done() and not head.cancelled()
     await asyncio.sleep(0)
-    assert not normal.done()            # 普通等待者仍未轮到
+    assert not normal.done()         # 普通被拉到再下一个 interval
 
+    lim.release()                    # 归还持有者
     normal.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await normal
@@ -239,9 +244,9 @@ async def test_rate_limiter_priority_waiter_served_first():
 
 
 async def test_rate_limiter_cancelled_waiter_leaks_nothing():
-    """被取消的令牌等待者不留痕：队列清空、后续 acquire 正常。"""
+    """被取消的令牌等待者不留痕：队列清空、后续 acquire 正常（无快路径，一律入队）。"""
     lim = TokenBucketRateLimiter(1)
-    await lim.acquire()
+    await lim.acquire()              # 持有者经发射器立即放行，占 1 在途
     queued = asyncio.create_task(lim.acquire())
     await asyncio.sleep(0)
     assert lim.stats()["queued"] == 1
@@ -251,10 +256,10 @@ async def test_rate_limiter_cancelled_waiter_leaks_nothing():
         await queued
     assert lim.stats()["queued"] == 0
 
-    lim.release()                 # 归还首次 acquire 的在途计数
+    lim.release()                 # 归还持有者在途计数
     assert lim.stats()["running"] == 0
-    lim._tokens = 1.0             # 令牌仍可用（被取消的等待者不占额度）
-    async with lim:
+    lim._tokens = 1.0             # 令牌可用：被取消的等待者不占额度
+    async with lim:               # 新 acquire → 发射器立即喂
         assert lim.stats()["running"] == 1
     assert lim.stats()["running"] == 0
 

@@ -108,6 +108,133 @@ def test_parse_csv_source_data_keeps_raw_row():
     assert items[0]["source_data"]["分享链接"] == "https://x"
 
 
+# ---------- parse_csv：组边界归一化（is_start/is_end 一致性） ----------
+
+
+def _group_sizes(items):
+    groups: list[list[int]] = []
+    for it in items:
+        if it["turn_index"] == 0:
+            groups.append([])
+        groups[-1].append(it["turn_index"])
+    return groups
+
+
+def test_parse_csv_group_boundary_missing_is_end():
+    # 组尾缺 is_end：倒数第二条 (False,False)，下一条 is_start=True 开启新组
+    # → 倒数第二条应强制为组尾，第三行起为新组。
+    content = _csv([
+        "query,is_start,is_end,video_path",
+        "1,true,false,/tmp/a.mp4",
+        "2,false,false,/tmp/a.mp4",
+        "3,true,true,/tmp/b.mp4",
+    ])
+    items, errors = parse_csv(content, "rich_content")
+    assert not errors
+    assert _group_sizes(items) == [[0, 1], [0]]
+    assert items[1]["turn_index"] == 1
+    assert items[2]["turn_index"] == 0
+    assert items[2]["session_group"] != items[1]["session_group"]
+
+
+def test_parse_csv_group_boundary_missing_is_start():
+    # 组头缺 is_start：上一条 (False,True) 已是组尾，下一条 is_start 非 True
+    # → 下一条应强制为新组开头（turn_index=0）。
+    content = _csv([
+        "query,is_start,is_end,video_path",
+        "1,true,false,/tmp/a.mp4",
+        "2,false,true,/tmp/a.mp4",
+        "3,false,true,/tmp/b.mp4",
+    ])
+    items, errors = parse_csv(content, "rich_content")
+    assert not errors
+    assert _group_sizes(items) == [[0, 1], [0]]
+    assert items[2]["turn_index"] == 0
+    assert items[2]["session_group"] != items[1]["session_group"]
+
+
+def test_parse_csv_group_boundary_wellformed_unchanged():
+    # 正常组边界 (True,False)→(False,True) 不被拆开，也不产生新组。
+    content = _csv([
+        "query,is_start,is_end,video_path",
+        "1,true,false,/tmp/a.mp4",
+        "2,false,true,/tmp/a.mp4",
+        "3,true,false,/tmp/b.mp4",
+        "4,false,true,/tmp/b.mp4",
+    ])
+    items, errors = parse_csv(content, "rich_content")
+    assert not errors
+    assert _group_sizes(items) == [[0, 1], [0, 1]]
+    assert [it["turn_index"] for it in items] == [0, 1, 0, 1]
+
+
+# ---------- parse_csv：「不评测」列 ----------
+
+
+def test_parse_csv_not_eval_column_missing_or_empty_evaluates():
+    # 列缺失 → 全部评测
+    items, errors = parse_csv(_csv([
+        "query,is_start,is_end,video_path",
+        "1,true,true,/tmp/a.mp4",
+    ]), "rich_content")
+    assert not errors
+    assert len(items) == 1
+    # 列存在但留空 → 仍评测
+    items, errors = parse_csv(_csv([
+        "query,is_start,is_end,video_path,不评测",
+        "1,true,false,/tmp/a.mp4,",
+        "2,false,true,/tmp/a.mp4,",
+    ]), "rich_content")
+    assert not errors
+    assert len(items) == 2
+    assert _group_sizes(items) == [[0, 1]]
+
+
+def test_parse_csv_not_eval_skips_middle_row():
+    # 组中一条为 True → 该行不产生 item，其余分组/turn_index 正常。
+    content = _csv([
+        "query,is_start,is_end,video_path,不评测",
+        "1,true,false,/tmp/a.mp4,",
+        "2,false,false,/tmp/a.mp4,true",
+        "3,false,true,/tmp/a.mp4,",
+    ])
+    items, errors = parse_csv(content, "rich_content")
+    assert not errors
+    assert [it["turn_index"] for it in items] == [0, 1]
+    assert len(items) == 2
+    assert items[0]["query"] == "1" and items[1]["query"] == "3"
+
+
+def test_parse_csv_not_eval_last_row_previous_becomes_last():
+    # 组尾为 True → 跳过，上一条成为该组最后一条。
+    content = _csv([
+        "query,is_start,is_end,video_path,不评测",
+        "1,true,false,/tmp/a.mp4,",
+        "2,false,true,/tmp/a.mp4,true",
+    ])
+    items, errors = parse_csv(content, "rich_content")
+    assert not errors
+    assert len(items) == 1
+    assert _group_sizes(items) == [[0]]
+    assert items[0]["query"] == "1"
+    assert items[0]["turn_index"] == 0
+
+
+def test_parse_csv_not_eval_first_row_group_still_forms():
+    # 组首为 True → 跳过，组仍成立，下一条成为新组首条。
+    content = _csv([
+        "query,is_start,is_end,video_path,不评测",
+        "1,true,false,/tmp/a.mp4,true",
+        "2,false,true,/tmp/a.mp4,",
+    ])
+    items, errors = parse_csv(content, "rich_content")
+    assert not errors
+    assert len(items) == 1
+    assert _group_sizes(items) == [[0]]
+    assert items[0]["query"] == "2"
+    assert items[0]["turn_index"] == 0
+
+
 # ---------- parse_jsonl：competitor_answer 字段 ----------
 
 def test_parse_jsonl_competitor_answer_variants():

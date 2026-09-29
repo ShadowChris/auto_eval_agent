@@ -163,21 +163,20 @@ class _LimiterSlot:
 
 
 class TokenBucketRateLimiter:
-    """模型调用级限流：令牌桶速率（每 RATE_WINDOW_S 秒 `rate` 个，突发 = rate）
-    + 最大在途上限。
+    """模型调用级限流：平滑速率发射（每窗口 `rate` 个，均匀分布）+ 最大在途上限。
 
     每次实际模型请求（含重试的每一次 `_eval_one`）在 acquire 时须同时满足：
-    - 一个速率令牌（每 RATE_WINDOW_S 秒生成 `rate` 个，折算每秒 rate/窗口）；
+    - 一个速率令牌（每 RATE_WINDOW_S 秒 `rate` 个，**相邻请求间隔 = interval，
+      不瞬时突发**）；
     - 一个在途名额（`in_flight < max_in_flight`，模型服务商有在途并发限制）。
 
-    两者都满足才会发出请求：`_in_flight` 即当前在途的模型调用数，随请求开始
-    `+1`、随请求结束 `release()` `-1`。acquire 申请到即返回；rate 不足时按率
-    等待，在途满时等 `release()` 释放名额。
+    `_in_flight` 即当前在途的模型调用数，随请求开始 `+1`、结束 `release()` `-1`。
 
-    实现：快路径同时校验令牌与在途名额；否则压入等待队列（priority=True 经
-    appendleft 插队头）。`_refill_loop` 按 rate 间隔喂令牌；`release()` 释放
-    在途名额后立即 `_pump` 唤醒因名额等待的队头。取消清理按 future 恒等出队，
-    跨事件循环安全。set_rate / set_max_in_flight 调大立即放行、调小软生效。
+    关键（防突发）：发射由 `_refill_loop` 统一按 `interval` 节拍放行，每拍**至多
+    放行一个**——即使在途满期间攒了整桶令牌、又一批槽空出来，也只会逐拍放出，
+    绝不一批吞掉。`acquire` 一律入队等发射器：稀疏请求即时响应（令牌已备好），
+    突发请求被节拍拉开。priority=True 经 appendleft 插队头。取消清理按 future
+    恒等出队；set_rate / set_max_in_flight 调大立即放行、调小软生效。
     """
 
     def __init__(
@@ -187,8 +186,9 @@ class TokenBucketRateLimiter:
     ) -> None:
         self._rate = max(1, int(rate))  # 每窗口内的令牌数（窗口 = RATE_WINDOW_S）
         self._rate_per_sec = self._rate / RATE_WINDOW_S  # 折算每秒补币速率
+        self._interval = RATE_WINDOW_S / self._rate  # 相邻请求的发射间隔
         self._max_in_flight = max(1, int(max_in_flight))
-        self._tokens = float(self._rate)  # 突发 = 整窗口额度；时间制，无持有
+        self._tokens = 1.0  # 起始 1 个令牌：首个请求立即发出，保持平滑节奏
         self._last: float | None = None  # 上次补币的 loop 时间戳（None=未初始化）
         self._in_flight = 0  # 当前在途模型调用数（受 max_in_flight 约束）
         self._waiters: deque[asyncio.Future] = deque()
@@ -211,15 +211,14 @@ class TokenBucketRateLimiter:
         if new != self._rate:
             self._rate = new
             self._rate_per_sec = new / RATE_WINDOW_S
-            # 已有等待者时立即泵送一次：新 rate 可能让存量令牌立即可喂
-            self._pump(_loop_time())
+            self._interval = RATE_WINDOW_S / new
             self._ensure_minter()
 
     def set_max_in_flight(self, cap: int) -> None:
         new = max(1, int(cap))
         if new != self._max_in_flight:
             self._max_in_flight = new
-            self._pump(_loop_time())  # 调大立即放行因在途满而等待的队头
+            # 调大：minter 下一拍/下一轮询自然放行，不做一次喂批
             self._ensure_minter()
 
     def would_block(self) -> bool:
@@ -230,9 +229,6 @@ class TokenBucketRateLimiter:
             or bool(self._waiters)
         )
 
-    def _servable(self) -> bool:
-        return self._tokens >= 1.0 and self._in_flight < self._max_in_flight
-
     def _refill(self, now: float) -> None:
         if self._last is None:
             self._last = now  # 首次基线：只记录时间戳，不凭空补突发
@@ -242,22 +238,6 @@ class TokenBucketRateLimiter:
             self._tokens = min(self._rate, self._tokens + elapsed * self._rate_per_sec)
         self._last = now
 
-    def _feed_front(self) -> None:
-        """贪婪喂给队头等待者：每喂一个占一个令牌与一个在途名额。"""
-        while self._waiters and self._servable():
-            waiter = self._waiters[0]
-            if waiter.done():  # 已被取消清理的滞留者
-                self._waiters.popleft()
-                continue
-            self._waiters.popleft()
-            self._tokens -= 1.0
-            self._in_flight += 1
-            waiter.set_result(None)
-
-    def _pump(self, now: float) -> None:
-        self._refill(now)
-        self._feed_front()
-
     def _ensure_minter(self) -> None:
         if self._waiters and (
             self._minter is None or self._minter.done() or self._minter.cancelled()
@@ -265,11 +245,7 @@ class TokenBucketRateLimiter:
             self._minter = asyncio.create_task(self._refill_loop())
 
     async def acquire(self, *, priority: bool = False) -> None:
-        if not self._waiters and self._servable():
-            # 快路径：令牌足够、在途有名额且无人排队，直接消费
-            self._tokens -= 1.0
-            self._in_flight += 1
-            return
+        # 一律入队等发射器按节拍放行（稀疏请求即时响应，突发被 interval 拉开）
         fut = asyncio.get_running_loop().create_future()
         if priority:
             self._waiters.appendleft(fut)
@@ -280,7 +256,7 @@ class TokenBucketRateLimiter:
             await fut
         except asyncio.CancelledError:
             if fut.cancelled() or not fut.done():
-                # 从未取得令牌/名额：仅出队（minter/release 也未喂，未计在途）
+                # 从未取得令牌/名额：仅出队（minter 也未喂，未计在途）
                 try:
                     self._waiters.remove(fut)
                 except ValueError:
@@ -291,25 +267,33 @@ class TokenBucketRateLimiter:
             raise
 
     async def _refill_loop(self) -> None:
-        """按 rate 把令牌喂给队头等待者；队列清空即退出。"""
+        """按 interval 节拍逐拍放行一个队头等待者；队列清空即退出。"""
         while self._waiters:
             now = asyncio.get_running_loop().time()
-            self._pump(now)
+            self._refill(now)
             if not self._waiters:
                 return
             if self._in_flight >= self._max_in_flight:
-                # 在途满：只等 release() 释放名额后泵送；这里短轮询兜底防漏唤醒
+                # 在途满：只等 release() 释放名额后重入；短轮询兜底防漏唤醒
                 await asyncio.sleep(0.02)
                 continue
-            if self._tokens < 1.0:
-                await asyncio.sleep((1.0 - self._tokens) / self._rate_per_sec)
-                continue  # 循环顶部重补币；rate/priority 可随后续请求变化
-            await asyncio.sleep(0)  # _servable 已满足但未喂到（理论不会到这里）
+            if self._tokens >= 1.0:
+                waiter = self._waiters[0]
+                if waiter.done():  # 已被取消清理的滞留者
+                    self._waiters.popleft()
+                    continue
+                self._waiters.popleft()
+                self._tokens -= 1.0
+                self._in_flight += 1
+                waiter.set_result(None)
+                # 平滑节奏：放行后等一个间隔再放下一个，绝不连发突发
+                await asyncio.sleep(self._interval)
+                continue
+            await asyncio.sleep((1.0 - self._tokens) / self._rate_per_sec)
 
     def release(self) -> None:
-        """请求结束：释放一个在途名额并立即唤醒因在途满而等待的队头。"""
+        """请求结束：释放在途名额；发射节奏仍由 minter 节拍控制，不在此补发。"""
         self._in_flight = max(0, self._in_flight - 1)
-        self._pump(_loop_time())
         self._ensure_minter()
 
     async def __aenter__(self) -> "TokenBucketRateLimiter":
@@ -321,13 +305,6 @@ class TokenBucketRateLimiter:
 
     def slot(self, *, priority: bool = False) -> "_LimiterSlot":
         return _LimiterSlot(self, priority)
-
-
-def _loop_time() -> float:
-    try:
-        return asyncio.get_running_loop().time()
-    except RuntimeError:
-        return 0.0
 
 
 MODEL_LIMITER: ResizableLimiter | TokenBucketRateLimiter = TokenBucketRateLimiter(

@@ -282,19 +282,38 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             "开始时间/结束时间/video_path 等列）"
         ]
 
-    # —— 按 is_start/is_end 切 session（与上游 session_id 列无关）——
+    # —— “不评测”列：为 True 的行不参与评测，直接剔除（该列可缺失或留空）。
+    #    剔除后再按 is_start/is_end 切组：被剔除的是组首/组中行则自然跳过；
+    #    若是组尾行，则组内前一条自动成为最后一条。
+    rows = [r for r in rows if not _csv_truthy(r.get("不评测"))]
+    if not rows:
+        return [], ["CSV 中没有待评测的数据行（已被“不评测”标记剔除）"]
+
+    # —— 组边界归一化：相邻两行若处于两个组，边界应由「上一条 is_end=True」
+    #    且「下一条 is_start=True」共同标记。上游标记了边界一侧，就补上另一侧，
+    #    避免「组尾缺 is_end / 组头缺 is_start」导致分组错乱。
+    n = len(rows)
+    is_start = [_csv_truthy(r.get("is_start")) for r in rows]
+    is_end = [_csv_truthy(r.get("is_end")) for r in rows]
+    for i in range(n - 1):
+        if is_start[i + 1]:
+            is_end[i] = True  # 下一条开启新组 → 本条强制为组尾
+        elif is_end[i]:
+            is_start[i + 1] = True  # 本条已是组尾 → 下一条强制为新组开头
+
+    # —— 按归一化后的 is_start/is_end 切 session（与上游 session_id 列无关）——
     # 每个 session = [(行号, row), ...]；行号从 2 起（1 为表头）。
     sessions: list[list[tuple[int, dict]]] = []
     current: list[tuple[int, dict]] | None = None
     for ln, row in enumerate(rows, start=2):
-        is_start = _csv_truthy(row.get("is_start"))
-        is_end = _csv_truthy(row.get("is_end"))
-        if is_start or current is None:
+        row_is_start = is_start[ln - 2]
+        row_is_end = is_end[ln - 2]
+        if row_is_start or current is None:
             if current:
                 sessions.append(current)  # 上一段未闭合，先收尾
             current = []
         current.append((ln, row))
-        if is_end:
+        if row_is_end:
             sessions.append(current)
             current = None
     if current:
