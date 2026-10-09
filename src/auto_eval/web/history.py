@@ -2129,7 +2129,8 @@ def operation_comparison_batch(snapshot: dict) -> dict:
         rows.append({
             "position": position,
             "index": match_index,
-            "item_id": item.get("id") or f"q{position}",
+            "id": str(item.get("id") or "").strip(),
+            "item_id": str(item.get("id") or "").strip(),
             "case_id": item.get("case_id") or source.get("case_id") or "",
             "query": item.get("query") or item.get("question") or "",
             "result": aligned_by_index.get(position) or {},
@@ -2741,6 +2742,20 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
     conclusion_lines = str(payload.get("conclusion") or "").splitlines()
     conclusion_start = len(overview) + 1
     overview.extend([[line] for line in conclusion_lines])
+    alignment = payload.get("alignment_summary") or {}
+    overview.extend([
+        [],
+        ["ID / Query 对齐诊断"],
+        ["全组共同对齐", alignment.get("matched", 0)],
+        ["ID 配对", alignment.get("id_matched", 0)],
+        ["Query 兜底", alignment.get("query_matched", 0)],
+        ["Query 冲突", alignment.get("query_mismatch", 0)],
+        ["重复 Query", alignment.get("duplicate_query", 0)],
+        ["ID 冲突", alignment.get("id_conflict", 0)],
+        ["缺少 ID", alignment.get("missing_id", 0)],
+        ["重复 ID", alignment.get("duplicate_id", 0)],
+        ["单边 ID", alignment.get("unmatched", 0)],
+    ])
 
     issue_rows = []
     for pair in payload.get("pairwise") or []:
@@ -2762,6 +2777,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             })
 
     detail_fields = (
+        "id",
         "item_id",
         "index",
         "序号",

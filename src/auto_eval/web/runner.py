@@ -58,7 +58,7 @@ from .operation_media import (
     prepare_session_operation_item,
     prepare_session_rich_content_item,
 )
-from .tasks import Task, prune_task_cache
+from .tasks import DEFAULT_OPERATION_CONCURRENCY, Task, prune_task_cache
 
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ SNAPSHOT_PERSIST_INTERVAL_S = 1.0
 
 
 def _default_task_concurrency(task: Task) -> int:
-    return 8 if task.mode == "operation" else 4
+    return DEFAULT_OPERATION_CONCURRENCY if task.mode == "operation" else 4
 
 
 def _selected_judge_configs(task: Task, cfg: AppConfig) -> list:

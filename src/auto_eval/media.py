@@ -1,7 +1,7 @@
 """任务类（录屏）的混合关键帧抽取与帧编码。
 
 流程：固定频率采样 + scene 候选 → UI 状态聚类 → 短暂弹窗保护 →
-任务结束点判断 → 强制首帧/任务结束帧/最终帧 → 最终严格去重。
+任务结束点判断 → 强制首帧/任务结束帧（无显式结束点时保留视频末帧）→ 最终严格去重。
 
 纯 ffmpeg + Pillow + NumPy，不依赖 OpenCV。
 """
@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 
-KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.1.0"
+KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.2.0"
 DEFAULT_TASK_START_TIME = 7.0
 
 
@@ -532,25 +532,28 @@ def _extract_candidates(
                 _Candidate(effective_task_end, task_end_path, "task-end")
             )
 
-    for backoff in (0.3, 0.6, 1.0, 1.5, 2.0):
-        timestamp = max(0.0, duration - backoff)
-        terminal_path = (
-            output_dir / "terminal" / f"terminal_{timestamp:.3f}.jpg"
-        )
-        if _extract_at(
-            video,
-            timestamp,
-            terminal_path,
-            max_edge=config.max_edge,
-        ):
-            candidates.append(
-                _Candidate(
-                    timestamp,
-                    terminal_path,
-                    f"terminal-{backoff:.1f}s",
-                )
+    # 显式时间窗可能只是多轮录屏中的一轮，不能混入整段视频的末帧。
+    # 未提供结束点时，末帧仍用于自动结束点推断和最终状态兜底。
+    if config.task_end_time is None:
+        for backoff in (0.3, 0.6, 1.0, 1.5, 2.0):
+            timestamp = max(0.0, duration - backoff)
+            terminal_path = (
+                output_dir / "terminal" / f"terminal_{timestamp:.3f}.jpg"
             )
-            break
+            if _extract_at(
+                video,
+                timestamp,
+                terminal_path,
+                max_edge=config.max_edge,
+            ):
+                candidates.append(
+                    _Candidate(
+                        timestamp,
+                        terminal_path,
+                        f"terminal-{backoff:.1f}s",
+                    )
+                )
+                break
 
     candidates.sort(
         key=lambda item: (

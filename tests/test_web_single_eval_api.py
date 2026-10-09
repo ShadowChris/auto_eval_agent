@@ -49,13 +49,13 @@ def _item(item_id: str = "simple_001") -> dict:
 
 
 def test_single_eval_concurrency_uses_environment_with_safe_bounds(monkeypatch):
-    assert server._single_eval_concurrency() == 15
+    assert server._single_eval_concurrency() == 35
     monkeypatch.setenv("AUTO_EVAL_SINGLE_CONCURRENCY", "20")
     assert server._single_eval_concurrency() == 20
     monkeypatch.setenv("AUTO_EVAL_SINGLE_CONCURRENCY", "0")
     assert server._single_eval_concurrency() == 1
     monkeypatch.setenv("AUTO_EVAL_SINGLE_CONCURRENCY", "invalid")
-    assert server._single_eval_concurrency() == 15
+    assert server._single_eval_concurrency() == 35
 
 
 def _completed_task() -> Task:
@@ -289,7 +289,7 @@ async def test_single_eval_api_creates_operation_task_with_end_user(monkeypatch)
     assert task.dataset_name == "接口冒烟集"
     assert task.options == {
         "judges": ["judge_2"],
-        "concurrency": 15,
+        "concurrency": 35,
         "submission_source": "single_api",
     }
     assert task.items[0]["id"] == "simple_001"
@@ -353,7 +353,7 @@ async def test_single_eval_api_overwrites_only_matching_item(monkeypatch):
     assert task.done_total == 1
     assert task.dataset_name == "新名称"
     assert task.options["judges"] == ["judge_2"]
-    assert task.options["concurrency"] == 15
+    assert task.options["concurrency"] == 35
     execution = task.item_executions["simple_001"]
     await execution
     assert executed["task_id"] == task.id

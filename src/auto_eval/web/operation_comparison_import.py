@@ -39,6 +39,7 @@ def import_operation_comparison_file(
     rows: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     mapping = {
+        "id": "",
         "index": "",
         "query": "",
         "correctness": "",
@@ -61,8 +62,17 @@ def import_operation_comparison_file(
             "未识别到有效 correctness；请上传系统逐题 JSONL/Excel，"
             "或包含 ok/nok/no_support/others 判定的结果表"
         )
-    if not mapping["index"] and not mapping["query"]:
-        raise ValueError("未识别到 index 或 query，无法自动对齐数据")
+    id_rows: dict[str, list[int]] = {}
+    for position, row in enumerate(rows, start=2):
+        item_id = str(row.get("id") or "").strip()
+        if item_id:
+            id_rows.setdefault(item_id, []).append(position)
+    for item_id, row_numbers in id_rows.items():
+        if len(row_numbers) > 1:
+            warnings.append({
+                "row": row_numbers[0],
+                "message": f"id={item_id} 重复，重复数据不会参与自动对齐",
+            })
 
     source_id = f"upload_{uuid.uuid4().hex[:12]}"
     return {
@@ -102,8 +112,9 @@ def validate_uploaded_comparison_source(source: dict[str, Any]) -> dict[str, Any
         result = row.get("result") if isinstance(row.get("result"), dict) else {}
         normalized_rows.append({
             "position": position,
+            "id": str(row.get("id") or row.get("item_id") or "").strip(),
             "index": row.get("index") if row.get("index") is not None else "",
-            "item_id": str(row.get("item_id") or f"q{position}"),
+            "item_id": str(row.get("id") or row.get("item_id") or "").strip(),
             "case_id": str(row.get("case_id") or ""),
             "query": str(row.get("query") or ""),
             "result": dict(result),
@@ -222,7 +233,7 @@ def _normalize_record(
     match_index, index_key = _field(record, ("index",))
     case_id, _ = _field(record, ("case_id", "caseId", "case id"))
     query, query_key = _field(record, ("query", "操作意图", "问题"))
-    item_id, _ = _field(record, ("item_id", "id", "题号"))
+    item_id, item_id_key = _field(record, ("id", "item_id", "题号"))
     correctness, correctness_key = _result_field(
         evaluation,
         record,
@@ -239,11 +250,8 @@ def _normalize_record(
     if correctness and correctness not in OPERATION_CORRECTNESS:
         warnings.append(f"correctness={correctness!r} 不在允许值中，按无效结果处理")
         correctness = ""
-    if (
-        not str(match_index if match_index is not None else "").strip()
-        and not str(query or "").strip()
-    ):
-        warnings.append("缺少 index 和 query，无法参与自动匹配")
+    if not str(item_id or "").strip():
+        warnings.append("缺少 id，将尝试按唯一 Query 兜底对齐")
 
     result = dict(evaluation)
     result.update({
@@ -252,13 +260,15 @@ def _normalize_record(
         "error": str(error or "").strip(),
     })
     export = _standard_export(record, evaluation, result)
-    resolved_item_id = str(item_id or f"q{position}")
+    resolved_item_id = str(item_id or "").strip()
+    export["id"] = resolved_item_id
     export["index"] = match_index
     export["item_id"] = resolved_item_id
     export["case_id"] = str(case_id or "")
     export["query"] = str(query or "")
     return ({
         "position": position,
+        "id": resolved_item_id,
         "index": match_index,
         "item_id": resolved_item_id,
         "case_id": str(case_id or "").strip(),
@@ -266,6 +276,7 @@ def _normalize_record(
         "result": result,
         "export": export,
     }, {
+        "id": item_id_key,
         "index": index_key,
         "query": query_key,
         "correctness": correctness_key,
@@ -279,6 +290,7 @@ def _standard_export(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     aliases = {
+        "id": ("id", "item_id", "题号"),
         "index": ("index",),
         "序号": ("序号", "sequence"),
         "sessionid": ("sessionid", "session_id", "sessionId"),

@@ -30,7 +30,7 @@ def test_operation_api_defaults_to_terminal_user_judge() -> None:
     options = server._with_operation_eval_persona(_config(), "operation", {})
 
     assert options["judges"] == ["judge_2"]
-    assert options["concurrency"] == 8
+    assert options["concurrency"] == 35
     assert options["request_rate_limit"] == {
         "max_requests": 9,
         "window_seconds": 1.0,

@@ -104,6 +104,7 @@ from .runner import (
     run_single_api_item,
 )
 from .tasks import (
+    DEFAULT_OPERATION_CONCURRENCY,
     get_live_task,
     get_task,
     new_task,
@@ -456,7 +457,7 @@ def _with_operation_eval_persona(app_cfg, mode: Mode, options: dict) -> dict:
     normalized = dict(options or {})
     if mode == "operation":
         normalized["judges"] = [_terminal_user_judge_name(app_cfg)]
-        normalized.setdefault("concurrency", 8)
+        normalized.setdefault("concurrency", DEFAULT_OPERATION_CONCURRENCY)
         normalized.setdefault("request_rate_limit", {
             "max_requests": 9,
             "window_seconds": 1.0,
@@ -873,11 +874,14 @@ def _single_item_evaluation_status(task, item_index: int) -> str:
 
 
 def _single_eval_concurrency() -> int:
-    """读取单题接口的数据集并发上限，非法值回退为 15。"""
+    """读取单题接口的数据集并发上限，非法值回退为任务类默认值。"""
     try:
-        value = int(os.getenv("AUTO_EVAL_SINGLE_CONCURRENCY", "15"))
+        value = int(os.getenv(
+            "AUTO_EVAL_SINGLE_CONCURRENCY",
+            str(DEFAULT_OPERATION_CONCURRENCY),
+        ))
     except (TypeError, ValueError):
-        value = 15
+        value = DEFAULT_OPERATION_CONCURRENCY
     return max(1, min(value, 100))
 
 

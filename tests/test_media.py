@@ -88,7 +88,7 @@ def test_keyframe_config_rejects_invalid_sampling_values():
 
 
 def test_keyframe_algorithm_version_is_frozen_baseline():
-    assert KEYFRAME_ALGORITHM_VERSION == "hybrid-state-v3.1.0"
+    assert KEYFRAME_ALGORITHM_VERSION == "hybrid-state-v3.2.0"
 
 
 def test_keyframe_config_uses_expanded_protected_window_and_frame_limit():
@@ -153,7 +153,7 @@ def test_probe_duration_falls_back_to_ffmpeg_metadata(monkeypatch):
     not FFMPEG_AVAILABLE,
     reason="requires system ffmpeg or the video extra",
 )
-def test_extract_scene_keyframes_preserves_popup_task_end_and_final_frame(
+def test_extract_scene_keyframes_excludes_video_final_frame_with_explicit_end(
     tmp_path: Path,
 ):
     video = tmp_path / "popup_flow.mp4"
@@ -203,8 +203,9 @@ def test_extract_scene_keyframes_preserves_popup_task_end_and_final_frame(
     assert metadata["effective_task_end_time"] == 13.0
     assert metadata["selected"][0]["time"] == 7.0
     assert "task-end-explicit" in reasons
-    assert reasons[-1] == "final-frame"
-    assert 3 <= len(frames) <= 6
+    assert "final-frame" not in reasons
+    assert all(row["time"] <= 13.0 for row in metadata["selected"])
+    assert 2 <= len(frames) <= 5
 
     popup_indices = [
         index
@@ -219,7 +220,18 @@ def test_extract_scene_keyframes_preserves_popup_task_end_and_final_frame(
     )
 
     final_mean = float(np.mean(np.asarray(Image.open(frames[-1]).convert("L"))))
-    assert 90 < final_mean < 180
+    assert final_mean > 240
+
+    fallback_dir = tmp_path / "frames_without_explicit_end"
+    extract_scene_keyframes(
+        video,
+        fallback_dir,
+        config=KeyframeConfig(task_start_time=7.0, max_frames=10, max_edge=240),
+    )
+    fallback_metadata = json.loads(
+        (fallback_dir / "keyframes.json").read_text(encoding="utf-8")
+    )
+    assert fallback_metadata["selected"][-1]["keep_reason"] == "final-frame"
 
 
 @pytest.mark.skipif(
