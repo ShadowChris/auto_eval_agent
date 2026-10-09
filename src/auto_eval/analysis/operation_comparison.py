@@ -1,7 +1,6 @@
 """任务类结果集对比统计。"""
 from __future__ import annotations
 
-import math
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -64,6 +63,55 @@ def compare_operation_batches(
         common_positions &= set(match_map)
         pairwise.append(pair)
 
+    alignment_warnings = [
+        {
+            **warning,
+            "baseline_task_id": pair["baseline_task_id"],
+            "baseline_label": pair["baseline_label"],
+            "target_task_id": pair["target_task_id"],
+            "target_label": pair["target_label"],
+        }
+        for pair in pairwise
+        for warning in pair.get("alignment_warnings") or []
+    ]
+    alignment_summary = {
+        "matched": len(common_positions),
+        "id_matched": sum(
+            int((pair.get("alignment_summary") or {}).get("id_matched") or 0)
+            for pair in pairwise
+        ),
+        "query_matched": sum(
+            int((pair.get("alignment_summary") or {}).get("query_matched") or 0)
+            for pair in pairwise
+        ),
+        "query_mismatch": sum(
+            warning.get("type") == "query_mismatch"
+            for warning in alignment_warnings
+        ),
+        "missing_id": sum(
+            not _row_item_id(row)
+            for batch in ordered
+            for row in (batch.get("rows") or [])
+        ),
+        "duplicate_id": sum(
+            len(indexes) > 1
+            for batch in ordered
+            for indexes in _item_id_positions(batch.get("rows") or []).values()
+        ),
+        "unmatched": sum(
+            warning.get("type") == "unmatched_id"
+            for warning in alignment_warnings
+        ),
+        "duplicate_query": sum(
+            warning.get("type") == "duplicate_query"
+            for warning in alignment_warnings
+        ),
+        "id_conflict": sum(
+            warning.get("type") == "id_conflict"
+            for warning in alignment_warnings
+        ),
+    }
+
     valid_common_positions = [
         position
         for position in sorted(common_positions)
@@ -117,6 +165,8 @@ def compare_operation_batches(
         "groups": groups,
         "all_groups_common_matched_count": len(common_positions),
         "all_groups_common_valid_count": len(valid_common_positions),
+        "alignment_summary": alignment_summary,
+        "alignment_warnings": alignment_warnings,
         "pairwise": pairwise,
         "conclusion": "\n".join(conclusion_lines),
     }
@@ -180,96 +230,194 @@ def _normalize_query(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
-def _normalize_match_index(value: Any) -> str:
-    """规范化数据集 index；数字 1 与表格读取出的 1.0 视为同一值。"""
+def _normalize_item_id(value: Any) -> str:
+    """规范化显式业务 ID；不把内部数字 index 当作对齐键。"""
     if value is None or isinstance(value, bool):
         return ""
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return ""
-        if value.is_integer():
-            return str(int(value))
     return unicodedata.normalize("NFKC", str(value)).strip()
 
 
-def _unique_match_index(rows: list[dict]) -> dict[str, int]:
+def _row_item_id(row: dict[str, Any]) -> str:
+    return _normalize_item_id(row.get("id") or row.get("item_id"))
+
+
+def _item_id_positions(rows: list[dict]) -> dict[str, list[int]]:
     positions: dict[str, list[int]] = defaultdict(list)
     for index, row in enumerate(rows):
-        value = _normalize_match_index(row.get("index"))
+        value = _row_item_id(row)
         if value:
             positions[value].append(index)
-    return {
-        value: indexes[0]
-        for value, indexes in positions.items()
-        if len(indexes) == 1
-    }
-
-
-def _unique_query_index(
-    rows: list[dict],
-    excluded: set[int],
-) -> dict[str, int]:
-    positions: dict[str, list[int]] = defaultdict(list)
-    for index, row in enumerate(rows):
-        if index in excluded:
-            continue
-        query = _normalize_query(row.get("query"))
-        if query:
-            positions[query].append(index)
-    return {
-        value: indexes[0]
-        for value, indexes in positions.items()
-        if len(indexes) == 1
-    }
+    return positions
 
 
 def _match_rows(
     baseline_rows: list[dict],
     target_rows: list[dict],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """优先按显式 ID 对齐；至少一侧缺少 ID 时按唯一 Query 兜底。"""
     matches: list[dict[str, Any]] = []
-    exclusions: list[dict[str, Any]] = []
-    used_baseline: set[int] = set()
-    used_target: set[int] = set()
+    warnings: list[dict[str, Any]] = []
+    baseline_ids = _item_id_positions(baseline_rows)
+    target_ids = _item_id_positions(target_rows)
+    blocked_baseline: set[int] = set()
+    blocked_target: set[int] = set()
 
-    baseline_indexes = _unique_match_index(baseline_rows)
-    target_indexes = _unique_match_index(target_rows)
-    for match_index in sorted(set(baseline_indexes) & set(target_indexes)):
-        baseline_index = baseline_indexes[match_index]
-        target_index = target_indexes[match_index]
+    for index, row in enumerate(baseline_rows):
+        if not _row_item_id(row):
+            warnings.append({
+                "type": "missing_id",
+                "side": "baseline",
+                "baseline_index": index,
+                "message": "对照组存在缺少 id 的数据，将尝试按唯一 Query 兜底对齐",
+            })
+    for index, row in enumerate(target_rows):
+        if not _row_item_id(row):
+            warnings.append({
+                "type": "missing_id",
+                "side": "target",
+                "target_index": index,
+                "message": "实验组存在缺少 id 的数据，将尝试按唯一 Query 兜底对齐",
+            })
+    for side, positions in (("baseline", baseline_ids), ("target", target_ids)):
+        for item_id, indexes in positions.items():
+            if len(indexes) > 1:
+                (blocked_baseline if side == "baseline" else blocked_target).update(indexes)
+                warnings.append({
+                    "type": "duplicate_id",
+                    "side": side,
+                    "id": item_id,
+                    "positions": indexes,
+                    "message": f"{side == 'baseline' and '对照组' or '实验组'} id={item_id} 重复，已排除对齐",
+                })
+
+    unique_baseline = {
+        item_id: indexes[0]
+        for item_id, indexes in baseline_ids.items()
+        if len(indexes) == 1
+    }
+    unique_target = {
+        item_id: indexes[0]
+        for item_id, indexes in target_ids.items()
+        if len(indexes) == 1
+    }
+    for item_id in sorted(set(unique_baseline) & set(unique_target)):
+        baseline_index = unique_baseline[item_id]
+        target_index = unique_target[item_id]
+        blocked_baseline.add(baseline_index)
+        blocked_target.add(target_index)
         baseline_query = _normalize_query(baseline_rows[baseline_index].get("query"))
         target_query = _normalize_query(target_rows[target_index].get("query"))
-        used_baseline.add(baseline_index)
-        used_target.add(target_index)
-        if baseline_query and target_query and baseline_query != target_query:
-            exclusions.append({
-                "reason": "index 相同但 Query 不一致",
+        if baseline_query != target_query:
+            warnings.append({
+                "type": "query_mismatch",
+                "id": item_id,
                 "baseline_index": baseline_index,
                 "target_index": target_index,
+                "baseline_query": str(baseline_rows[baseline_index].get("query") or ""),
+                "target_query": str(target_rows[target_index].get("query") or ""),
+                "message": f"id={item_id} 在不同数据集中的 Query 不一致，已排除统计",
             })
             continue
         matches.append({
             "baseline_index": baseline_index,
             "target_index": target_index,
-            "match_method": "index",
-            "match_key": match_index,
+            "match_method": "id",
+            "match_key": item_id,
         })
 
-    baseline_queries = _unique_query_index(baseline_rows, used_baseline)
-    target_queries = _unique_query_index(target_rows, used_target)
+    baseline_queries: dict[str, list[int]] = defaultdict(list)
+    target_queries: dict[str, list[int]] = defaultdict(list)
+    for index, row in enumerate(baseline_rows):
+        if index in blocked_baseline:
+            continue
+        query = _normalize_query(row.get("query"))
+        if query:
+            baseline_queries[query].append(index)
+    for index, row in enumerate(target_rows):
+        if index in blocked_target:
+            continue
+        query = _normalize_query(row.get("query"))
+        if query:
+            target_queries[query].append(index)
+
+    query_blocked_baseline: set[int] = set()
+    query_blocked_target: set[int] = set()
     for query_key in sorted(set(baseline_queries) & set(target_queries)):
-        baseline_index = baseline_queries[query_key]
-        target_index = target_queries[query_key]
-        used_baseline.add(baseline_index)
-        used_target.add(target_index)
+        baseline_indexes = baseline_queries[query_key]
+        target_indexes = target_queries[query_key]
+        if len(baseline_indexes) != 1 or len(target_indexes) != 1:
+            query_blocked_baseline.update(baseline_indexes)
+            query_blocked_target.update(target_indexes)
+            warnings.append({
+                "type": "duplicate_query",
+                "query": str(
+                    baseline_rows[baseline_indexes[0]].get("query")
+                    or target_rows[target_indexes[0]].get("query")
+                    or ""
+                ),
+                "baseline_count": len(baseline_indexes),
+                "target_count": len(target_indexes),
+                "message": (
+                    "Query 在对照组或实验组中重复，无法唯一对齐："
+                    f"对照组 {len(baseline_indexes)} 条，实验组 {len(target_indexes)} 条"
+                ),
+            })
+            continue
+        baseline_index = baseline_indexes[0]
+        target_index = target_indexes[0]
+        baseline_id = _row_item_id(baseline_rows[baseline_index])
+        target_id = _row_item_id(target_rows[target_index])
+        if baseline_id and target_id:
+            query_blocked_baseline.add(baseline_index)
+            query_blocked_target.add(target_index)
+            warnings.append({
+                "type": "id_conflict",
+                "baseline_id": baseline_id,
+                "target_id": target_id,
+                "baseline_index": baseline_index,
+                "target_index": target_index,
+                "query": str(baseline_rows[baseline_index].get("query") or ""),
+                "message": (
+                    f"Query 相同但两侧 id 不同（{baseline_id} / {target_id}），"
+                    "未使用 Query 兜底"
+                ),
+            })
+            continue
         matches.append({
             "baseline_index": baseline_index,
             "target_index": target_index,
             "match_method": "query",
             "match_key": baseline_rows[baseline_index].get("query") or query_key,
         })
+
+    matched_baseline = {int(match["baseline_index"]) for match in matches}
+    matched_target = {int(match["target_index"]) for match in matches}
+    suppressed_baseline = blocked_baseline | query_blocked_baseline | matched_baseline
+    suppressed_target = blocked_target | query_blocked_target | matched_target
+    for item_id in sorted(set(unique_baseline) - set(unique_target)):
+        baseline_index = unique_baseline[item_id]
+        if baseline_index in suppressed_baseline:
+            continue
+        warnings.append({
+            "type": "unmatched_id",
+            "side": "baseline",
+            "id": item_id,
+            "baseline_index": baseline_index,
+            "message": f"id={item_id} 仅存在于对照组",
+        })
+    for item_id in sorted(set(unique_target) - set(unique_baseline)):
+        target_index = unique_target[item_id]
+        if target_index in suppressed_target:
+            continue
+        warnings.append({
+            "type": "unmatched_id",
+            "side": "target",
+            "id": item_id,
+            "target_index": target_index,
+            "message": f"id={item_id} 仅存在于实验组",
+        })
     matches.sort(key=lambda row: int(row["baseline_index"]))
-    return matches, exclusions
+    return matches, warnings
 
 
 def _is_valid(result: dict[str, Any]) -> bool:
@@ -325,7 +473,7 @@ def _compare_pair(
 ) -> dict[str, Any]:
     baseline_rows = list(baseline.get("rows") or [])
     target_rows = list(target.get("rows") or [])
-    matches, _ = _match_rows(baseline_rows, target_rows)
+    matches, alignment_warnings = _match_rows(baseline_rows, target_rows)
     match_map = {
         int(match["baseline_index"]): int(match["target_index"])
         for match in matches
@@ -442,6 +590,40 @@ def _compare_pair(
             [left for left, _ in valid_pairs],
             [right for _, right in valid_pairs],
         ),
+        "alignment_summary": {
+            "matched": len(matches),
+            "id_matched": sum(
+                match.get("match_method") == "id" for match in matches
+            ),
+            "query_matched": sum(
+                match.get("match_method") == "query" for match in matches
+            ),
+            "query_mismatch": sum(
+                warning.get("type") == "query_mismatch"
+                for warning in alignment_warnings
+            ),
+            "missing_id": sum(
+                warning.get("type") == "missing_id"
+                for warning in alignment_warnings
+            ),
+            "duplicate_id": sum(
+                warning.get("type") == "duplicate_id"
+                for warning in alignment_warnings
+            ),
+            "unmatched": sum(
+                warning.get("type") == "unmatched_id"
+                for warning in alignment_warnings
+            ),
+            "duplicate_query": sum(
+                warning.get("type") == "duplicate_query"
+                for warning in alignment_warnings
+            ),
+            "id_conflict": sum(
+                warning.get("type") == "id_conflict"
+                for warning in alignment_warnings
+            ),
+        },
+        "alignment_warnings": alignment_warnings,
         "conclusion": conclusion,
         "_match_map": match_map,
     }
@@ -449,9 +631,12 @@ def _compare_pair(
 
 def _row_export(row: dict[str, Any]) -> dict[str, Any]:
     if row.get("export"):
-        return dict(row["export"])
+        exported = dict(row["export"])
+        exported["id"] = _row_item_id(row)
+        return exported
     result = row.get("result") or {}
     return {
+        "id": _row_item_id(row),
         "index": row.get("index") if row.get("index") is not None else "",
         "item_id": row.get("item_id") or "",
         "case_id": row.get("case_id") or "",
@@ -465,9 +650,7 @@ def _row_export(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _row_union_key(row: dict[str, Any]) -> str:
-    match_index = _normalize_match_index(row.get("index"))
-    query = str(row.get("query") or "").strip()
-    return match_index or query
+    return _row_item_id(row) or str(row.get("query") or "").strip()
 
 
 def _find_nonbaseline_union_entry(
@@ -479,24 +662,24 @@ def _find_nonbaseline_union_entry(
         entry for entry in entries
         if not entry["has_baseline"] and task_id not in entry["group_rows"]
     ]
-    match_index = _normalize_match_index(row.get("index"))
+    item_id = _row_item_id(row)
     query = _normalize_query(row.get("query"))
-    if match_index:
-        by_index = [
+    if item_id:
+        by_id = [
             entry for entry in candidates
-            if _normalize_match_index(entry["representative"].get("index")) == match_index
-            and (
-                not query
-                or not _normalize_query(entry["representative"].get("query"))
-                or query == _normalize_query(entry["representative"].get("query"))
-            )
+            if _row_item_id(entry["representative"]) == item_id
+            and query == _normalize_query(entry["representative"].get("query"))
         ]
-        if len(by_index) == 1:
-            return by_index[0]
+        if len(by_id) == 1:
+            return by_id[0]
     if query:
         by_query = [
             entry for entry in candidates
             if _normalize_query(entry["representative"].get("query")) == query
+            and (
+                not item_id
+                or not _row_item_id(entry["representative"])
+            )
         ]
         if len(by_query) == 1:
             return by_query[0]

@@ -81,6 +81,12 @@
     function metric(label, value, note) {
       return `<div class="or-metric"><div class="or-muted">${label}</div><div class="or-metric-value">${value}</div><div class="or-muted">${note}</div></div>`;
     }
+    function alignmentPanel() {
+      if (!comparison()) return "";
+      const summary = payload.alignment_summary || {};
+      const warnings = payload.alignment_warnings || [];
+      return `<details class="or-panel"><summary>对齐诊断：共同命中 ${esc(summary.matched || 0)} 条；ID 配对 ${esc(summary.id_matched || 0)}；Query 兜底 ${esc(summary.query_matched || 0)}；Query 冲突 ${esc(summary.query_mismatch || 0)}；重复 Query ${esc(summary.duplicate_query || 0)}；ID 冲突 ${esc(summary.id_conflict || 0)}；缺少 ID ${esc(summary.missing_id || 0)}；重复 ID ${esc(summary.duplicate_id || 0)}；单边 ID ${esc(summary.unmatched || 0)}</summary>${warnings.length ? `<div class="or-hint">${warnings.slice(0, 50).map(warning => `<p>${esc(warning.baseline_label || "对照组")} / ${esc(warning.target_label || "实验组")}：${esc(warning.message || "对齐异常")}</p>`).join("")}${warnings.length > 50 ? `<p>另有 ${warnings.length - 50} 条</p>` : ""}</div>` : '<p class="or-muted or-hint">没有对齐警告。</p>'}</details>`;
+    }
     function render() {
       if (!payload || disposed) return;
       const isCompare = comparison(), stats = payload.statistics;
@@ -92,6 +98,7 @@
           ${isCompare ? `<label>实验组 <select data-or="group">${payload.pairs.map(p => `<option value="${esc(p.target_task_id)}" ${p.target_task_id === state.group ? "selected" : ""}>${esc(p.target_label)}</option>`).join("")}</select></label>` : ""}
         </div>
         ${isCompare && sourcePayload.views ? `<div class="or-controls"><span class="or-muted">统计口径</span><div class="or-segments">${[["all_valid", "全部有效判定"], ["common_decidable", "均为 OK/NOK"]].map(([value, label]) => `<button data-scope="${value}" aria-pressed="${state.scope === value}">${label}</button>`).join("")}</div></div><p class="or-muted">${decidable() ? "所有选中组均为 OK/NOK 的共同 Case；任一组为 no_support、others、失败或缺失时整条排除。全部统计及 Case 明细使用同一集合。" : "沿用原口径：全组分布使用全组共同有效 Case，组间对比使用双方共同有效 Case；有效判定包含 ok、nok、no_support、others。"}</p>` : ""}
+        ${alignmentPanel()}
         <div class="or-summary">${isCompare
           ? metric("实验组 OK / NOK 率", `${pct(pair.target_ok_rate)} / ${pct(pair.target_nok_rate)}`, `对照组 ${pct(pair.baseline_ok_rate)} / ${pct(pair.baseline_nok_rate)} · 分母为各组 OK+NOK`)
             + metric("OK 率差值", `<span class="${rateClass(pair)}">${signed(pair.ok_rate_delta, true)}</span>`, esc(pair.ok_rate_change_label))
@@ -122,7 +129,7 @@
           <div class="or-controls">
             <select data-or="issue" aria-label="问题类型"><option value="">全部问题类型 / 全部有效 Case</option>${topIssues(issueRows.length).map(r => `<option value="${esc(r.name)}" ${state.issue === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>
             <select data-or="correctness-filter" aria-label="${isCompare ? "实验组判定筛选" : "判定筛选"}"><option value="">${isCompare ? "全部实验组判定" : "全部判定"}</option>${(decidable() ? TYPES.slice(0, 2) : TYPES).map(t => `<option value="${t}" ${state.correctness === t ? "selected" : ""}>${t}</option>`).join("")}</select>
-            <input data-or="search" type="search" placeholder="搜索 index / query / 理由" aria-label="搜索 Case" value="${esc(state.query)}">
+            <input data-or="search" type="search" placeholder="搜索 id / query / 理由" aria-label="搜索 Case" value="${esc(state.query)}">
           </div>
           ${isCompare ? `<div class="or-segments or-controls">${[["all", "全部命中"], ["new", "新增问题"], ["resolved", "问题消失"], ["persistent", "持续存在"]].map(([v, n]) => `<button data-change="${v}" aria-pressed="${state.change === v}">${n}</button>`).join("")}</div>` : ""}
           <div data-or="cases" class="or-table-wrap"></div>
@@ -233,7 +240,7 @@
           const list = changes(row)[state.change];
           if (state.issue ? !list.includes(state.issue) : !list.length) return false;
         }
-        return !keyword || [right.index, right.item_id, right.query, right.rationale, left?.rationale].map(text).join(" ").toLocaleLowerCase().includes(keyword);
+        return !keyword || [right.id, right.item_id, right.query, right.rationale, left?.rationale].map(text).join(" ").toLocaleLowerCase().includes(keyword);
       });
     }
     function detail(row, group) {
@@ -245,7 +252,7 @@
       state.page = Math.max(1, Math.min(state.page, pageCount));
       $("case-count").textContent = `${state.issue || "全部有效 Case"} · ${rows.length} 条${comparison() ? "（两组共同有效集合）" : ""}`;
       $("tags").innerHTML = topIssues(5).map(r => `<button data-issue="${esc(r.name)}" aria-pressed="${state.issue === r.name}">${esc(r.name)}</button>`).join("");
-      const heads = ["index / 题号", "query", ...(comparison() ? ["对照组", "实验组", "问题变化", "对照组录屏", "实验组录屏"] : ["判定", "理由摘要", "原录屏"]), "详情"];
+      const heads = ["id", "query", ...(comparison() ? ["对照组", "实验组", "问题变化", "对照组录屏", "实验组录屏"] : ["判定", "理由摘要", "原录屏"]), "详情"];
       let body = `<table class="or-case-table"><thead><tr>${heads.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>`;
       for (const row of rows.slice((state.page - 1) * state.size, state.page * state.size)) {
         const { right, left } = row;
@@ -254,7 +261,7 @@
           const all = changes(row);
           change = [["new", "新增问题"], ["resolved", "问题消失"], ["persistent", "持续存在"]].filter(([k]) => state.issue ? all[k].includes(state.issue) : all[k].length).map(([, v]) => v).join(" / ") || "无问题变化";
         }
-        body += `<tr><td class="or-id">${esc(right.index === "" || right.index == null ? right.item_id : right.index)}</td><td class="or-query">${esc(right.query)}</td>${comparison()
+        body += `<tr><td class="or-id">${esc(right.id || right.item_id)}</td><td class="or-query">${esc(right.query)}</td>${comparison()
           ? `<td>${verdict(left)}</td><td>${verdict(right)}</td><td>${esc(change)}</td><td>${videoLinks(left)}</td><td>${videoLinks(right)}</td>`
           : `<td>${verdict(right)}</td><td class="or-snippet">${esc(text(right.rationale).slice(0, 110))}${text(right.rationale).length > 110 ? "…" : ""}</td><td>${videoLinks(right)}</td>`
         }<td><button class="or-link" data-detail="${row.key}">${state.open === row.key ? "收起" : "查看"}</button></td></tr>`;
