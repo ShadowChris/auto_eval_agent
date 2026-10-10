@@ -44,7 +44,7 @@
 
   <div v-show="page==='eval'">
   <details class="settings-section" @toggle="onSettingsToggle">
-    <summary>系统设置（模型限流 {{ sysSettings.queue.limit }}/每2秒 · 在途 {{ sysSettings.queue.running }}/{{ sysSettings.max_in_flight }} · 排队 {{ sysSettings.queue.queued }} · 等待容量 {{ sysSettings.waiting_capacity }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }}）</summary>
+    <summary>系统设置（模型限流 {{ sysSettings.queue.limit }}/每2秒 · 在途 {{ sysSettings.queue.running }}/{{ sysSettings.max_in_flight }} · 排队 {{ sysSettings.queue.queued }} · 等待容量 {{ sysSettings.waiting_capacity }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }} · 端点 {{ settingsEndpointDisplay }}{{ sysSettings.model ? ' / ' + sysSettings.model : '' }}）</summary>
     <div class="row">
       <span class="lbl">每2秒请求数：</span>
       <input type="number" min="1" max="64" v-model.number="settingsForm.concurrency" style="width:70px">
@@ -71,6 +71,26 @@
         <input type="checkbox" :value="j.name" v-model="settingsForm.judges"> {{ j.display || j.name }}
       </label>
       <span class="hint">对所有任务生效，保存后新评测与重跑按此裁判执行。</span>
+    </div>
+    <div class="row">
+      <span class="lbl">端点预设：</span>
+      <label class="chip">
+        <input type="radio" value="" v-model="settingsForm.active_endpoint"> 配置默认
+      </label>
+      <label v-for="e in sysSettings.endpoints" class="chip" :title="e.base_url">
+        <input type="radio" :value="e.name" v-model="settingsForm.active_endpoint"> {{ e.display || e.name }}
+      </label>
+      <span class="hint" v-if="activeEndpointBaseUrl">→ {{ activeEndpointBaseUrl }}{{ sysSettings.model ? '（模型 ' + sysSettings.model + '）' : '' }}。选择预设即用其 base_url 与 api_key_env 成对覆盖所有选中裁判；「配置默认」回落 config/judges.yaml。</span>
+    </div>
+    <div class="row">
+      <span class="lbl">模型：</span>
+      <label class="chip">
+        <input type="radio" value="" v-model="settingsForm.model"> 配置默认
+      </label>
+      <label v-for="m in sysSettings.models" class="chip">
+        <input type="radio" :value="m" v-model="settingsForm.model"> {{ m }}
+      </label>
+      <span class="hint">独立全局模型覆盖，只能从 config/judges.yaml 的 models 列表选择；「配置默认」使用裁判自身配置的模型。</span>
     </div>
     <div class="row">
       <button class="primary" @click="saveSettings" :disabled="settingsSaving">保存系统设置</button>

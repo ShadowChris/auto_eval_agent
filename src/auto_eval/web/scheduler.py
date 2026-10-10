@@ -54,6 +54,10 @@ class RuntimeSettings:
     # 裁判名列表（本模块不感知 config，只存原始名字；空 = 未设置，由
     # 调用方回落到配置的第一个裁判）。合法性校验在 server PUT 侧做。
     judges: list[str] = field(default_factory=list)
+    # 全局覆盖：选中命名端点预设名（base_url+api_key_env 成对）+ 独立 model。
+    # None/空串 = 不覆盖，裁判回落 config/judges.yaml 自身值。
+    active_endpoint: str | None = None
+    model: str | None = None
 
 
 class ResizableLimiter:
@@ -335,6 +339,8 @@ def apply_settings(
     waiting_capacity: int | None = None,
     eval_timeout_s: float | None = None,
     judges: list[str] | None = None,
+    active_endpoint: str | None = None,
+    model: str | None = None,
 ) -> RuntimeSettings:
     """更新运行时设置并即时对齐限流器（越界值 clamp 到合法区间）。
 
@@ -370,6 +376,11 @@ def apply_settings(
         )
     if judges is not None:
         _settings.judges = list(dict.fromkeys(str(name) for name in judges))
+    # 空串显式清空覆盖 → 回落 None（=不覆盖，用 config 默认）。
+    if active_endpoint is not None:
+        _settings.active_endpoint = active_endpoint.strip() or None
+    if model is not None:
+        _settings.model = model.strip() or None
     return _settings
 
 
@@ -386,6 +397,8 @@ def load_persisted_settings(path: Path | None = None) -> RuntimeSettings:
     waiting_capacity = None
     eval_timeout_s = None
     judges = None
+    active_endpoint = None
+    model = None
     if isinstance(raw, dict):
         if isinstance(raw.get("concurrency"), int):
             concurrency = raw["concurrency"]
@@ -400,12 +413,18 @@ def load_persisted_settings(path: Path | None = None) -> RuntimeSettings:
             isinstance(name, str) for name in persisted_judges
         ):
             judges = persisted_judges
+        if isinstance(raw.get("active_endpoint"), str):
+            active_endpoint = raw["active_endpoint"]
+        if isinstance(raw.get("model"), str):
+            model = raw["model"]
     apply_settings(
         concurrency=concurrency,
         max_in_flight=max_in_flight,
         waiting_capacity=waiting_capacity,
         eval_timeout_s=eval_timeout_s,
         judges=judges,
+        active_endpoint=active_endpoint,
+        model=model,
     )
     return _settings
 
@@ -419,6 +438,8 @@ def persist_settings(path: Path | None = None) -> bool:
         "waiting_capacity": _settings.waiting_capacity,
         "eval_timeout_s": _settings.eval_timeout_s,
         "judges": _settings.judges,
+        "active_endpoint": _settings.active_endpoint,
+        "model": _settings.model,
         "updated_at": time.time(),
     }
     try:

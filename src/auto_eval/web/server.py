@@ -130,13 +130,17 @@ class HistoryComparisonReq(BaseModel):
 
 
 class SettingsReq(BaseModel):
-    """全局系统设置：模型速率/在途、预处理并发、单题超时与裁判（均可选，至少传一个）。"""
+    """全局系统设置：模型速率/在途、预处理并发、单题超时、裁判与端点预设
+    （均可选，至少传一个）。active_endpoint 为命名端点预设名（其 base_url 与
+    api_key_env 成对生效），空串清空覆盖；model 为独立全局模型覆盖，空串清空。"""
 
     concurrency: int | None = None
     max_in_flight: int | None = None
     waiting_capacity: int | None = None
     eval_timeout_s: float | None = None
     judges: list[str] | None = None
+    active_endpoint: str | None = None
+    model: str | None = None
 
 
 _VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
@@ -224,12 +228,32 @@ def _settings_payload(*, persisted: bool | None = None) -> dict:
     configured = [j.name for j in cfg().judges]
     # 配置变化后持久化的名字可能失效：按当前配置过滤，空则回落第一个
     judges = [name for name in s.judges if name in configured] or configured[:1]
+    # 端点预设同理：配置里已删除的预设回落「未覆盖」
+    configured_endpoints = {e.name for e in cfg().endpoints}
+    active_endpoint = (
+        s.active_endpoint if s.active_endpoint in configured_endpoints else None
+    )
+    # 模型同理：配置里已删除的模型回落「未覆盖」
+    configured_models = set(cfg().models)
+    model = s.model if s.model in configured_models else None
     payload = {
         "concurrency": s.concurrency,
         "max_in_flight": s.max_in_flight,
         "waiting_capacity": s.waiting_capacity,
         "eval_timeout_s": s.eval_timeout_s,
         "judges": judges,
+        "active_endpoint": active_endpoint,
+        "model": model,
+        "models": list(cfg().models),
+        "endpoints": [
+            {
+                "name": e.name,
+                "display": e.display or e.name,
+                "base_url": e.base_url,
+                "api_key_env": e.api_key_env,
+            }
+            for e in cfg().endpoints
+        ],
         "queue": MODEL_LIMITER.stats(),       # 兼容键：模型调用级（速率/在途/排队）
         "pipeline": PIPELINE_LIMITER.stats(),  # 预处理并发级
     }
@@ -256,11 +280,13 @@ async def api_settings_put(req: SettingsReq):
         and req.waiting_capacity is None
         and req.eval_timeout_s is None
         and req.judges is None
+        and req.active_endpoint is None
+        and req.model is None
     ):
         raise HTTPException(
             422,
             "需至少提供 concurrency / max_in_flight / waiting_capacity / "
-            "eval_timeout_s / judges 之一",
+            "eval_timeout_s / judges / active_endpoint / model 之一",
         )
     if req.concurrency is not None and not (
         scheduler.MIN_CONCURRENCY <= req.concurrency <= scheduler.MAX_CONCURRENCY
@@ -310,12 +336,32 @@ async def api_settings_put(req: SettingsReq):
                 f"judges 需为配置内裁判名的非空列表，未知裁判："
                 f"{'、'.join(unknown) or '（空列表）'}；可选：{known_names}",
             )
+    if req.active_endpoint is not None and req.active_endpoint.strip():
+        known_endpoints = {e.name for e in cfg().endpoints}
+        if req.active_endpoint.strip() not in known_endpoints:
+            known_names = "、".join(sorted(known_endpoints)) or "（配置中无端点预设）"
+            raise HTTPException(
+                422,
+                f"active_endpoint 需为配置内端点预设名，未知预设："
+                f"{req.active_endpoint.strip()}；可选：{known_names}",
+            )
+    if req.model is not None and req.model.strip():
+        known_models = set(cfg().models)
+        if req.model.strip() not in known_models:
+            known_names = "、".join(cfg().models) or "（配置中无模型）"
+            raise HTTPException(
+                422,
+                f"model 需为配置内可选模型之一，未知模型："
+                f"{req.model.strip()}；可选：{known_names}",
+            )
     scheduler.apply_settings(
         concurrency=req.concurrency,
         max_in_flight=req.max_in_flight,
         waiting_capacity=req.waiting_capacity,
         eval_timeout_s=req.eval_timeout_s,
         judges=req.judges,
+        active_endpoint=req.active_endpoint,
+        model=req.model,
     )
     persisted = scheduler.persist_settings()
     return _settings_payload(persisted=persisted)

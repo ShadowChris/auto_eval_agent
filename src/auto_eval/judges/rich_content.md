@@ -42,21 +42,13 @@
 结合 answer_text 与视觉组件（挂卡+Superlink）整体判断是否解决 query。条件优先级按【背景信息】定义执行。注意两点：①若上一轮产品回答与用户意图不符，看本轮是否纠正了偏差；②导航时用户要求去哪都合理，勿假设要本地导航，例如用户可以导航到跨省的饭店或小区。
 
 ## 判定顺序（极其重要）
-必须按下述顺序推进，先看证据是否有效、再查问题、最后下结论，不得跳步、不得先定结论再找理由：
-1. 判断证据有效性（见第 1 步）
-2. 问题标签逐项核查 → answer_issues（见第 2 步）
-3. 结合 answer_issues 判定 card_suitability / problem_solved（见第 3 步）
-4. 写 problem_solved_reason（见第 4 步）
+先排查证据阻断：关键帧黑屏/画面缺失或模糊、或权限/登录/系统拦截弹窗阻断会话，导致无法确认需求是否完成 → 命中即整体判 need_review，不在不可靠画面上评估问题。无阻断才继续以下步骤，不得跳步、不得先定结论再找理由：
+1. 问题标签逐项核查 → answer_issues（第 1 步）
+2. 结合 answer_issues 判定 card_suitability / problem_solved（第 2 步）
+3. 写 problem_solved_reason（第 3 步）
 轮次标记：context 中的「【轮次】…是否最后一轮：是|否」；无标记的独立单题视作最后一轮。
 
-## 第 1 步：判断证据的有效性
-关键帧命中以下任意一条阻断，跳过 ok/nok 判定，problem_solved 直接填 need_review，人工复核 needs_review=true：
-1. 唯一能用来证明操作完成的关键帧黑屏/画面缺失，看不清回答、挂卡、Superlink、操作执行结果（若有其他帧能证明操作完成，则不唯一，允许有黑屏）；
-2. 权限/登录（目标 APP 未登录）/系统拦截弹窗阻断会话或操作，无法确认需求是否完成。
-
-命中时其余字段：cards/superlinks 按仍可见内容照常提取（完全不可见则空数组）；card_suitability 无法判断填 ""；不写 answer_issues（阻断属录制/脚本/环境问题，非回答本身缺陷）。画面清晰完整、无阻断，才继续正常判定。
-
-## 第 2 步：按问题标签逐项核查（answer_issues）
+## 第 1 步：按问题标签逐项核查（answer_issues）
 - 逐个过一遍【可能适用】的标签，每个都给出"有此/无此问题"+证据，禁止只挑最显眼的问题；判"无此问题"的不写。
 - 只把"有此问题"的标签写入 answer_issues，一行一标签，格式"标签：具体描述（证据）"；全部核查确无问题时填 ""。
 - 结论同步到字段：挂载卡片与 query 明显无关时，card_suitability 取 nok。
@@ -78,8 +70,8 @@
 ### answer_issues 书写规则
 可以写多个问题，但**一行一个标签**，一个标签代表一个具体问题（"标签：具体描述+证据"），不叠标签、不拼接；枚举内已有的合并标签（如"挂卡/资源缺失"）合法。
 
-## 第 3 步：整体判定 —— card_suitability / problem_solved
-先看第 2 步的问题再下结论，不得先定结果再找理由。
+## 第 2 步：整体判定 —— card_suitability / problem_solved
+先看第 1 步的问题再下结论，不得先定结果再找理由。
 
 ### 卡片是否合适（card_suitability）
 - ok：所有挂卡都与用户 query 相关（领域/主题对得上即可，不必精确）。
@@ -90,21 +82,21 @@
 注意：信息对不对有专人检查，除非明显错误否则不影响此处的判定。
 - **ok**：已解决或提供了足够信息。需同时满足：①answer_issues 无严重缺陷（允许 思考暴露/挂卡缺失/结果重复/操作冗余/结构总结 等轻微瑕疵，须如实写入 answer_issues；仍按需求是否闭环评判，闭环则 ok，未闭环则 nok）；②无文卡内容冲突（回答矛盾）；③核心需求闭环，或给出能推动问题解决的信息。
 
-    > 二次确认是否合理（闭环与否的难点）：
+    > 二次确认是否合理（需求闭环与否的难点）：
     > **用户请求模糊**、不足以判断意图时，二次确认/澄清属合理 → ok。例：看日出未说去哪、导航外婆家未说地址、命中同名地址需选择、视频播放名字未查到 → ok；注意：若用户请求模糊需要二次确认但程序返回完全无关的事情（例如导航给出完全无关的候选地址） → nok。
     > **用户请求清晰**时，仅高危操作可二次确认（删除、付款/下单、关权限、关机等）→ ok；其余低危险操作应直接执行，如果二次确认 → nok。例：操作时候选项里有唯一一个完全一致选项的仍问选哪个（应该直接选择那个完全一致的操作）、导航时点名去"最近的肯德基"却列全部让选择（应该直接导航）、点名播放却问要不要播（应该直接播放）。
     > 补充：要求用某app放某电视剧，画面只能看出放了剧看不出app时，默认用了正确软件 → ok（用户主要目标是播放电视剧，次要问题不影响闭环）。
 
-- **nok**：未解决用户问题。触发含：需求未闭环、回答内容不相关、回答矛盾、回答不完整/无结果、执行/操作失败、私域信息问题。**出现回答矛盾一律 nok**（矛盾造成困惑，无法达成解决）。
+- **nok**：未解决用户问题。触发含：需求未闭环、回答内容不相关、回答矛盾、回答不完整/无结果、执行/操作失败、私域信息问题。**出现回答矛盾一律 nok**（矛盾造成困惑，无法达成解决）。注意如果视频抽帧中存在黑屏画面则不可以因为需求未闭环判定为nok，因为黑屏部分是应用禁止录屏，不能判定为需求未闭环，应判定为 need_review 。仅当其他非黑屏帧能明确证明失败（如出现报错、原地未执行、只回了无关内容）时，才走正常判定按「执行/操作失败」等判 nok。
 - **need_review**：信息不足，无法判断 ok 或 nok。分两类：
-    - A）画面环境阻断（外部录制/脚本问题，即第 1 步命中场景）→ **不写 answer_issues**。
+    - A）画面环境阻断（外部录制/脚本/环境问题）：唯一能证明操作是否完成的帧黑屏/画面缺失、看不清回答/挂卡/Superlink/操作执行结果，或出现权限/登录（目标 APP 未登录）/系统拦截弹窗阻断会话，导致无法确认需求是否完成。**不写入 answer_issues**（非回答本身缺陷）。命中时其余字段：cards/superlinks 按仍可见内容照常提取（不可见则空数组）；card_suitability 无法判断填 ""；needs_review=true。
     - B）内容信息不足（产品侧）：须点开卡片/Superlink 详情才能判定的，或产品声明本机能力不支持的 → **写 answer_issues**。例：周期日历事件需看后续周期配置、核验歌词对应某个歌名需卡片详情。
 
 「本机能力不支持」属 B：写 answer_issues，problem_solved=need_review，needs_review=true。
 拿不准 ok / nok 时，优先选 need_review。
 
-## 第 4 步：评价原因（problem_solved_reason）
-说明为何得出该结论，呼应第 2 步在 answer_issues 中查出的关键问题（或说明为何确认无问题），点出关键证据，不得与 answer_issues 矛盾。
+## 第 3 步：评价原因（problem_solved_reason）
+说明为何得出该结论，呼应第 1 步在 answer_issues 中查出的关键问题（或说明为何确认无问题），点出关键证据，不得与 answer_issues 矛盾。
 
 # Part 3 — 事实冲突判定（factual_conflict，稀疏输出）
 仅供人工筛错。只有同时满足「提供了竞品答案」「双方在说同一件事（同实体/问题点/数据口径）」「但结论或关键事实完全相反」时才输出 factual_conflict:"yes"，并**必须**同时输出 factual_conflict_detail（一两句转述两边各说了什么，不判断对错）；其余情形两字段全部省略，省略即视为无冲突。
@@ -112,19 +104,18 @@
 
 # 人工复核（needs_review）
 出现以下任一情况，needs_review=true 并说明原因：query 与画面中的 query 严重不符、answer_text 与画面严重不符、画面模糊/被遮挡、关键帧未覆盖完整回答、跨帧无法可靠去重、卡片类型或蓝字归属不确定。
-problem_solved 出现 need_review 时，needs_review 必须为 true。
+problem_solved 为 ok 或 nok 时根据情况填写是否需要人工复核，但 problem_solved 出现 need_review 时，needs_review 必须为 true。
 
 # 输出格式
 先输出 <analysis>...</analysis>，再输出一行 JSON：
 <analysis>
-1. 证据有效性判断（黑屏/弹窗阻断？对应第 1 步）。
-2. 挂卡跨帧去重与内容识别。
-3. Superlink 识别：逐行扫正文，逐一列所有蓝色/浅蓝色文字和标签（重点查浅蓝底图标胶囊，勿略过），跨帧去重并记录可见文字。
+1. 证据阻断排查分析：所有帧都黑屏/画面缺失模糊？命中即整体判 need_review。
+2. 挂卡跨帧去重与内容识别相关分析。
+3. Superlink 识别分析：逐行扫正文，逐一列所有蓝色/浅蓝色文字和标签（重点查浅蓝底图标胶囊，勿略过），跨帧去重并记录可见文字。
 4. Part 1 视觉描述（撰写 visual_description 的思考过程）。
 5. answer_issues 逐标签核查（每个可能适用标签："有此/无此"+证据）。
 6. 综合判定：读取轮次标记，区分最后一轮分支，得出 card_suitability / problem_solved，再写 problem_solved_reason（呼应第 5 步，不得矛盾）。
 7. 事实冲突比对（仅竞品）：先判是否同一件事，再判是否矛盾；仅冲突时输出两个 factual_conflict 字段，否则省略。
-8. 撰写 turn_summary（≤120字）。
-9. 人工复核项：梳理不确定点，确定 needs_review 与 review_reason。
+8. 人工复核项：梳理不确定点，确定 needs_review 与 review_reason。
 </analysis>
-{"visual_description":"<Part 1 纯客观描述，无评价语言>","turn_summary":"<本轮≤120字：用户意图+核心结果/关键实体+是否闭环>","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"needs_review":<true|false>,"review_reason":"<原因或空字符串>","answer_issues":"<问题标签：具体描述，无问题填空字符串>","card_suitability":"<ok|nok|空>","card_suitability_reason":"<原因>","problem_solved":"<ok|nok|need_review>","problem_solved_reason":"<评价原因>","factual_conflict":"<仅事实冲突时输出yes，其余情况整个字段省略>","factual_conflict_detail":"<仅判定事实冲突时输出>","rationale":"<一句话总结发现>"}
+{"visual_description":"<Part 1 纯客观描述，无评价语言>","turn_summary":"<本轮≤120字：用户意图+核心结果/关键实体+是否闭环>","cards":[{"type":"<上述类型key>","entity":"<核心实体>","visible_content":"<可见关键信息>","answer_position":"<回答中的位置>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"superlinks":[{"text":"<完整可见蓝色文字>","answer_position":"<回答中的位置>","surrounding_context":"<邻近正文或挂卡>","evidence_frames":[<帧序号>],"confidence":<0-1>}],"answer_issues":"<问题标签：具体描述，无问题填空字符串>","card_suitability":"<ok|nok|空>","card_suitability_reason":"<原因>","problem_solved":"<ok|nok|need_review>","problem_solved_reason":"<评价原因>","needs_review":<true|false>,"review_reason":"<原因或空字符串>","factual_conflict":"<仅事实冲突时输出yes，其余情况整个字段省略>","factual_conflict_detail":"<仅判定事实冲突时输出>","rationale":"<一句话总结发现>"}

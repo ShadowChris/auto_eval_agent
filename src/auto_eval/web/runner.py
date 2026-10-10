@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..paths import RUNS_DIR
-from ..config import AppConfig
+from ..config import AppConfig, JudgeConfig
 from ..judges import (
     JudgeClient,
     RichContentJudge,
@@ -202,6 +202,25 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
         retire_task(task)
 
 
+def _overridden_judge(judge: JudgeConfig, settings, endpoints) -> JudgeConfig:
+    """把全局设置的端点预设（base_url+api_key_env 成对）与 model 覆盖到裁判配置。
+
+    选中 active_endpoint 时以其 base_url/api_key_env 覆盖裁判自身值；设了全局
+    model 时覆盖 model。三者均未覆盖时返回原对象（不复制）。纯函数，便于单测。
+    """
+    update: dict = {}
+    if settings.active_endpoint:
+        preset = next(
+            (e for e in endpoints if e.name == settings.active_endpoint), None
+        )
+        if preset:
+            update["base_url"] = preset.base_url
+            update["api_key_env"] = preset.api_key_env  # 成对一起覆盖
+    if settings.model:
+        update["model"] = settings.model
+    return judge.model_copy(update=update) if update else judge
+
+
 def _make_item_evaluator(
     task: Task,
     cfg: AppConfig,
@@ -244,7 +263,8 @@ def _make_item_evaluator(
     clients: list[JudgeClient] = []
     try:
         for j in judges_cfg:
-            clients.append(JudgeClient(j))
+            # 全局设置的端点预设与 model 覆盖，落到构造客户端前的裁判配置上
+            clients.append(JudgeClient(_overridden_judge(j, get_settings(), cfg.endpoints)))
     except BaseException:
         if clients:
             spawn_background(_aclose_judge_clients(clients))

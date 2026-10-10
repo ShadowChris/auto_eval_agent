@@ -72,10 +72,14 @@ createApp({
       waiting_capacity: 10,
       eval_timeout_s: 300,
       judges: [],
+      active_endpoint: "",
+      model: "",
+      endpoints: [],
+      models: [],
       queue: { limit: 10, running: 0, queued: 0 },       // 模型限流：limit=每2秒请求数，running=在途，max_in_flight=在途上限
       pipeline: { limit: 10, running: 0, queued: 0 },     // 预处理并发级
     });
-    const settingsForm = ref({ concurrency: 10, max_in_flight: 50, waiting_capacity: 10, eval_timeout_s: 300, judges: [] });
+    const settingsForm = ref({ concurrency: 10, max_in_flight: 50, waiting_capacity: 10, eval_timeout_s: 300, judges: [], active_endpoint: "", model: "" });
     const settingsSaving = ref(false);
     const settingsMessage = ref("");
     const settingsMessageOk = ref(true);
@@ -861,6 +865,20 @@ createApp({
       return names.length ? names.map(label).join("、") : "未设置";
     });
 
+    // 摘要行展示当前激活的端点预设（base_url+api_key 成对），未选中显示「配置默认」
+    const settingsEndpointDisplay = computed(() => {
+      const name = sysSettings.value.active_endpoint;
+      if (!name) return "配置默认";
+      const e = (sysSettings.value.endpoints || []).find((x) => x.name === name);
+      return e ? (e.display || e.name) : name;
+    });
+    // 当前选中预设的 base_url（提示用）
+    const activeEndpointBaseUrl = computed(() => {
+      const name = sysSettings.value.active_endpoint;
+      const e = (sysSettings.value.endpoints || []).find((x) => x.name === name);
+      return e ? e.base_url : "";
+    });
+
     async function loadSettings() {
       try {
         const r = await fetch("/api/settings");
@@ -873,7 +891,10 @@ createApp({
             waiting_capacity: d.waiting_capacity,
             eval_timeout_s: d.eval_timeout_s,
             judges: d.judges || [],
+            active_endpoint: d.active_endpoint || "",
+            model: d.model || "",
           };
+          if (Array.isArray(d.models)) sysSettings.value.models = d.models;
         }
       } catch (_) {}
     }
@@ -893,6 +914,8 @@ createApp({
       const waitingCapacity = Number(settingsForm.value.waiting_capacity);
       const evalTimeoutS = Number(settingsForm.value.eval_timeout_s);
       const judgeNames = [...new Set(settingsForm.value.judges || [])];
+      const activeEndpoint = (settingsForm.value.active_endpoint || "").trim();
+      const model = (settingsForm.value.model || "").trim();
       if (![concurrency, maxInFlight, waitingCapacity, evalTimeoutS].every(Number.isFinite)) {
         settingsMessageOk.value = false;
         settingsMessage.value = "请填写有效的每秒请求数、最大在途、预处理并发与超时秒数";
@@ -903,6 +926,8 @@ createApp({
         settingsMessage.value = "请至少选择一位裁判";
         return;
       }
+      // base_url 与 api_key_env 打包在命名端点预设里：选了预设即成对生效，
+      // 已选中的预设一定同时带 base_url+api_key_env，无需单独校验。
       settingsSaving.value = true;
       settingsMessage.value = "";
       try {
@@ -915,6 +940,8 @@ createApp({
             waiting_capacity: waitingCapacity,
             eval_timeout_s: evalTimeoutS,
             judges: judgeNames,
+            active_endpoint: activeEndpoint,
+            model,
           }),
         });
         const d = await r.json().catch(() => ({}));
@@ -1646,7 +1673,7 @@ createApp({
     return {
       modes, mode, modeLabel, isVideoMode, items, errors, judges, datasetName,
       sysSettings, settingsForm, settingsSaving, settingsMessage, settingsMessageOk,
-      settingsJudgeDisplay,
+      settingsJudgeDisplay, settingsEndpointDisplay, activeEndpointBaseUrl,
       loadSettings, saveSettings, onSettingsToggle,
       running, progress, total, results, summary, taskId, runError,
       taskPaused, taskStopped, pauseTask, resumeTask, stopTask,

@@ -4,7 +4,7 @@ import contextlib
 import time
 from pathlib import Path
 
-from auto_eval.config import load_config
+from auto_eval.config import EndpointPreset, JudgeConfig, load_config
 from auto_eval.web import runner, scheduler
 from auto_eval.web.scheduler import (
     DEFAULT_CONCURRENCY,
@@ -12,6 +12,7 @@ from auto_eval.web.scheduler import (
     DEFAULT_MAX_IN_FLIGHT,
     DEFAULT_WAITING_CAPACITY,
     ResizableLimiter,
+    RuntimeSettings,
     TokenBucketRateLimiter,
 )
 from auto_eval.web.tasks import Task
@@ -24,6 +25,8 @@ def _reset_scheduler_globals():
         waiting_capacity=DEFAULT_WAITING_CAPACITY,
         eval_timeout_s=DEFAULT_EVAL_TIMEOUT_S,
         judges=[],
+        active_endpoint="",
+        model="",
     )
 
 
@@ -800,5 +803,127 @@ def test_settings_api_roundtrip_and_validation(monkeypatch, tmp_path):
             assert scheduler.get_settings().judges == known
             # GET 返回过滤后的裁判；未设置时回落第一个配置裁判
             assert client.get("/api/settings").json()["judges"] == known
+    finally:
+        _reset_scheduler_globals()
+
+
+# ---------- 端点预设 + model 覆盖 ----------
+
+def _judge(name="judge_2") -> JudgeConfig:
+    return JudgeConfig(
+        name=name,
+        base_url="https://default.example/v1",
+        api_key_env="DEFAULT_KEY",
+        model="default-model",
+    )
+
+
+def _endpoints():
+    return [
+        EndpointPreset(name="siliconflow", base_url="https://sf.example/v1", api_key_env="SF_KEY"),
+        EndpointPreset(name="ark", base_url="https://ark.example/v3", api_key_env="ARK_KEY"),
+    ]
+
+
+def test_overridden_judge_applies_preset_and_model():
+    j = _judge()
+    out = runner._overridden_judge(
+        j, RuntimeSettings(active_endpoint="ark", model="Qwen-32B"), _endpoints()
+    )
+    assert out.base_url == "https://ark.example/v3"
+    assert out.api_key_env == "ARK_KEY"            # base_url 与 api_key_env 成对覆盖
+    assert out.model == "Qwen-32B"
+    # 返回了副本，原对象不受影响
+    assert j.base_url == "https://default.example/v1"
+
+
+def test_overridden_judge_no_override_returns_original():
+    j = _judge()
+    out = runner._overridden_judge(
+        j, RuntimeSettings(active_endpoint=None, model=None), _endpoints()
+    )
+    assert out is j  # 无覆盖时复用原对象，不复制
+
+
+def test_overridden_judge_unknown_endpoint_no_base_url_override():
+    j = _judge()
+    out = runner._overridden_judge(j, RuntimeSettings(active_endpoint="ghost"), _endpoints())
+    # 未知预设：base_url/api_key_env 保持原值；model 仍可单独覆盖
+    assert out.base_url == "https://default.example/v1"
+    assert out.api_key_env == "DEFAULT_KEY"
+
+
+def test_overridden_judge_model_only():
+    j = _judge()
+    out = runner._overridden_judge(
+        j, RuntimeSettings(active_endpoint=None, model="only-model"), _endpoints()
+    )
+    assert out.base_url == "https://default.example/v1"
+    assert out.api_key_env == "DEFAULT_KEY"
+    assert out.model == "only-model"
+
+
+def test_settings_api_endpoint_and_model_roundtrip(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from auto_eval.web.server import app
+
+    cfg = load_config(Path("config"))
+    known_endpoints = [e.name for e in cfg.endpoints]
+    assert known_endpoints, "config/judges.yaml 应至少定义 1 个端点预设"
+    known_models = cfg.models
+    assert known_models, "config/judges.yaml 应至少定义 1 个可选模型"
+    model = known_models[0]
+
+    monkeypatch.setattr(scheduler, "SETTINGS_PATH", tmp_path / "web_settings.json")
+    try:
+        with TestClient(app) as client:
+            # GET 返回 endpoints/models 列表 + 当前 active_endpoint/model
+            body = client.get("/api/settings").json()
+            assert body["active_endpoint"] is None and body["model"] is None
+            ep_names = [e["name"] for e in body["endpoints"]]
+            assert known_endpoints and set(known_endpoints) <= set(ep_names)
+            assert known_models and set(known_models) <= set(body["models"])
+
+            # 未知预设 / 未知模型 → 422
+            assert (
+                client.put(
+                    "/api/settings", json={"active_endpoint": "no_such_endpoint"}
+                ).status_code
+                == 422
+            )
+            assert (
+                client.put("/api/settings", json={"model": "not_enabled_model"}).status_code
+                == 422
+            )
+            # 设置预设 + model，GET 回读一致
+            response = client.put(
+                "/api/settings",
+                json={"active_endpoint": known_endpoints[0], "model": model},
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["active_endpoint"] == known_endpoints[0]
+            assert body["model"] == model
+            assert scheduler.get_settings().active_endpoint == known_endpoints[0]
+            assert scheduler.get_settings().model == model
+            assert client.get("/api/settings").json()["active_endpoint"] == known_endpoints[0]
+
+            # model 可单独清空；预设仍保留
+            response = client.put("/api/settings", json={"model": ""})
+            body = response.json()
+            assert body["model"] is None
+            assert body["active_endpoint"] == known_endpoints[0]
+
+            # 空串清空预设 → 回落 None
+            response = client.put("/api/settings", json={"active_endpoint": ""})
+            assert response.json()["active_endpoint"] is None
+
+            # 持久化文件包含新键；加载回读保持一致
+            client.put("/api/settings", json={"active_endpoint": known_endpoints[0], "model": model})
+            assert (tmp_path / "web_settings.json").exists()
+            scheduler.load_persisted_settings(tmp_path / "web_settings.json")
+            assert scheduler.get_settings().active_endpoint == known_endpoints[0]
+            assert scheduler.get_settings().model == model
     finally:
         _reset_scheduler_globals()

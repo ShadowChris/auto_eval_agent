@@ -1,5 +1,7 @@
 # 裁判配置（单轮直出：不联网、不调工具）
 # 裁判按 SYSTEM/USER 模板一次生成 <analysis> + 结论 JSON；解析失败走定向修复（repair_json）。
+# endpoints：命名端点预设（每对 base_url + api_key_env，key 为 .env 中的环境变量名）。
+# 全局设置里按名字选择预设，成对覆盖所有选中裁判的 base_url/api_key_env；model 用独立全局字段。
 judges:
   # —— 裁判2：终端用户（普通用户视角，Qwen3.5）——
   - name: judge_2
@@ -8,7 +10,23 @@ judges:
     base_url: https://api.siliconflow.cn/v1
     api_key_env: SILICON_FLOW_API_KEY
     model: Qwen/Qwen3.5-397B-A17B
-    temperature: 0            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）
+    temperature: 0.1            # SiliconFlow Qwen 支持低温采样且复跑逐字一致（探针实测）
     seed: 42                  # 固定种子 + temperature=0 → 可复现，消除"时好时坏"
     persona: end_user
     concurrency: 3
+
+# 命名端点预设：全局设置里按名字选择（成对覆盖 base_url + api_key_env）。
+# base_url 为 API 网关；api_key_env 为存放该端点 key 的 .env 环境变量名。
+endpoints:
+  - name: siliconflow
+    display: 硅基流动 SiliconFlow
+    base_url: https://api.siliconflow.cn/v1
+    api_key_env: SILICON_FLOW_API_KEY
+  - name: ark
+    display: 火山方舟 Ark
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_API_KEY
+
+# 可选模型列表：全局设置里的「模型」只能从这些模型中选择（配合 endpoints 预设使用）。
+models:
+  - Qwen/Qwen3.5-397B-A17B
