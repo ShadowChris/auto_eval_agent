@@ -437,7 +437,7 @@
                 >
                   <div
                     class="cell-clamp"
-                    :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','answer_coverage','needs_review','problem_solved','card_suitability','factual_conflict','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
+                    :class="{'cell-center': ['card_presence','superlink_presence','card_count','superlink_count','needs_review','problem_solved','card_suitability','factual_conflict','has_conflict','relevance','safety','content_quality','need_closure','personalization','latency_s'].includes(c.key)}"
                   >{{ cell(r, c) }}</div>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">

@@ -523,7 +523,6 @@ createApp({
         { key: "superlink_texts", label: "Superlink文字" },
         { key: "card_suitability", label: "卡片是否合适" },
         { key: "card_suitability_reason", label: "卡片不合适原因" },
-        { key: "answer_coverage", label: "回答覆盖" },
         { key: "needs_review", label: "需人工复核" },
         { key: "review_reason", label: "复核原因" },
         { key: "problem_solved", label: "Correctness" },
@@ -539,7 +538,7 @@ createApp({
     function columnWidth(c) {
       const compact = [
         "latency_s", "card_presence", "card_count", "superlink_presence",
-        "superlink_count", "answer_coverage", "needs_review", "problem_solved",
+        "superlink_count", "needs_review", "problem_solved",
       ].includes(c.key);
       const textColumn = ["query", "context", "answer_text", "rationale", "answer_issues", "problem_solved_reason", "factual_conflict_detail"].includes(c.key);
       let minWidth = compact ? 80 : textColumn ? 150 : 96;
@@ -1242,9 +1241,6 @@ createApp({
       }
       if (c.key === "factual_conflict") {
         return ({ yes: "是", no: "否" }[v] || v) || "";
-      }
-      if (c.key === "answer_coverage") {
-        return ({ complete: "完整", partial: "部分", unclear: "不确定" }[v] || v) || "";
       }
       if (c.key === "needs_review") return v ? "T" : "F";
       if (v == null) return "";

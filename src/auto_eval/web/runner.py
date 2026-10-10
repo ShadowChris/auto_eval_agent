@@ -1185,7 +1185,6 @@ def _summarize_rich_content(task: Task) -> dict:
     superlink_cases = [
         row for row in ok if row.get("superlink_presence") == "present"
     ]
-    complete = [row for row in ok if row.get("answer_coverage") == "complete"]
     solved_ok = [row for row in ok if row.get("problem_solved") == "ok"]
     solved_nok = [row for row in ok if row.get("problem_solved") == "nok"]
     solved_review = [row for row in ok if row.get("problem_solved") == "need_review"]
@@ -1199,7 +1198,7 @@ def _summarize_rich_content(task: Task) -> dict:
         and row.get("superlink_presence") == "present"
     ]
     neither = [
-        row for row in complete
+        row for row in ok
         if row.get("card_presence") == "absent"
         and row.get("superlink_presence") == "absent"
     ]
@@ -1246,7 +1245,6 @@ def _summarize_rich_content(task: Task) -> dict:
         "both_count": len(both),
         "neither_count": len(neither),
         "needs_review_count": sum(bool(row.get("needs_review")) for row in ok),
-        "complete_coverage_count": len(complete),
         "solved_ok": len(solved_ok),
         "solved_nok": len(solved_nok),
         "solved_review": len(solved_review),

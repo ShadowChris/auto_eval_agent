@@ -134,7 +134,6 @@ def test_rich_content_prompt_defines_visual_counting_contract() -> None:
 
 def test_rich_content_result_derives_presence_counts_and_suitability() -> None:
     observation = RichContentObservation.model_validate({
-        "answer_coverage": "complete",
         "cards": [{
             "type": "weather",
             "entity": "北京明日天气",
@@ -173,24 +172,6 @@ def test_rich_content_result_derives_presence_counts_and_suitability() -> None:
     assert "correctness" not in result
 
 
-def test_partial_coverage_uses_lower_bound_or_unknown_count() -> None:
-    with_link = rich_content_result_fields(RichContentObservation.model_validate({
-        "answer_coverage": "partial",
-        "cards": [],
-        "superlinks": [{"text": "查看详情", "confidence": 0.8}],
-    }))
-    without_link = rich_content_result_fields(RichContentObservation.model_validate({
-        "answer_coverage": "partial",
-        "cards": [],
-        "superlinks": [],
-    }))
-
-    assert with_link["superlink_count"] == 1
-    assert with_link["superlink_count_type"] == "lower_bound"
-    assert with_link["needs_review"] is True
-    assert without_link["superlink_presence"] == "unclear"
-    assert without_link["superlink_count"] is None
-    assert without_link["superlink_count_type"] == "unknown"
 
 
 def test_prepare_rich_content_item_uses_profile_and_session_directory(
@@ -246,7 +227,6 @@ def test_rich_content_summary_uses_presence_and_suitability_not_accuracy() -> No
             {
                 "category": "weather",
                 "category_display": "天气",
-                "answer_coverage": "complete",
                 "card_presence": "present",
                 "card_count": 1,
                 "card_suitability": "suitable",
@@ -257,7 +237,6 @@ def test_rich_content_summary_uses_presence_and_suitability_not_accuracy() -> No
             {
                 "category": "music",
                 "category_display": "音乐",
-                "answer_coverage": "complete",
                 "card_presence": "absent",
                 "card_count": 0,
                 "card_suitability": "not_applicable",

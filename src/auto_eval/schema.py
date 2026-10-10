@@ -9,7 +9,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-AnswerCoverage = Literal["complete", "partial", "unclear"]
 CompareWinner = Literal["answer1", "answer2", "tie"]
 ConflictVerdict = Literal["yes", "no", "unclear"]
 
@@ -55,7 +54,6 @@ class RichContentSuperlink(BaseModel):
 class RichContentObservation(BaseModel):
     """一次垂域视觉评测视频识别结果。"""
 
-    answer_coverage: AnswerCoverage = "unclear"
     visual_description: str = ""  # 纯客观视觉描述（Part 1），不包含评价性语言
     turn_summary: str = ""  # 本轮总结(≤120字)：用户意图+核心结果/关键实体+是否闭环，供多轮下一轮 context 用
     cards: list[RichContentCard] = Field(default_factory=list)

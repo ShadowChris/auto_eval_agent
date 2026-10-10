@@ -25,18 +25,10 @@ def rich_content_result_fields(
     """把强类型视觉发现转换为 Web/导出友好的稳定字段。"""
     cards = [card.model_dump() for card in observation.cards]
     superlinks = [link.model_dump() for link in observation.superlinks]
-    coverage = observation.answer_coverage
 
-    card_presence = "present" if cards else (
-        "absent" if coverage == "complete" else "unclear"
-    )
-    superlink_presence = "present" if superlinks else (
-        "absent" if coverage == "complete" else "unclear"
-    )
-    # complete 时数量精确；partial 时只是下界；unclear 且未识别到时数量未知
-    superlink_count: int | None = (
-        len(superlinks) if (coverage == "complete" or superlinks) else None
-    )
+    card_presence = "present" if cards else "absent"
+    superlink_presence = "present" if superlinks else "absent"
+    superlink_count: int | None = len(superlinks)
 
     # 中文标签（用于 Excel 导出）
     _presence_label = {"present": "是", "absent": "否", "unclear": "不清楚"}
@@ -61,9 +53,7 @@ def rich_content_result_fields(
     problem_solved_reason = observation.problem_solved_reason or ""
     answer_issues = observation.answer_issues or ""
 
-    needs_review = bool(
-        observation.needs_review or coverage != "complete"
-    )
+    needs_review = bool(observation.needs_review)
 
     # 事实冲突归一：裁判侧稀疏（仅冲突时输出 yes），此处归一为密集 yes/no——
     # 省略/no/否/unclear/垃圾值一律 "no"（保守二元）
@@ -80,7 +70,6 @@ def rich_content_result_fields(
     # 导出字段
     base = {
         "turn_summary": observation.turn_summary or "",
-        "answer_coverage": coverage,
         "card_presence": card_presence,
         "card_presence_label": card_presence_label,
         "card_count": len(cards),
