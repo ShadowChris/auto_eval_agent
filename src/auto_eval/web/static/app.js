@@ -91,6 +91,7 @@ createApp({
     const total = ref(0);
     const results = ref([]);
     const summary = ref(null);
+    const statsOpen = ref(false); // 统计分布默认收起，展开时才挂载图表（触发请求）
     const taskId = ref("");
     const runError = ref("");
     const itemProgress = ref({});
@@ -1686,7 +1687,7 @@ createApp({
       resultBrowser,
       activeSkill, resultQuery, resultPage, resultPageSize,
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
-      correctnessStats, errorTypeStats,
+      correctnessStats, errorTypeStats, statsOpen,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
       switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportHtml, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       page, openComparisonPage, openComparisonFromHistory,

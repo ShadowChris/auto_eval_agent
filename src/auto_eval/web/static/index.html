@@ -368,9 +368,10 @@
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
         <span class="result-count">共 {{ filteredResults.length }} 条</span>
       </div>
-      <details v-if="mode!=='compare' && taskId" class="operation-statistics" open>
+      <details v-if="mode!=='compare' && taskId" class="operation-statistics"
+               @toggle="statsOpen = $event.target.open">
         <summary>📊 统计分布</summary>
-        <operation-report :task-id="taskId" :revision="summary"></operation-report>
+        <operation-report v-if="statsOpen" :task-id="taskId" :revision="summary"></operation-report>
         <details v-if="correctnessStats.rows.length" class="operation-statistics-legacy">
         <summary>查看原始统计表</summary>
         <div class="stats-grid">
