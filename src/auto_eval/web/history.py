@@ -486,6 +486,13 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
             str(index): list(events)[-2:]
             for index, events in progress_events.items()
         }
+    elif data.get("mode") == "operation":
+        # 兼容旧接口历史：上游可能把业务字段统一放入 metadata。
+        # history 响应只做无损投影，不修改磁盘快照。
+        items = [
+            {**item, "source_data": _source_data_for_item(item)}
+            for item in items
+        ]
     try:
         saved_done_total = int(data.get("done_total") or 0)
     except (TypeError, ValueError):
@@ -1235,7 +1242,11 @@ def _operation_export_rows(
                 item.get("query_images") or []
             ),
             "video_path": source_video_path,
-            "分享链接": source.get("分享链接", ""),
+            "分享链接": _first_export_value(
+                source.get("分享链接"),
+                source.get("share_url"),
+                source.get("share_link"),
+            ),
             "context": result.get("context") or item.get("context") or "",
             "answer": result.get("answer") or item.get("answer") or "",
             "Provider": result.get("judge_provider", ""),
@@ -1366,7 +1377,12 @@ def _operation_user_result_rows(
                 result.get("latency_s"), source.get("latency_s")
             ),
             "分享链接": _first_export_value(
-                result.get("分享链接"), source.get("分享链接")
+                result.get("分享链接"),
+                result.get("share_url"),
+                result.get("share_link"),
+                source.get("分享链接"),
+                source.get("share_url"),
+                source.get("share_link"),
             ),
             "video_path": _first_export_value(
                 result.get("video_path"), source.get("video_path")
@@ -1654,13 +1670,23 @@ def _project_relative_path(
 def _source_data_for_item(item: dict) -> dict:
     source = item.get("source_data")
     if isinstance(source, dict):
-        return dict(source)
+        normalized = dict(source)
+        metadata = normalized.get("metadata")
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                normalized.setdefault(str(key), value)
+        return normalized
     # 旧历史没有 source_data：尽量从规范化 item 回填，不暴露运行时绝对帧列表。
-    return {
+    normalized = {
         key: value
         for key, value in item.items()
         if key not in _RUNTIME_ITEM_FIELDS
     }
+    metadata = normalized.get("metadata")
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            normalized.setdefault(str(key), value)
+    return normalized
 
 
 def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:

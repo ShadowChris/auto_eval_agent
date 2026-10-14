@@ -76,6 +76,31 @@ def test_operation_jsonl_preserves_extra_source_fields_and_normalizes_nan():
     }
 
 
+def test_operation_jsonl_promotes_metadata_fields_without_overwriting_outer_values():
+    content = json.dumps({
+        "id": "op_001",
+        "query": "打开设置",
+        "video_path": "data/a.mp4",
+        "分享链接": "https://outer.example.test/share",
+        "metadata": {
+            "分享链接": "https://metadata.example.test/share",
+            "video_url_domain": "https://video.example.test/a.mp4",
+            "video_url_ip": "http://192.0.2.10/a.mp4",
+            "custom_field": "保留",
+        },
+    }, ensure_ascii=False)
+
+    items, errors = parse_jsonl(content, "operation")
+
+    assert not errors
+    source = items[0]["source_data"]
+    assert source["分享链接"] == "https://outer.example.test/share"
+    assert source["video_url_domain"] == "https://video.example.test/a.mp4"
+    assert source["video_url_ip"] == "http://192.0.2.10/a.mp4"
+    assert source["custom_field"] == "保留"
+    assert source["metadata"]["分享链接"] == "https://metadata.example.test/share"
+
+
 def test_operation_jsonl_task_times_are_optional_and_strictly_validated():
     content = "\n".join([
         '{"query":"default","video_path":"default.mp4"}',
