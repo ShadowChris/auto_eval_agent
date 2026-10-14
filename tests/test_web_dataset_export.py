@@ -267,6 +267,52 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     }
 
 
+def test_operation_exports_flatten_legacy_metadata_without_prefix(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    source = snapshot["items"][0]["source_data"]
+    for key in ("分享链接", "video_url_domain", "video_url_ip", "custom_field"):
+        source.pop(key, None)
+    source["metadata"] = {
+        "share_url": "https://metadata.example.test/share",
+        "video_url_domain": "https://metadata.example.test/video.mp4",
+        "video_url_ip": "http://192.0.2.20/video.mp4",
+        "custom_field": "metadata-value",
+    }
+
+    sheets = history.export_rows(snapshot)
+    user_row = sheets["评估结果"][0]
+    dataset_row = sheets["数据集明细"][0]
+    jsonl_row = history.jsonl_export_rows(snapshot)[0]
+    payload_source = history.snapshot_payload(snapshot)["items"][0]["source_data"]
+
+    assert user_row["分享链接"] == "https://metadata.example.test/share"
+    assert user_row["video_url_domain"] == "https://metadata.example.test/video.mp4"
+    assert user_row["video_url_ip"] == "http://192.0.2.20/video.mp4"
+    assert dataset_row["custom_field"] == "metadata-value"
+    assert dataset_row["share_url"] == "https://metadata.example.test/share"
+    assert "metadata.custom_field" not in dataset_row
+    assert jsonl_row["custom_field"] == "metadata-value"
+    assert jsonl_row["metadata"]["custom_field"] == "metadata-value"
+    assert payload_source["custom_field"] == "metadata-value"
+    assert payload_source["metadata"]["custom_field"] == "metadata-value"
+
+
+def test_operation_export_outer_fields_override_metadata(tmp_path: Path):
+    snapshot = _snapshot(tmp_path)
+    source = snapshot["items"][0]["source_data"]
+    source["metadata"] = {
+        "分享链接": "https://metadata.example.test/share",
+        "video_url_domain": "https://metadata.example.test/video.mp4",
+    }
+
+    sheets = history.export_rows(snapshot)
+
+    assert sheets["评估结果"][0]["分享链接"] == "https://example.test/1"
+    assert sheets["评估结果"][0]["video_url_domain"] == (
+        "https://video.example.test/one.mp4"
+    )
+
+
 def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
     openpyxl = pytest.importorskip("openpyxl")
     snapshot = _snapshot(tmp_path)
