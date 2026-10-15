@@ -10,7 +10,7 @@ from collections import Counter
 from typing import Any, Iterable
 
 
-OPERATION_CORRECTNESS = ("ok", "nok", "no_support", "others")
+OPERATION_CORRECTNESS = ("ok", "nok", "no_support")
 
 
 def normalize_operation_issue_types(value: Any) -> list[str]:
@@ -30,7 +30,7 @@ def summarize_operation_results(
 ) -> dict[str, Any]:
     """汇总一批普通任务类结果。
 
-    OK/NOK 率统一以 OK+NOK 为分母；Correctness 与 Issue Type 分布仍以
+    OK/NOK 率与执行问题类型均以 OK+NOK 为分母；Correctness 分布以
     具有合法 correctness 的有效评估 Case 为分母；
     运行错误与尚无合法判定的条目分别计入失败、待评估，不伪装成 nok。
     每个 issue type 在同一 Case 中最多计一次。
@@ -62,7 +62,8 @@ def summarize_operation_results(
 
     issue_case_counts: Counter[str] = Counter()
     issue_case_count = 0
-    for row in valid:
+    decisive = [row for row in valid if row["correctness"] in {"ok", "nok"}]
+    for row in decisive:
         raw_issues = normalize_operation_issue_types(row.get("issue_types"))
         unique_issues = list(dict.fromkeys(raw_issues))
         if unique_issues:
@@ -70,11 +71,12 @@ def summarize_operation_results(
         for issue in unique_issues:
             issue_case_counts[issue] += 1
 
+    rate_denominator = len(decisive)
     issue_type_rows = [
         {
             "issue_type": issue,
             "case_count": count,
-            "rate": round(count / valid_count, 4) if valid_count else None,
+            "rate": round(count / rate_denominator, 4) if rate_denominator else None,
         }
         for issue, count in sorted(
             issue_case_counts.items(),
@@ -82,9 +84,24 @@ def summarize_operation_results(
         )
     ]
 
+    review_counts: Counter[str] = Counter()
+    review_case_count = 0
+    for row in valid:
+        categories = set(normalize_operation_issue_types(row.get("need_review_cate")))
+        if categories:
+            review_case_count += 1
+            review_counts.update(categories)
+    review_category_rows = [
+        {
+            "category": category,
+            "case_count": count,
+            "rate": round(count / valid_count, 4) if valid_count else None,
+        }
+        for category, count in sorted(review_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
     ok_count = correctness_counts.get("ok", 0)
     nok_count = correctness_counts.get("nok", 0)
-    rate_denominator = ok_count + nok_count
     coverage_rate = round(valid_count / total, 4) if total else None
     ok_rate = round(ok_count / rate_denominator, 4) if rate_denominator else None
     nok_rate = round(nok_count / rate_denominator, 4) if rate_denominator else None
@@ -110,8 +127,10 @@ def summarize_operation_results(
         "ok_rate": ok_rate,
         "nok_rate": nok_rate,
         "issue_case_count": issue_case_count,
+        "review_case_count": review_case_count,
         "correctness_rows": correctness_rows,
         "issue_type_rows": issue_type_rows,
+        "review_category_rows": review_category_rows,
         "conclusion": conclusion,
     }
 

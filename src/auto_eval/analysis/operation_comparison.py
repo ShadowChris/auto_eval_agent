@@ -1,6 +1,7 @@
 """任务类结果集对比统计。"""
 from __future__ import annotations
 
+import copy
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -11,6 +12,7 @@ from .operation_statistics import (
     normalize_operation_issue_types,
     summarize_operation_results,
 )
+from ..judges.operation_fields import LEGACY_REVIEW_CATEGORIES, split_operation_issue_fields
 
 
 OK_RATE_CLOSE_THRESHOLD = 0.01
@@ -38,6 +40,21 @@ def compare_operation_batches(
         raise ValueError("历史批次 task_id 不能为空且不能重复")
     if baseline_task_id not in task_ids:
         raise ValueError("对照组必须包含在已选历史批次中")
+
+    # 旧结果只在内存中的分析副本上转换；历史快照本身不改写。
+    batches = copy.deepcopy(batches)
+    for batch in batches:
+        for row in batch.get("rows") or []:
+            result = row.get("result") or {}
+            if result.get("correctness") == "others":
+                result["judge_correctness"] = "others"
+                result["correctness"] = "no_support"
+            issues = normalize_operation_issue_types(result.get("issue_types"))
+            effect, review = split_operation_issue_fields(issues, LEGACY_REVIEW_CATEGORIES)
+            result["issue_types"] = effect
+            result["need_review_cate"] = list(dict.fromkeys([
+                *normalize_operation_issue_types(result.get("need_review_cate")), *review,
+            ]))
 
     _assign_names(batches)
     baseline = next(
@@ -437,17 +454,18 @@ def _paired_issue_rows(
 ) -> list[dict[str, Any]]:
     baseline_counts: Counter[str] = Counter()
     target_counts: Counter[str] = Counter()
-    for result in baseline_results:
+    baseline_decidable = [result for result in baseline_results if result.get("correctness") in {"ok", "nok"}]
+    target_decidable = [result for result in target_results if result.get("correctness") in {"ok", "nok"}]
+    for result in baseline_decidable:
         baseline_counts.update(_case_issues(result))
-    for result in target_results:
+    for result in target_decidable:
         target_counts.update(_case_issues(result))
-    denominator = len(baseline_results)
     rows = []
     for issue in set(baseline_counts) | set(target_counts):
         baseline_count = baseline_counts.get(issue, 0)
         target_count = target_counts.get(issue, 0)
-        baseline_rate = baseline_count / denominator if denominator else None
-        target_rate = target_count / denominator if denominator else None
+        baseline_rate = baseline_count / len(baseline_decidable) if baseline_decidable else None
+        target_rate = target_count / len(target_decidable) if target_decidable else None
         rows.append({
             "issue_type": issue,
             "baseline_count": baseline_count,
@@ -643,6 +661,11 @@ def _row_export(row: dict[str, Any]) -> dict[str, Any]:
         "query": row.get("query") or "",
         "correctness": result.get("correctness") or "",
         "issue_types": "；".join(_case_issues(result)),
+        "need_review_cate": "；".join(normalize_operation_issue_types(result.get("need_review_cate"))),
+        "card_presence": result.get("card_presence") or "",
+        "card_types": "；".join(normalize_operation_issue_types(result.get("card_types"))),
+        "card_suitability": result.get("card_suitability") or "",
+        "card_suitability_reason": result.get("card_suitability_reason") or "",
         "is_low_level": result.get("is_low_level") or "",
         "rationale": result.get("rationale") or "",
         "error": result.get("error") or "",

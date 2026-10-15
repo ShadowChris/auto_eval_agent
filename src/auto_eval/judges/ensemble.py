@@ -16,7 +16,12 @@ from ..schema import (
     SingleScore,
     Verdict,
 )
-from .operation_fields import QUERY_ALIGNMENT_ISSUE, primary_operation_issue_types
+from .operation_fields import (
+    LEGACY_REVIEW_CATEGORIES,
+    QUERY_ALIGNMENT_ISSUE,
+    primary_operation_issue_types,
+    split_operation_issue_fields,
+)
 
 _rng = np.random.default_rng(20240622)
 
@@ -178,10 +183,15 @@ def aggregate_operation_scores(
     matching_scores = [score for score in scores if score.correctness == correctness]
     issue_counts: collections.Counter[str] = collections.Counter()
     issue_order: dict[str, int] = {}
+    review_counts: collections.Counter[str] = collections.Counter()
     for score in matching_scores:
-        for issue in score.issue_types:
+        effect, legacy_review = split_operation_issue_fields(
+            score.issue_types, LEGACY_REVIEW_CATEGORIES
+        )
+        for issue in effect:
             issue_counts[issue] += 1
             issue_order.setdefault(issue, len(issue_order))
+        review_counts.update([*score.need_review_cate, *legacy_review])
     issue_types = sorted(
         issue_counts,
         key=lambda issue: (-issue_counts[issue], issue_order[issue]),
@@ -192,8 +202,15 @@ def aggregate_operation_scores(
             [issue for issue in issue_types if issue in primary_types]
             + [issue for issue in issue_types if issue not in primary_types]
         )
-    if correctness != "ok" and not issue_types:
-        issue_types = ["评测证据冲突" if correctness == "others" else "其他执行问题"]
+    need_review_cate = [
+        category for category, _ in review_counts.most_common()
+    ]
+    if correctness == "nok" and not issue_types:
+        issue_types = ["其他执行问题"]
+    if correctness == "no_support" and not need_review_cate:
+        need_review_cate = ["其他阻塞原因"]
+    if correctness == "others" and not need_review_cate:
+        need_review_cate = ["其他未归类情况"]
 
     task_types = [score.task_type for score in matching_scores if score.task_type]
     task_type = _majority(task_types) or (task_types[0] if task_types else None)
@@ -241,7 +258,7 @@ def aggregate_operation_scores(
         if parts:
             rubric_reasons[key] = " | ".join(parts[:3])
 
-    if QUERY_ALIGNMENT_ISSUE in issue_types:
+    if QUERY_ALIGNMENT_ISSUE in need_review_cate:
         rubric_mean = {}
         rubric_reasons = {}
         na_consensus = [dim.name for dim in dims]
@@ -321,6 +338,8 @@ def aggregate_operation_scores(
         task_type=task_type,
         correctness=correctness,
         issue_types=issue_types,
+        need_review_cate=need_review_cate,
+        cards=matching_scores[0].cards if matching_scores else [],
         is_low_level=is_low_level,
         rationale=" | ".join(f"[{score.judge}] {score.rationale}" for score in scores[:3]),
         execution_routes=execution_routes,

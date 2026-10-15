@@ -264,7 +264,7 @@ const root = {
 const viewer = AutoEvalOperationReport.mount(root, payload);
 const read = name => root.querySelector(`[data-or="${name}"]`);
 const clickScope = scope => handlers.click({ target: { closest: selector => selector === 'button' ? {dataset: {scope}} : null } });
-assert(read('issues').innerHTML.includes('缺少前置条件'));
+assert(!read('issues').innerHTML.includes('缺少前置条件'));
 clickScope('common_decidable');
 assert(!read('issues').innerHTML.includes('缺少前置条件'));
 assert(read('issues').innerHTML.includes('任务结果错误'));
@@ -273,7 +273,7 @@ assert(root.innerHTML.includes('NOK→OK'));
 assert(!read('cases').innerHTML.includes('>no_support<'));
 assert.strictEqual(events.at(-1).detail, 'common_decidable');
 clickScope('all_valid');
-assert(read('issues').innerHTML.includes('缺少前置条件'));
+assert(!read('issues').innerHTML.includes('缺少前置条件'));
 assert(read('case-count').textContent.includes('60 条'));
 assert(root.innerHTML.includes('其他→OK'));
 assert.strictEqual(events.at(-1).detail, 'all_valid');

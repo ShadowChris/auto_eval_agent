@@ -63,7 +63,8 @@ def test_operation_results_show_issue_types_and_low_level_fields() -> None:
     assert 'join("；")' in app_js
     assert 'if (c.key === "is_low_level") return v === "yes" ? "是" : "否";' in app_js
     assert 'ok: "✓ 完成"' in app_js
-    assert 'no_support: "⊘ 客观条件不支持"' in app_js
+    assert 'no_support: "? 需复核（不计效果）"' in app_js
+    assert '{ key: "need_review_cate", label: "需复核类别" }' in app_js
     assert "function resultWarnings(result)" in app_js
     assert 'v-if="resultWarnings(r).length" class="result-warning-detail"' in index_html
     assert "⚠️ 抽帧警告：{{ warning }}" in index_html

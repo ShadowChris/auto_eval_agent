@@ -145,7 +145,7 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
 
     assert list(sheets)[0] == "评估结果"
     user_results = sheets["评估结果"]
-    assert list(user_results[0]) == list(history._OPERATION_USER_RESULT_COLUMNS)
+    assert list(user_results[0]) == [history._OPERATION_CARD_LABELS.get(key, key) for key in history._OPERATION_USER_RESULT_COLUMNS]
     assert list(user_results[0]) == [
         "数据集序号",
         "item_id",
@@ -159,6 +159,11 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
         "answer",
         "correctness",
         "issue_types",
+        "need_review_cate",
+        "是否挂卡",
+        "卡片类型",
+        "卡片合适判断",
+        "卡片合适判断原因",
         "rationale",
         "is_low_level",
         "total",
@@ -204,7 +209,7 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
 
     results = sheets["逐题结果"]
     assert [row["item_id"] for row in results] == ["op_1", "op_2", "op_3"]
-    assert list(results[0]) == list(history._OPERATION_EXPORT_COLUMNS)
+    assert list(results[0]) == [history._OPERATION_CARD_LABELS.get(key, key) for key in history._OPERATION_EXPORT_COLUMNS]
     assert list(results[0])[:8] == [
         "数据集序号",
         "item_id",
@@ -324,7 +329,7 @@ def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
     assert workbook.sheetnames[0] == "评估结果"
     result_sheet = workbook["评估结果"]
     assert result_sheet.freeze_panes is None
-    assert result_sheet.auto_filter.ref == "A1:Y4"
+    assert result_sheet.auto_filter.ref == "A1:AD4"
     assert result_sheet.sheet_view.showGridLines is None
     assert result_sheet["A1"].fill.patternType is None
     assert result_sheet["A1"].alignment.wrap_text is None
@@ -366,7 +371,7 @@ def test_operation_statistics_api_returns_excel_source_json(
     assert [
         row["correctness"]
         for row in payload["statistics"]["correctness_rows"]
-    ] == ["ok", "nok", "no_support", "others"]
+    ] == ["ok", "nok", "no_support"]
 
     download = server.api_operation_statistics("task-1", download=True)
     assert download.media_type == "application/json"

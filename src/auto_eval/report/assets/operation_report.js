@@ -1,7 +1,7 @@
 /* Web 与离线 HTML 共用；仅渲染投影后的报告数据，不访问网络或执行源数据。 */
 (function (global) {
   "use strict";
-  const TYPES = ["ok", "nok", "no_support", "others"];
+  const TYPES = ["ok", "nok", "no_support"];
   const COLORS = ["var(--or-green)", "var(--or-red)", "var(--or-amber)", "var(--or-slate)"];
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -97,7 +97,7 @@
         <div class="or-heading"><div><div class="or-name">${isCompare ? "任务类对比报告" : "任务类统计报告"}</div><div class="or-muted">${subtitle}</div></div>
           ${isCompare ? `<label>实验组 <select data-or="group">${payload.pairs.map(p => `<option value="${esc(p.target_task_id)}" ${p.target_task_id === state.group ? "selected" : ""}>${esc(p.target_label)}</option>`).join("")}</select></label>` : ""}
         </div>
-        ${isCompare && sourcePayload.views ? `<div class="or-controls"><span class="or-muted">统计口径</span><div class="or-segments">${[["all_valid", "全部有效判定"], ["common_decidable", "均为 OK/NOK"]].map(([value, label]) => `<button data-scope="${value}" aria-pressed="${state.scope === value}">${label}</button>`).join("")}</div></div><p class="or-muted">${decidable() ? "所有选中组均为 OK/NOK 的共同 Case；任一组为 no_support、others、失败或缺失时整条排除。全部统计及 Case 明细使用同一集合。" : "沿用原口径：全组分布使用全组共同有效 Case，组间对比使用双方共同有效 Case；有效判定包含 ok、nok、no_support、others。"}</p>` : ""}
+        ${isCompare && sourcePayload.views ? `<div class="or-controls"><span class="or-muted">统计口径</span><div class="or-segments">${[["all_valid", "全部有效判定"], ["common_decidable", "均为 OK/NOK"]].map(([value, label]) => `<button data-scope="${value}" aria-pressed="${state.scope === value}">${label}</button>`).join("")}</div></div><p class="or-muted">${decidable() ? "所有选中组均为 OK/NOK 的共同 Case；任一组为 no_support、失败或缺失时整条排除。全部统计及 Case 明细使用同一集合。" : "全组分布使用全组共同有效 Case，组间对比使用双方共同有效 Case；有效判定包含 ok、nok、no_support。"}</p>` : ""}
         ${alignmentPanel()}
         <div class="or-summary">${isCompare
           ? metric("实验组 OK / NOK 率", `${pct(pair.target_ok_rate)} / ${pct(pair.target_nok_rate)}`, `对照组 ${pct(pair.baseline_ok_rate)} / ${pct(pair.baseline_nok_rate)} · 分母为各组 OK+NOK`)
@@ -107,7 +107,7 @@
           : metric("OK 率", pct(stats.ok_rate), `${stats.ok_count} / ${stats.rate_denominator} 条 OK+NOK`)
             + metric("NOK 率", pct(stats.nok_rate), `${stats.nok_count} / ${stats.rate_denominator} 条 OK+NOK`)
             + metric("有效评估", `${stats.valid_count} / ${stats.total_cases}`, `覆盖率 ${pct(stats.coverage_rate)}`)
-            + metric("评估失败", esc(stats.failed_count), `待评估 ${stats.pending_count} · no_support/others/失败/待评估不计入 OK/NOK 率分母`)
+            + metric("评估失败", esc(stats.failed_count), `待评估 ${stats.pending_count} · no_support/失败/待评估不计入 OK/NOK 率分母`)
         }</div>
         <div class="or-panels">
           <section class="or-panel"><div class="or-panel-heading"><h3>Correctness 分布</h3><span class="or-muted">${isCompare ? "全组共同有效集合" : "全部有效评估"}</span></div><div data-or="correctness" class="or-chart"></div></section>
@@ -118,6 +118,7 @@
             <div data-or="issues" class="or-chart"></div><p data-or="issue-note" class="or-muted or-hint"></p>
           </section>
         </div>
+        ${!isCompare && stats.review_category_rows?.length ? `<details class="or-panel"><summary>需复核类别（${stats.review_case_count} 条）</summary><div class="or-table-wrap">${table(["类别", "涉及 Case", "占有效评估比例"], stats.review_category_rows.map(r => [esc(r.category), r.case_count, pct(r.rate)]))}</div></details>` : ""}
         <p data-or="conclusion" class="or-conclusion"></p>
         ${isCompare ? `<details class="or-panel"><summary>相对对照组的共同 Case 对比</summary><div class="or-table-wrap">${table(
           ["实验组", "共同有效", "对照组OK率", "实验组OK率", toOkLabel(), fromOkLabel(), "OK净变化", "OK率差值", "结论"],
@@ -135,7 +136,7 @@
           <div data-or="cases" class="or-table-wrap"></div>
           <div class="or-footer"><span class="or-muted">原录屏：域名站 / IP站；空链接不显示，访问需相应网络权限。</span><div class="or-row"><label class="or-muted">每页 <select data-or="size">${[10, 20, 50].map(n => `<option value="${n}" ${state.size === n ? "selected" : ""}>${n} 条</option>`).join("")}</select></label><button data-page="-1">上一页</button><span data-or="page-label" class="or-muted"></span><button data-page="1">下一页</button></div></div>
         </section>
-        <p class="or-muted">报告快照 ${esc(payload.generated_at)} · 问题类型按 Case 去重，占比之和可能超过 100%。${isCompare ? (decidable() ? "NOK→OK 和 OK→NOK 仅统计同一共同集合中的判定变化。" : "NOK 表示判定 nok；其他→OK 中的“其他”包括 nok、no_support、others。") : ""} 未打包媒体或模型原始调用。</p>`;
+        <p class="or-muted">报告快照 ${esc(payload.generated_at)} · 问题类型按 Case 去重，以 OK+NOK 为分母。${isCompare ? (decidable() ? "NOK→OK 和 OK→NOK 仅统计同一共同集合中的判定变化。" : "NOK 表示判定 nok；其他→OK 中的“其他”包括 nok、no_support。") : ""} 未打包媒体或模型原始调用。</p>`;
       drawCorrectness(); drawIssues(); renderCases(); renderConclusion();
     }
     function drawCorrectness() {

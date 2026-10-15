@@ -286,7 +286,7 @@ def test_history_comparison_uses_one_baseline_for_multiple_batches() -> None:
         row["correctness"]: row["count"]
         for row in payload["groups"][0]["statistics"]["correctness_rows"]
     }
-    assert baseline_counts == {"ok": 1, "nok": 1, "no_support": 0, "others": 0}
+    assert baseline_counts == {"ok": 1, "nok": 1, "no_support": 0}
 
 
 def test_history_comparison_preserves_dataset_name_with_version_dot() -> None:
