@@ -2404,7 +2404,7 @@ createApp({
       }
       if (c.key === "card_presence" || c.key === "superlink_presence") {
         if (mode.value === "operation" && c.key === "card_presence")
-          return ({ present: "ok", absent: "nok", unclear: "" }[v] ?? v) || "";
+          return ({ ok: "是", nok: "否", present: "是", absent: "否", unclear: "" }[v] ?? v) || "";
         return ({ present: "是", absent: "否", unclear: "不清楚" }[v] || v) || "";
       }
       if (c.key === "card_suitability" || c.key === "superlink_suitability") {

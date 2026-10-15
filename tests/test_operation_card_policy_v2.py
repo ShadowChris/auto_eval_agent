@@ -73,10 +73,10 @@ def test_fact_review_cannot_be_an_execution_failure_by_itself(raw, independent_e
 
 
 @pytest.mark.parametrize('states,expected_presence,expected_suitability', [
-    ([], 'nok', ''),
-    (['suitable', 'suitable'], 'ok', 'ok'),
-    (['suitable', 'unclear'], 'ok', ''),
-    (['unsuitable', 'unclear'], 'ok', 'nok'),
+    ([], '否', ''),
+    (['suitable', 'suitable'], '是', 'ok'),
+    (['suitable', 'unclear'], '是', ''),
+    (['unsuitable', 'unclear'], '是', 'nok'),
 ])
 def test_card_summary_keeps_empty_unknown_and_decisive_wrong_distinct(
     states, expected_presence, expected_suitability,
@@ -107,7 +107,7 @@ def test_read_compat_does_not_rewrite_old_scope_or_other_modules():
         card_suitability='unclear', cards=[dict(type='other', observed_name='旧弹窗')],
     )])
     current = _with_operation_compat(original)
-    assert current['results'][0]['card_presence'] == 'ok'
+    assert current['results'][0]['card_presence'] == '是'
     assert current['results'][0]['card_suitability'] == ''
     assert current['results'][0]['card_types'] == ['天气卡']
     assert current['results'][0]['cards'] == original['results'][0]['cards']
@@ -116,15 +116,19 @@ def test_read_compat_does_not_rewrite_old_scope_or_other_modules():
     assert _with_operation_compat(other) is other
 
 
-def test_task_export_headers_change_without_new_json_fields():
+@pytest.mark.parametrize('presence,expected', [
+    ('ok', '是'), ('nok', '否'), ('present', '是'), ('absent', '否'),
+    ('是', '是'), ('否', '否'), ('unclear', ''), ('', ''),
+])
+def test_task_export_headers_change_without_new_json_fields(presence, expected):
     snapshot = dict(mode='operation', status='done', items=[dict(id='t', query='展示信息')],
         results=[dict(index=0, item_id='t', correctness='ok', issue_types=[],
-            card_presence='ok', card_types=['图片卡'], card_suitability='',
+            card_presence=presence, card_types=['图片卡'], card_suitability='',
             card_suitability_reason='关键身份待核验')])
     sheets = export_rows(snapshot)
     for sheet in ('评估结果', '逐题结果'):
         row = sheets[sheet][0]
-        assert row['是否挂卡'] == 'ok'
+        assert row['是否挂卡'] == expected
         assert row['卡片类型'] == '图片卡'
         assert row['卡片合适判断'] == ''
         assert row['卡片合适判断原因'] == '关键身份待核验'

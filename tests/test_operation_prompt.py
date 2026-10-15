@@ -122,7 +122,7 @@ def test_operation_result_separates_review_reasons_and_preserves_card_evidence()
     result = {}
     _fill_operation_verdict(result, verdict)
     assert result["correctness"] == "nok"
-    assert result["card_presence"] == "ok"
+    assert result["card_presence"] == "是"
     assert result["card_types"] == ["小艺帮记卡"]
     assert result["card_suitability"] == "nok"
 

@@ -856,7 +856,9 @@ def _with_operation_compat(data: dict) -> dict:
     def normalize_row(original: dict) -> dict:
         row = dict(original)
         if "card_presence" in row:
-            row["card_presence"] = {"present": "ok", "absent": "nok", "unclear": ""}.get(row["card_presence"], row["card_presence"])
+            row["card_presence"] = {
+                "ok": "是", "nok": "否", "present": "是", "absent": "否", "unclear": "",
+            }.get(row["card_presence"], row["card_presence"])
         if "card_suitability" in row:
             row["card_suitability"] = {"suitable": "ok", "unsuitable": "nok", "unclear": "", "not_applicable": ""}.get(row["card_suitability"], row["card_suitability"])
         if isinstance(row.get("card_types"), list):
