@@ -1708,7 +1708,7 @@ def _fill_operation_verdict(out: dict, v) -> None:
     out["issue_types"] = v.issue_types
     out["need_review_cate"] = v.need_review_cate
     out["cards"] = [card.model_dump(mode="json") for card in v.cards]
-    out["card_presence"] = "ok" if v.cards else "nok"
+    out["card_presence"] = "是" if v.cards else "否"
     out["card_types"] = list(dict.fromkeys(card.observed_name or card.type for card in v.cards))
     out["card_suitability"] = (
         "nok" if any(card.suitability == "unsuitable" for card in v.cards)
