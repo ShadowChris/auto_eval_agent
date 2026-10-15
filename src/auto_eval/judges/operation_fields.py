@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..schema import OperationCorrectness, OperationRouteEvidence
+from ..schema import OperationCard, OperationCorrectness, OperationRouteEvidence
 
 _VALID_CORRECTNESS = {"ok", "nok", "no_support", "others"}
 _VALID_ROUTE_STATUS = {"detected", "uncertain", "insufficient_evidence"}
@@ -56,6 +56,14 @@ _INDEPENDENT_OTHER_CUES = (
     "独立 qa",
 )
 QUERY_ALIGNMENT_ISSUE = "录屏Query无法与输入Query一致核验"
+FACT_REVIEW_CATEGORY = "关键事实待核验"
+LEGACY_REVIEW_CATEGORIES = {
+    "待用户澄清", "缺少前置条件", "其他阻塞原因", "未展示可验证结果",
+    "环境或算力异常", "外部服务暂时异常", "视频损坏", "录屏数据不完整",
+    "视频无法解析", "任务意图不明确", "任务要求矛盾", "输入数据异常",
+    QUERY_ALIGNMENT_ISSUE, "任务执行窗口未展开", "评测证据冲突",
+    "未预期场景", "其他未归类情况", FACT_REVIEW_CATEGORY,
+}
 _LEGACY_CORRECTNESS = {
     "right": "ok",
     "partial": "ok",
@@ -131,6 +139,8 @@ _MISNESTED_TOP_LEVEL_FIELDS = (
     "total",
     "correctness",
     "issue_types",
+    "need_review_cate",
+    "cards",
     "error_type",
     "is_low_level",
     "rationale",
@@ -176,6 +186,77 @@ def _as_issue_list(value: Any) -> list[str]:
             if normalized not in result:
                 result.append(normalized)
     return result
+
+
+def split_operation_issue_fields(
+    issues: list[str], review_category_names: list[str] | set[str]
+) -> tuple[list[str], list[str]]:
+    """把执行质量问题与外部阻塞、证据或输入复核原因分开。"""
+    review_names = set(review_category_names)
+    return (
+        [issue for issue in issues if issue not in review_names],
+        [issue for issue in issues if issue in review_names],
+    )
+
+
+def collect_operation_output_issues(data: dict[str, Any]) -> list[str]:
+    """兼容模型把旧 review 类型放在 issue_types 的输出。"""
+    return list(dict.fromkeys([
+        *_as_issue_list(data.get("issue_types", data.get("error_type"))),
+        *_as_issue_list(data.get("need_review_cate")),
+    ]))
+
+
+def clean_operation_card_name(value: Any) -> str:
+    """自定义类型只能是短类别名；内容、括号备注和解释不得混入类型列。"""
+    name = re.split(r"[（(：:；;，,。\n]", str(value or "").strip(), maxsplit=1)[0].strip()
+    return name if 1 < len(name) <= 12 else "其他卡"
+
+
+def normalize_operation_cards(value: Any, known_types: dict[str, str]) -> list[OperationCard]:
+    """未知卡片使用 other，保留观察名称，不凭模型猜测扩充枚举。"""
+    cards: list[OperationCard] = []
+    display_keys = {
+        alias: key for key, name in known_types.items()
+        for alias in (name, name.removesuffix("卡"))
+    }
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        raw_type = str(raw.get("type") or "other").strip()
+        raw_type = display_keys.get(raw_type, raw_type)
+        observed_name = str(raw.get("observed_name") or "").strip()
+        if raw_type not in known_types:
+            raw_type = display_keys.get(clean_operation_card_name(observed_name), raw_type)
+        if raw_type not in known_types and raw_type != "other":
+            observed_name = clean_operation_card_name(observed_name or raw_type)
+            raw_type = "other"
+        elif raw_type in known_types:
+            observed_name = known_types[raw_type]
+        else:
+            observed_name = clean_operation_card_name(observed_name)
+        relation = raw.get("relation_to_query")
+        suitability = raw.get("suitability")
+        raw_frames = raw.get("evidence_frames") or []
+        frames = []
+        for frame in raw_frames if isinstance(raw_frames, list) else []:
+            try:
+                number = int(frame)
+            except (TypeError, ValueError):
+                continue
+            if number > 0 and number not in frames:
+                frames.append(number)
+        cards.append(OperationCard(
+            type=raw_type,
+            observed_name=observed_name,
+            visible_content=str(raw.get("visible_content") or "").strip(),
+            target=str(raw.get("target") or "").strip(),
+            relation_to_query=relation if relation in {"direct", "supporting", "unrelated", "unclear"} else "unclear",
+            suitability=suitability if suitability in {"suitable", "unsuitable", "unclear"} else "unclear",
+            reason=str(raw.get("reason") or "").strip(),
+            evidence_frames=frames,
+        ))
+    return cards
 
 
 def _normalize_route(value: Any) -> str | None:
@@ -386,9 +467,16 @@ def normalize_operation_fields(
     if QUERY_ALIGNMENT_ISSUE in issues:
         return "others", [QUERY_ALIGNMENT_ISSUE], "no"
 
+    if FACT_REVIEW_CATEGORY in issues:
+        catalog = operation_issue_catalog(allowed_issue_types)
+        independent_error = any(catalog.get(issue) == {"nok"} for issue in issues)
+        normalized_correctness = "nok" if independent_error else "others"
+
     # 新标准：仅缺少结果证据属于评测侧无法确认，主判 others；如果同一复杂
     # 任务还存在独立的可归责错误，则保留 nok，并把证据不足作为次要问题。
-    if normalized_correctness == "nok" and "未展示可验证结果" in issues:
+    if normalized_correctness == "nok" and any(
+        issue in issues for issue in ("未展示可验证结果", FACT_REVIEW_CATEGORY)
+    ):
         if allowed_issue_types:
             issue_catalog = operation_issue_catalog(allowed_issue_types)
             has_independent_nok = any(
@@ -396,7 +484,7 @@ def normalize_operation_fields(
             )
         else:
             has_independent_nok = any(
-                issue != "未展示可验证结果" for issue in issues
+                issue not in {"未展示可验证结果", FACT_REVIEW_CATEGORY} for issue in issues
             )
         if not has_independent_nok:
             normalized_correctness = "others"

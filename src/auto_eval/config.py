@@ -164,6 +164,7 @@ class OperationPolicy(BaseModel):
     evidence_rules: list[str] = Field(default_factory=list)
     correctness: dict[str, str] = Field(default_factory=dict)
     issue_types: dict[str, OperationIssueType] = Field(default_factory=dict)
+    review_category_names: list[str] = Field(default_factory=list)
     decision_order: list[str] = Field(default_factory=list)
     conditional_rules: list[str] = Field(default_factory=list)
     low_level_rules: list[str] = Field(default_factory=list)
@@ -181,6 +182,9 @@ class OperationPolicy(BaseModel):
         }
         if covered != expected:
             raise ValueError("operation_policy.issue_types 必须覆盖 ok/nok/no_support/others")
+        unknown = set(self.review_category_names) - set(self.issue_types)
+        if unknown:
+            raise ValueError(f"未知的 need_review_cate 类型：{sorted(unknown)}")
         return self
 
 
@@ -205,6 +209,16 @@ class ExpertKnowledgeCategory(BaseModel):
         return self
 
 
+class ExpertResultCard(BaseModel):
+    """任务类结果卡的可见识别线索与产品能力。"""
+
+    key: str
+    name: str
+    visual_cues: list[str] = Field(default_factory=list)
+    proves: list[str] = Field(default_factory=list)
+    does_not_prove: list[str] = Field(default_factory=list)
+
+
 class ExpertKnowledgeBase(BaseModel):
     """按类别组织的轻量专家经验库；只保存事实，不保存评测标签。"""
 
@@ -212,6 +226,7 @@ class ExpertKnowledgeBase(BaseModel):
     description: str = ""
     version: int = 1
     categories: list[ExpertKnowledgeCategory] = Field(default_factory=list)
+    result_cards: list[ExpertResultCard] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_knowledge_base(self):
@@ -226,6 +241,9 @@ class ExpertKnowledgeBase(BaseModel):
             raise ValueError("专家经验类别 key 不能重复")
         if not self.categories:
             raise ValueError("专家经验库至少需要一个类别")
+        card_keys = [card.key for card in self.result_cards]
+        if len(card_keys) != len(set(card_keys)):
+            raise ValueError("结果卡 key 不能重复")
         return self
 
 

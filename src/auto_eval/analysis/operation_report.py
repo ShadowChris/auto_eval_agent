@@ -57,11 +57,15 @@ def report_case(row: dict[str, Any]) -> dict[str, Any]:
         "issue_types": list(dict.fromkeys(
             normalize_operation_issue_types(result.get("issue_types"))
         )),
+        "need_review_cate": list(dict.fromkeys(
+            normalize_operation_issue_types(result.get("need_review_cate"))
+        )),
     }
     for field in (
         "序号", "sessionid", "context", "answer", "rationale",
         "is_low_level", "execution_routes", "rubric", "rubric_reasons",
         "task_type", "duration_s", "latency_s", "video_path",
+        "card_presence", "card_types", "card_suitability", "card_suitability_reason",
     ):
         case[field] = result.get(field, exported.get(field, ""))
     case["video_url_domain"] = safe_report_url(exported.get("video_url_domain"))

@@ -928,8 +928,17 @@
           <p class="hint operation-statistics-detail-note">上方图表支持点击问题类型查看对应 Case；完整数据也可导出 XLSX 或 HTML。</p>
         </div>
       </div>
+      <div v-if="operationStatistics.review_category_rows?.length" class="table-scroll">
+        <h3>需复核类别分布</h3>
+        <table class="grid operation-statistics-table issue-statistics-table">
+          <thead><tr><th>类别</th><th>涉及 Case 数</th><th>占有效评估比例</th></tr></thead>
+          <tbody><tr v-for="row in operationStatistics.review_category_rows" :key="'review-'+row.category">
+            <td>{{ row.category }}</td><td>{{ row.case_count }}</td><td>{{ row.rate!=null ? (row.rate*100).toFixed(2)+'%' : '—' }}</td>
+          </tr></tbody>
+        </table>
+      </div>
       <p class="operation-statistics-conclusion"><strong>结论：</strong>{{ operationStatistics.conclusion }}</p>
-      <p class="hint operation-statistics-note">口径：OK 率、Correctness 和问题类型占比均以全部有效评估 Case 为分母。同一 Case 的同一问题类型只计一次，因此问题类型占比之和可能超过 100%。</p>
+      <p class="hint operation-statistics-note">口径：OK/NOK 率及问题类型占比以 OK+NOK 为分母；no_support 不计入效果统计。Correctness 与复核类别占比以全部有效评估 Case 为分母。</p>
       </details>
     </details>
     <details class="skill-breakdown" v-if="summary && summary.by_skill && summary.by_skill.overview && summary.by_skill.overview.length" open>
@@ -1014,7 +1023,7 @@
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索 case_id、query、实验组、判定或理由">
         <select v-model="correctnessFilter" @change="resetResultPage">
-          <option value="">全部判定</option><option value="ok">完成</option><option value="nok">未完成或执行错误</option><option value="no_support">客观条件不支持</option><option value="others">其他</option>
+          <option value="">全部判定</option><option value="ok">完成</option><option value="nok">未完成或执行错误</option><option value="no_support">需复核（不计效果）</option>
         </select>
         <span class="result-count">共 {{ filteredResults.length }} 个 Case</span>
       </div>
@@ -1030,6 +1039,9 @@
               <template v-if="multiGroupResult(result,group.group_id)">
                 <div><strong>correctness：</strong>{{ multiGroupResult(result,group.group_id).correctness || '—' }}</div>
                 <div><strong>issue_types：</strong>{{ displayArray(multiGroupResult(result,group.group_id).issue_types) }}</div>
+                <div><strong>need_review_cate：</strong>{{ displayArray(multiGroupResult(result,group.group_id).need_review_cate) }}</div>
+                <div><strong>挂卡类型：</strong>{{ displayArray(multiGroupResult(result,group.group_id).card_types) }}</div>
+                <div><strong>卡片合适判断：</strong>{{ multiGroupResult(result,group.group_id).card_suitability || '—' }} {{ multiGroupResult(result,group.group_id).card_suitability_reason || '' }}</div>
                 <div v-if="(multiGroupResult(result,group.group_id).execution_routes || []).length"><strong>执行链路：</strong>{{ displayArray(multiGroupResult(result,group.group_id).execution_routes) }}</div>
                 <div><strong>rationale：</strong>{{ multiGroupResult(result,group.group_id).rationale || '—' }}</div>
                 <div class="hint">图片 {{ multiGroupResult(result,group.group_id).submitted_image_count || 0 }} 张 · 模型耗时 {{ multiGroupResult(result,group.group_id).latency_s!=null ? formatProgressElapsed(multiGroupResult(result,group.group_id).latency_s) : '—' }} · {{ multiGroupResult(result,group.group_id).evaluation_status || 'pending' }}</div>
@@ -1065,8 +1077,7 @@
           <template v-if="mode==='operation'">
             <option value="ok">完成</option>
             <option value="nok">未完成或执行错误</option>
-            <option value="no_support">客观条件不支持</option>
-            <option value="others">其他</option>
+            <option value="no_support">需复核（不计效果）</option>
           </template>
           <template v-else>
             <option value="right">正确</option>
@@ -1352,10 +1363,10 @@
       <h4>各批次 Correctness 对比</h4>
       <div class="table-scroll">
         <table class="grid auto-table">
-          <thead><tr><th>组别</th><th>数据集</th><th>原始数据量</th><th>共有有效数据量</th><th>ok</th><th>nok</th><th>no_support</th><th>others</th><th>OK率</th><th>NOK率</th><th>率分母</th></tr></thead>
+          <thead><tr><th>组别</th><th>数据集</th><th>原始数据量</th><th>共有有效数据量</th><th>ok</th><th>nok</th><th>no_support</th><th>OK率</th><th>NOK率</th><th>率分母</th></tr></thead>
           <tbody><tr v-for="group in historyComparison.groups" :key="'comparison-group-'+group.task_id">
             <td><strong>{{ group.group_label }}</strong></td><td><div>{{ group.group_name }}</div><div class="history-task-id">{{ group.task_id }}</div></td>
-            <td>{{ group.original_count }}</td><td>{{ group.common_valid_count }}</td><td>{{ comparisonCorrectnessCount(group, 'ok') }}</td><td>{{ comparisonCorrectnessCount(group, 'nok') }}</td><td>{{ comparisonCorrectnessCount(group, 'no_support') }}</td><td>{{ comparisonCorrectnessCount(group, 'others') }}</td>
+            <td>{{ group.original_count }}</td><td>{{ group.common_valid_count }}</td><td>{{ comparisonCorrectnessCount(group, 'ok') }}</td><td>{{ comparisonCorrectnessCount(group, 'nok') }}</td><td>{{ comparisonCorrectnessCount(group, 'no_support') }}</td>
             <td :class="{'comparison-best-rate': comparisonIsBestOkRate(group)}">{{ group.statistics.ok_rate!=null ? (group.statistics.ok_rate*100).toFixed(2)+'%' : '—' }}</td>
             <td>{{ group.statistics.nok_rate!=null ? (group.statistics.nok_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ group.statistics.rate_denominator }}</td>
           </tr></tbody>
@@ -1370,7 +1381,7 @@
           </tr></tbody>
         </table>
       </div>
-      <p class="hint">OK/NOK 率统一以各组 <code>ok+nok</code> 为分母；{{ historyComparison.scope==='common_decidable' ? '当前口径的“其他”仅指 NOK，所有组分母一致。' : '“其他”表示 nok、no_support 或 others。' }}OK率差值超过 ±{{ ((historyComparison.ok_rate_close_threshold ?? 0.01)*100).toFixed(2) }}pp 判定为优化或劣化，范围内判定为接近。</p>
+      <p class="hint">OK/NOK 率统一以各组 <code>ok+nok</code> 为分母；{{ historyComparison.scope==='common_decidable' ? '当前口径的“其他”仅指 NOK，所有组分母一致。' : '“其他”表示 nok 或 no_support。' }}OK率差值超过 ±{{ ((historyComparison.ok_rate_close_threshold ?? 0.01)*100).toFixed(2) }}pp 判定为优化或劣化，范围内判定为接近。</p>
       <h4>对照组与实验组 Issue Type 详细对比</h4>
       <details v-for="pair in historyComparison.pairwise" :key="'comparison-issue-detail-'+pair.target_task_id" class="history-comparison-detail">
         <summary><strong>{{ pair.baseline_label }}</strong> vs <strong>{{ pair.target_label }}</strong>｜共同有效 {{ pair.valid_pair_count }} 条</summary>

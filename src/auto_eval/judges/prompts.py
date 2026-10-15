@@ -161,6 +161,13 @@ OPERATION_SYSTEM = Template(
 {% endif %}
 你看不到参考答案。用户消息中附带按时间顺序抽取的关键帧。
 
+【判定顺序】
+{% for rule in policy.decision_order %}
+{{ loop.index }}. {{ rule }}
+{% endfor %}
+correctness 与维度分独立判断，不得只根据 total 推导 correctness。
+
+
 {% if has_query_images %}
 【原始用户输入图片】
 {% for rule in policy.query_image_rules -%}
@@ -206,21 +213,35 @@ OPERATION_SYSTEM = Template(
 - {{ key }}：{{ description }}
 {% endfor %}
 
-【判定顺序】
-{% for rule in policy.decision_order %}
-{{ loop.index }}. {{ rule }}
-{% endfor %}
-correctness 与维度分独立判断，不得只根据 total 推导 correctness。
-
 【issue_types】
-输出受控中文字符串数组，不得自行创造类型。每种类型的适用 correctness 与定义如下：
+只输出 Agent 执行或回答质量问题。不得把外部阻塞、证据不足或输入异常放在本字段。受控类型如下：
 {% for name, rule in policy.issue_types.items() %}
+{% if name not in policy.review_category_names %}
 - {{ name }}（允许 {{ rule.allowed_correctness | join("/") }}）：{{ rule.description }}
+{% endif %}
 {% endfor %}
-- nok、no_support、others 至少填写一项，第一项必须是决定整体 correctness 的主要根因；ok 无问题时输出 []。
-- 复杂任务可在后续项记录其他目标的不同根因，rationale 必须说明每项对应哪个目标；同一个目标不要同时输出根因及其必然后果。
-- 内部过程信息泄露、回复语义重复、回复内容自相矛盾、重复系统卡片等通用质量问题不能作为 nok、no_support、others 的第一项。
+- nok 的第一项必须是决定整体判定的执行主因；ok 无质量问题时输出 []。
+- 复杂任务可在后续项记录其他目标的不同执行问题，rationale 必须说明对应目标。
+- 内部过程信息泄露、回复语义重复、回复内容自相矛盾、重复系统卡片等通用质量问题不能作为 nok 的第一项。
+
+【need_review_cate】
+只输出客观阻塞、环境干扰、证据、关键事实待核验或输入异常的受控中文原因。模型仍独立区分原判 no_support 与 others，工程侧会将这两类对外合并为 no_support，不计入 ok/nok 效果统计。
+{% for name, rule in policy.issue_types.items() %}
+{% if name in policy.review_category_names %}
+- {{ name }}（允许 {{ rule.allowed_correctness | join("/") }}）：{{ rule.description }}
+{% endif %}
+{% endfor %}
+- 原判 no_support、others 至少输出一项；复杂任务整体判 nok 时，也可记录其他目标独立的复核原因。
 - 不得推测抽帧算法是否遗漏关键状态；模型收到的画面中没有结果状态时只能依据当前证据判断。
+
+【挂卡识别】
+- 输出前按上述挂卡载体资格再次复查 cards，只保留通过资格的消息内容；不得以 other 保留不合资格的浮层。
+- 仅主对话消息内的卡片/独立图片/视频进入 cards，原生APP页面与设置弹窗只作为操作证据。先按整体业务/产品形态分类，再看媒体；业务卡的封面不另记图片，明确华为视频来源才用 huawei_video，否则普通视频用 video。
+- 每张卡记录 type、observed_name、visible_content、target、relation_to_query、suitability、reason 和 evidence_frames；已知 type 使用专家经验的 key 和标准中文名，未知使用 other，observed_name 只写2–12字类别名，不写标题、人物名、日期、括号备注或理由。内容进 visible_content，判断解释只进 reason。
+- relation_to_query 为 direct/supporting/unrelated/unclear；suitability 为 suitable/unsuitable/unclear。target 对应原 query 的目标，不得改写目标来合理化错误卡；reason 说明这张卡能证明和不能证明什么，与整项 correctness 分开。
+- 没有结果卡时 cards 输出 []；目标可由设置页面等其他直接证据证明，不要求所有任务必须出卡。
+- suitable/unsuitable 均给出简短 reason；无可靠依据判合适或不合适时用 unclear，理由指出缺失依据。需要核验关键身份/真实性时不猜测，并按关键事实待核验规则决定整体结论；不是所有图片都需复核。
+
 
 【是否低级 is_low_level】
 {% for rule in policy.low_level_rules %}
@@ -231,27 +252,24 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 {% if multi_group %}
 先输出 <analysis>...</analysis>，保持紧凑并使用以下骨架：
 1. 【统一完成条件】仅根据 Query 和可信背景，列出所有组共用的生效目标与完成边界；只进入目标页面或启动仍需用户补充、录入、确认的流程，不等于结果已经生效。
-2. 【逐组目标状态】每个 group_id 分别核验 Query，并将每个目标归为已完成、等待用户、缺少前置条件、未执行、结果错误或证据不足；每项引用该组局部帧证据。不得合并组间证据。
-3. 【逐组最终映射】依据上述目标状态和既定判定顺序，分别输出 correctness、主要 issue_type 和结论。到达必须由用户本人完成的登录、授权、身份验证或敏感操作环节，不得判 ok；正确触发且仍在等待用户时判 no_support。
+2. 【逐组目标状态】每个 group_id 分别核验 Query；事实摘要按“目标与约束 | 实际业务结果及来源 | Agent 声明 | 系统步骤信息”分列。已交付正文/方案进入结果栏，完成声明只入声明栏；先验收内容约束，再检查实际执行。分别列出“已发生的问题”和“尚未交付原因”，不将缺证当错误；引用组内证据，不合并组间证据。
+3. 【逐组最终映射】先排除非结果卡、核验已交付结果，再核验阻塞；错卡不能被阻塞覆盖。各组按非空 answer 优先、否则末段最终视觉回答的来源检查回复质量，不混入步骤栏。独立输出原始 correctness、执行问题、复核原因、逐张结果卡和结论。正确触发且仍等待用户本人登录、授权、确认时判 no_support，但已交付错误优先判 nok。
 最后输出一行 JSON：顶层只能包含 results；results 必须覆盖用户消息列出的每个 group_id 且不得增加其他组。
 每组对象的字段与单组任务类结果完全一致；证据帧序号使用该组内部从 1 开始的局部帧序号：
 特别注意：rubric 对象只包含下列维度；写 total、correctness、issue_types 等组级字段前必须先用 `}` 完整关闭 rubric。
-{"results":[{% raw %}{"group_id":"<用户消息中的group_id>","task_type":"simple|complex","rubric":{% endraw %}{ {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }{% raw %},"total":<适用维度加权总分或null>,"correctness":"ok|nok|no_support|others","issue_types":["<受控中文问题类型>"],"is_low_level":"yes|no","rationale":"<完整判定理由>"}{% endraw %}{% raw %}]}{% endraw %}
+{"results":[{% raw %}{"group_id":"<用户消息中的group_id>","task_type":"simple|complex","rubric":{% endraw %}{ {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }{% raw %},"total":<适用维度加权总分或null>,"correctness":"ok|nok|no_support|others","issue_types":[],"need_review_cate":[],"cards":[{"type":"<已知key或other>","observed_name":"<可见名称>","visible_content":"<可见内容>","target":"<对应目标>","relation_to_query":"direct|supporting|unrelated|unclear","suitability":"suitable|unsuitable|unclear","reason":"<理由>","evidence_frames":[1]}],"is_low_level":"yes|no","rationale":"<完整判定理由>"}{% endraw %}{% raw %}]}{% endraw %}
 {% else %}
-先输出 <analysis>...</analysis>，再输出一行 JSON。rubric 的 key 必须严格使用维度名；不适用维度填 null：
+先输出紧凑的 <analysis> 证据摘要，再输出一行 JSON；不重复抄写规则，不展开与判定无关的过程。rubric 的 key 必须严格使用维度名；不适用维度填 null：
 <analysis>
 1. 【Query 一致性门禁】逐字记录录屏中明确属于原始用户指令的 Query，并与评测输入 Query 核对。只忽略空格、换行、标点等展示格式差异，不进行同义改写推断；任务执行面板的规划或步骤、工具调用文字、agent 回复都不能代替原始用户 Query。内容不一致，或录屏 Query 未展示完整、被遮挡、模糊、无法辨认时，直接输出 others / 录屏Query无法与输入Query一致核验，所有维度和总分填 null，并停止以下执行评判。
-2. 【原始目标】仅在一致性门禁通过后，明确 query 的原始动作目标、完成边界、任务形态、有效时间窗、条件与生效目标；不要把执行过程中的查询、候选列表或内容准备误当成原始动作已经完成。
-3. 【视觉指引扫描】按时间顺序检查全部关键帧，逐字记录登录、授权、验证、补充、选择、确认、超时或终止等清晰可辨文字并注明帧序号。普通“登录”入口、“查看”按钮、“手动操作中”状态、接管或停止控件、加载动画和“已完成”都不是用户指引；但录屏仍停留在登录、授权或身份验证页面时，“超时/终止”可以与该页面及最终反馈共同证明任务因等待用户而结束。没有则明确写“未发现”。当前画面只展示部分列表或没有出现目标对象时，不得据此推断对象不存在。
-4. 【文本指引扫描】通读完整 agent 自述，逐字摘录“无法、缺少、未提供、请提供、请选择、是否、要不要、请确认”等与继续任务直接相关的完整原句；没有则明确写“未发现”，不得意译或补写原文中没有的询问。“无法继续”“请自行操作”“相关工具已返回结果”等泛化终止语只有在同时说明具体能力限制、缺失条件或用户下一步动作时，才算阻塞证据。
-5. 【来源分类】标明上述文字属于界面用户指引、任务执行面板的步骤和流程状态，还是 agent 面向用户的自然语言回复；禁止把任务面板的步骤、“已完成”或“超时，任务终止”当成 agent 回复。
-6. 【逐目标状态】将每个生效目标归入：已完成、等待用户、缺少前置条件、静默停滞、临时异常、可归责错误或证据不足，并引用直接证据。
-7. 【阻塞资格表】若考虑等待用户或缺少前置条件，必须逐项写明：A. 用户必须补充的信息或完成的具体动作；B. 为什么这是继续原任务不可替代的条件，而不是让用户选择 agent 的搜索、导航、工具或补救策略；C. 最后有效状态中该阻塞是否仍未解除；D. 阻塞前是否已有足以独立导致失败的可见错误。只有 A/B/C 成立且 D 为否，才允许判 no_support。“需要我继续到设置中查找吗”“换关键词、换入口还是上报”等都是恢复策略询问，不是必要澄清；专家经验确认能力存在时，找不到入口也不能改判等待用户。复杂任务若在当前步骤进入真实必要的澄清并停止整条串行任务流，后续尚未开始的目标属于中断后果，不单独判遗漏。
-8. 【时序与强制映射】录屏停在登录、授权或身份验证页面，同时出现明确用户接管指引或“本次任务超时/终止”反馈时，可以归为缺少前置条件。只有普通登录入口或登录页面、三路证据均无澄清提示、agent 最终回答为空、没有等待反馈且流程静默停止时，才归为三方应用跳转中断。用户实际答复、选择、确认、完成登录授权，或后续画面进入应用内容、搜索结果、商品详情等阻塞后的执行页面时，旧阻塞立即解除；解除后必须重新评价剩余目标，即使后续执行错误或不完整。仅返回桌面或助手界面不算解除。
-9. 【结果证据专项】若目标要求播放，结果卡、详情卡、播放按钮和流程“已完成”都不证明已经播放；必须检查播放器、进度、暂停按钮或同等直接播放状态。
-10. 【最终结论】汇总 correctness、issue_types 与 is_low_level。标记回复与界面不一致前，必须引用冲突的具体 agent 自然语言回复；不要让 issue type 反向覆盖已经确认的根因。
+2. 【原始目标】列出原 query 的生效目标及关键约束，先记录验收方式（功能入口、状态变化、查询结果或内容交付），再核验参数欠指定设置入口规则；确定完成边界、任务形态、有效时间窗和条件；目标只用于整题验收，不拆独立 case，也不新增用户没要求的动作。
+3. 【视觉指引扫描】【文本指引扫描】【来源分类】按时间顺序检查全部关键帧并通读完整 agent 自述，用“目标与约束 | 实际业务结果及来源 | Agent 声明 | 系统步骤信息”四列记录决定性事实与帧号，缺失填未发现。已交付正文/方案进入结果栏，完成声明只入声明栏；正文不能证明操作已执行，但可直接验收内容约束。禁止把任务面板的步骤、“已完成”或“超时，任务终止”当成 agent 回复；区分默认、候选、提交和结果。本步只归纳事实。
+4. 【已交付结果与卡片验收】【已发生的问题】所有任务先原文对照 query 关键约束与答复对应片段，直接冲突记任务结果错误，不以参考方案或无法执行降为质量问题；不核查外部真实性。再排除非结果卡，核对保存位置、能力、对象与参数。逐项记已发生的问题，没有写无。保存位置或能力错误不属于内容未完善；准备卡不证明后续动作，错卡替代必需结果不属于“尚未交付”。问题清单与 cards 及原目标约束相符。
+5. 【阻塞资格表】【逐目标状态】【尚未交付原因】只对尚未交付目标写明 A.用户必须补充的信息或动作；B.必要性；C.最后是否仍有效；D.引用上一步已发生的问题，不重新判断或删除，没有则写无。其他目标理论上可独立执行但尚未展示结果，不算 D。只有 A/B/C 成立且 D 为否，才允许判 no_support。逐目标记录完成、阻塞、停滞、临时异常、错误或证据不足；不补造阻塞，不把未知条件当不成立。
+6. 【最终回答质量】锁定来源：非空 answer 优先，否则末段最终视觉回答。只引用该来源的泄露、重复或矛盾原句；无相关原句则不标相应 issue。步骤栏、产品/服务/协议名称本身不等于泄露；另检查重复结果卡。
+7. 【最终结论】先逐项核对本机真实状态查询是否有非自述结果来源、未完成目标是否仍受必要阻塞、实际结果是否满足原目标约束；不能用部分完成加有效阻塞判 ok，也不能用仅有文字声明和流程已完成判本机状态查询 ok。必要阻塞仍有效且没有已发生错误时，其他尚未开始目标按串行待续，判 no_support，不改判 nok。判 nok 必须引用已发生错误的具体行为、交付或冲突原句，不能只写另一个目标本来可独立完成。只根据上面的“已发生的问题”和“尚未交付原因”执行输出前反查，不能让结论与已经摘录的事实相矛盾，不再写另一套核心诉求解释；映射 correctness、issue_types、need_review_cate 与 is_low_level。rationale 写关键约束、最后有效状态、决定性证据及原因；cards 中错误交付不能与纯阻塞结论并存。
 </analysis>
-{"task_type": "simple|complex", "rubric": { {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分；全部不适用填null>, "correctness": "ok|nok|no_support|others", "issue_types": ["<受控中文问题类型>"], "is_low_level": "yes|no", "rationale": "<任务形态 + 生效目标 + 最终状态 + 整体步骤证据 + 自述一致性 + 判定理由>"}
+{"task_type": "simple|complex", "rubric": { {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分；全部不适用填null>, "correctness": "ok|nok|no_support|others", "issue_types": ["<执行或回答质量问题>"], "need_review_cate": ["<客观阻塞或复核原因>"], "cards": [{"type":"<已知key或other>","observed_name":"<可见名称>","visible_content":"<可见内容>","target":"<对应目标>","relation_to_query":"direct|supporting|unrelated|unclear","suitability":"suitable|unsuitable|unclear","reason":"<理由>","evidence_frames":[1]}], "is_low_level": "yes|no", "rationale": "<任务形态 + 生效目标 + 最终状态 + 整体步骤证据 + 自述一致性 + 判定理由>"}
 {% endif %}
 """
 )
@@ -701,12 +719,12 @@ ARBITRATOR_SYSTEM = Template(
 {% endfor %}
 - 在一切执行正确性裁决之前，先核验录屏中明确展示的原始用户 Query 与评测输入 Query。内容不一致，或录屏 Query 未展示完整、被遮挡、模糊、无法辨认时，直接判 others / 录屏Query无法与输入Query一致核验，rubric 和 total 填 null；只忽略空格、换行、标点等格式差异，不进行同义改写推断，也不得用任务执行面板或 agent 回复代替原始用户 Query。
 - 条件任务只检查实际生效的目标；已确认的可归责执行错误优先判 nok，不能被 no_support 或 others 覆盖。
-- issue_types 必须使用以下受控中文类型，不得自行创造；括号内为允许共存的 correctness：
+- issue_types 仅记录执行与回答质量问题；need_review_cate 记录客观阻塞、环境、证据或输入问题。受控类型如下，括号内为允许共存的原始 correctness：
 {% for name, rule in policy.issue_types.items() %}
   - {{ name }}（{{ rule.allowed_correctness | join("/") }}）：{{ rule.description }}
 {% endfor %}
-- nok、no_support、others 至少一项，第一项必须是决定整体 correctness 的主要根因；复杂任务的其他目标可在后续项记录不同根因并在 rationale 对应说明。
-- 通用质量问题不能作为 nok、no_support、others 的第一项，issue type 也不得反向覆盖已经确认的 correctness。
+- nok 必须有执行主因，no_support 与 others 必须有复核原因；复杂任务可同时记录其他目标的独立问题。
+- 通用质量问题不能作为 nok 的第一项，类型也不得反向覆盖已经确认的 correctness。
 - 只有简单任务且属于明显可归责基础错误的 nok 才可将 is_low_level 输出 yes。
 {% endif %}
 - 输出最终判定、各维度分、总分、置信度和理由。
@@ -724,7 +742,7 @@ ARBITRATOR_SYSTEM = Template(
 - 裁定：
 </analysis>
 {% if operation_mode %}
-{"task_type": "simple|complex", "correctness": "ok|nok|no_support|others", "rubric": { {% for d in dims %}"{{ d.name }}": <1-{{ d.scale }} 或 null>{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分或null>, "issue_types": ["<受控中文问题类型>"], "is_low_level": "yes|no", "confidence": <0-1>, "rationale": "<最终理由>"}
+{"task_type": "simple|complex", "correctness": "ok|nok|no_support|others", "rubric": { {% for d in dims %}"{{ d.name }}": <1-{{ d.scale }} 或 null>{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分或null>, "issue_types": ["<执行质量问题>"], "need_review_cate": ["<客观阻塞或复核原因>"], "cards": [{"type":"<已知key或other>","observed_name":"<可见名称>","visible_content":"<可见内容>","target":"<对应目标>","relation_to_query":"direct|supporting|unrelated|unclear","suitability":"suitable|unsuitable|unclear","reason":"<理由>","evidence_frames":[1]}], "is_low_level": "yes|no", "confidence": <0-1>, "rationale": "<最终理由>"}
 {% else %}
 {"correctness": "right|wrong|partial|unclear", "rubric": {"准确性": <1-5 或 null>, "完整性": <1-5 或 null>, "相关性": <1-5 或 null>, "有用性": <1-5 或 null>, "安全性": <1-5 或 null>}, "total": <各适用维度平均>, "confidence": <0-1>, "rationale": "<最终理由>"}
 {% endif %}

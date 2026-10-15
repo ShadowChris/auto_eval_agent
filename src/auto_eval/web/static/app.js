@@ -599,6 +599,13 @@ createApp({
         category.rules.filter((rule) => String(rule).trim()).forEach((rule) => lines.push(`- ${String(rule).trim()}`));
         lines.push("");
       });
+      if (knowledgeDraft.value.result_cards?.length) {
+        lines.push("### 结果卡片类型与能力");
+        knowledgeDraft.value.result_cards.forEach((card) => {
+          lines.push(`- ${card.name}（类型 ${card.key}）：识别线索：${(card.visual_cues || []).join("、")}；可证明：${(card.proves || []).join("、")}；不能单独证明：${(card.does_not_prove || []).join("、")}。`);
+        });
+        lines.push("");
+      }
       return lines.join("\n").trim();
     });
 
@@ -1033,6 +1040,11 @@ createApp({
           ...routeCols,
           { key: "correctness", label: "完成判定" },
           { key: "issue_types", label: "问题类型" },
+          { key: "need_review_cate", label: "需复核类别" },
+          { key: "card_presence", label: "是否挂卡" },
+          { key: "card_types", label: "卡片类型" },
+          { key: "card_suitability", label: "卡片合适判断" },
+          { key: "card_suitability_reason", label: "卡片合适判断原因" },
           { key: "is_low_level", label: "是否低级" },
           { key: "total", label: "总分" },
           ...rubricDims.value.map((d) => ({ key: `rubric:${d}`, label: d, rubricDim: d })),
@@ -2377,7 +2389,7 @@ createApp({
       if (c.key === "winner") return v === "a" ? "A" : v === "b" ? "B" : "平";
       if (c.key === "correctness") {
         if (mode.value === "operation")
-          return ({ ok: "✓ 完成", nok: "✗ 未完成或执行错误", no_support: "⊘ 客观条件不支持", others: "? 其他" }[v] || v) || "";
+          return ({ ok: "✓ 完成", nok: "✗ 未完成或执行错误", no_support: "? 需复核（不计效果）", others: "? 需复核（历史）" }[v] || v) || "";
         return ({ right: "正确", wrong: "错误", partial: "部分", unclear: "不清" }[v] || v) || "";
       }
       if (c.key === "execution_routes") {
@@ -2387,13 +2399,17 @@ createApp({
         if (r.route_status === "insufficient_evidence") return "无法判断";
         return "";
       }
-      if (["issue_types", "card_types", "card_contents", "superlink_texts"].includes(c.key)) {
+      if (["issue_types", "need_review_cate", "card_types", "card_contents", "superlink_texts"].includes(c.key)) {
         return Array.isArray(v) ? v.join("；") : (v || "");
       }
       if (c.key === "card_presence" || c.key === "superlink_presence") {
+        if (mode.value === "operation" && c.key === "card_presence")
+          return ({ present: "ok", absent: "nok", unclear: "" }[v] ?? v) || "";
         return ({ present: "是", absent: "否", unclear: "不清楚" }[v] || v) || "";
       }
       if (c.key === "card_suitability" || c.key === "superlink_suitability") {
+        if (mode.value === "operation" && c.key === "card_suitability")
+          return ({ suitable: "ok", unsuitable: "nok", unclear: "", not_applicable: "" }[v] ?? v) || "";
         return ({
           ok: "OK",
           nok: "NOK",
