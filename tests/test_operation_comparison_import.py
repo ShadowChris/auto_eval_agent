@@ -50,6 +50,7 @@ def test_import_comparison_jsonl_reads_nested_evaluation() -> None:
     assert source["summary"]["valid_count"] == 2
     assert source["task_id"] == source["source_id"]
     assert source["group_name"] == "结果.jsonl"
+    assert source["mapping"]["id"] == "id"
     assert source["mapping"]["index"] == "index"
     assert source["rows"][0]["index"] == "simple_001"
     assert source["mapping"]["correctness"] == "evaluation.correctness"
@@ -83,9 +84,9 @@ def test_import_comparison_excel_prefers_result_sheet() -> None:
 
 def test_import_comparison_csv_maps_chinese_columns_and_warnings() -> None:
     content = (
-        "index,case_id,操作意图,完成判定,问题类型\n"
-        "simple_001,c1,打开蓝牙,OK,路径冗余；重复操作\n"
-        "simple_002,c2,关闭定位,unknown,\n"
+        "id,index,case_id,操作意图,完成判定,问题类型\n"
+        "item_001,simple_001,c1,打开蓝牙,OK,路径冗余；重复操作\n"
+        "item_002,simple_002,c2,关闭定位,unknown,\n"
     ).encode("utf-8-sig")
 
     with TestClient(server.app) as client:
@@ -101,6 +102,21 @@ def test_import_comparison_csv_maps_chinese_columns_and_warnings() -> None:
     assert source["summary"]["invalid_count"] == 1
     assert source["summary"]["warning_count"] == 1
     assert source["rows"][0]["result"]["issue_types"] == ["路径冗余", "重复操作"]
+
+
+def test_import_comparison_warns_for_missing_and_duplicate_id() -> None:
+    content = (
+        "id,query,correctness\n"
+        "same,打开蓝牙,ok\n"
+        "same,关闭定位,nok\n"
+        ",设置字号,ok\n"
+    ).encode("utf-8-sig")
+
+    source = import_operation_comparison_file("实验组.csv", content)
+
+    messages = [warning["message"] for warning in source["warnings"]]
+    assert "缺少 id，将尝试按唯一 Query 兜底对齐" in messages
+    assert any("id=same 重复" in message for message in messages)
 
 
 def test_import_comparison_rejects_file_without_valid_correctness() -> None:

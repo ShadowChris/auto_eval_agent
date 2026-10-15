@@ -104,7 +104,7 @@ def test_report_rejects_unsafe_video_links(value) -> None:
 @pytest.mark.parametrize("format", ["jsonl", "csv", "xlsx"])
 def test_import_comparison_preserves_video_sites(format: str) -> None:
     record = {
-        "index": "simple_001", "query": "打开蓝牙", "correctness": "nok",
+        "id": "item_001", "index": "simple_001", "query": "打开蓝牙", "correctness": "nok",
         "issue_types": "任务结果错误",
         "video_url_domain": "https://video.example.test/one",
         "video_url_ip": "http://192.0.2.2:8000/one",
@@ -123,11 +123,11 @@ def test_import_comparison_preserves_video_sites(format: str) -> None:
     assert row["video_url_ip"] == record["video_url_ip"]
 
 
-def test_report_pairs_reuse_index_matching_and_valid_intersection() -> None:
+def test_report_pairs_reuse_id_matching_and_valid_intersection() -> None:
     left = snapshot("control")
     right = snapshot("experiment")
     third = snapshot("third")
-    # 重复 Query 仍按 index 对齐，顺序不同不串录屏。
+    # 重复 Query 仍按 id 对齐，顺序不同不串录屏。
     right["items"].reverse()
     for i, item in enumerate(right["items"]):
         right["results"][i]["query"] = item["query"]

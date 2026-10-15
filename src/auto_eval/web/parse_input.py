@@ -66,6 +66,16 @@ def _json_safe_source(value):
     return value
 
 
+def _source_data_with_flat_metadata(obj: dict) -> dict:
+    """保留原始 metadata，并将其第一层字段无前缀提升；外层字段优先。"""
+    source = _json_safe_source(obj)
+    metadata = source.get("metadata")
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            source.setdefault(str(key), value)
+    return source
+
+
 def _extract_text_context(parts: list[str]) -> tuple[list[str], str | None]:
     """提取紧跟 query 的可选 ``@context: ...`` 段，并保持旧位置格式兼容。"""
     if len(parts) < 2 or not parts[1].lower().startswith(_CONTEXT_PREFIX):
@@ -281,6 +291,6 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
         if obj.get("category"):
             item["category"] = obj["category"]
         # 原始字段仅用于历史追溯和导出，不会进入 EvalItem 或裁判 prompt。
-        item["source_data"] = _json_safe_source(obj)
+        item["source_data"] = _source_data_with_flat_metadata(obj)
         items.append(item)
     return items, errors

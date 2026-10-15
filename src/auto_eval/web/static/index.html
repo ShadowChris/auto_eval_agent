@@ -1254,7 +1254,7 @@
     <div class="comparison-page-topbar">
       <div>
         <h2>任务类对比分析</h2>
-        <p class="hint">选择已完成的任务类历史，或上传包含 correctness 的已评估 JSONL、CSV、Excel；最多 5 组，可混合使用。</p>
+        <p class="hint">选择已完成的任务类历史，或上传包含 query、correctness 的已评估 JSONL、CSV、Excel；最多 5 组，可混合使用。优先按 id 对齐并校验 Query；至少一侧缺少 id 时，使用两边均唯一的 Query 兜底。</p>
       </div>
       <div class="comparison-page-actions">
         <label class="op-upload-btn" :class="{disabled:comparisonSources.length>=5 || comparisonImporting}">
@@ -1323,7 +1323,8 @@
           <span v-if="source.summary?.sheet">工作表 {{ source.summary.sheet }}</span>
         </div>
         <div class="comparison-mapping">
-          <span>index：{{ source.mapping?.index || '未识别' }}</span>
+          <span>id（对齐键）：{{ source.mapping?.id || '未识别' }}</span>
+          <span>index（仅保留）：{{ source.mapping?.index || '未识别' }}</span>
           <span>query：{{ source.mapping?.query || '未识别' }}</span>
           <span>correctness：{{ source.mapping?.correctness || '未识别' }}</span>
           <span>issue_types：{{ source.mapping?.issue_types || '未识别（可选）' }}</span>
@@ -1348,6 +1349,26 @@
           <button @click="exportHistoryComparison('html')" :disabled="historyComparisonLoading">导出 HTML 报告</button>
         </div>
       </div>
+      <div class="summary" v-if="historyComparison.alignment_summary">
+        <span>全组共同对齐 {{ historyComparison.alignment_summary.matched || 0 }}</span>
+        <span>ID 配对 {{ historyComparison.alignment_summary.id_matched || 0 }}</span>
+        <span>Query 兜底 {{ historyComparison.alignment_summary.query_matched || 0 }}</span>
+        <span>Query 冲突 {{ historyComparison.alignment_summary.query_mismatch || 0 }}</span>
+        <span>重复 Query {{ historyComparison.alignment_summary.duplicate_query || 0 }}</span>
+        <span>ID 冲突 {{ historyComparison.alignment_summary.id_conflict || 0 }}</span>
+        <span>缺少 ID {{ historyComparison.alignment_summary.missing_id || 0 }}</span>
+        <span>重复 ID {{ historyComparison.alignment_summary.duplicate_id || 0 }}</span>
+        <span>单边 ID {{ historyComparison.alignment_summary.unmatched || 0 }}</span>
+      </div>
+      <details v-if="historyComparison.alignment_warnings?.length" class="history-comparison-detail">
+        <summary>对齐警告（{{ historyComparison.alignment_warnings.length }}）</summary>
+        <div class="comparison-warning-list">
+          <div v-for="(warning,index) in historyComparison.alignment_warnings.slice(0,50)" :key="'alignment-warning-'+index">
+            {{ warning.baseline_label }} / {{ warning.target_label }}：{{ warning.message }}
+          </div>
+          <div v-if="historyComparison.alignment_warnings.length>50">另有 {{ historyComparison.alignment_warnings.length-50 }} 条</div>
+        </div>
+      </details>
       <operation-report v-if="historyComparison.report" :report="historyComparison.report" @scope-change="changeComparisonScope"></operation-report>
       <details class="operation-statistics-legacy" :open="!historyComparison.report">
       <summary>完整对比表（含问题类型筛选、排序）</summary>

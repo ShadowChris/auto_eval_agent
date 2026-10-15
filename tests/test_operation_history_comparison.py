@@ -18,10 +18,14 @@ def _row(
     data_index: str | int | None = None,
     issue_types: list[str] | None = None,
 ) -> dict:
+    item_id = case_id or (
+        str(data_index) if data_index is not None else f"item_{position}"
+    )
     return {
         "position": position,
         "index": data_index if data_index is not None else case_id,
-        "item_id": f"item_{position}",
+        "id": item_id,
+        "item_id": item_id,
         "case_id": case_id,
         "query": query,
         "result": {
@@ -85,7 +89,7 @@ def test_decidable_scope_empty_intersection_has_no_rates():
     assert result["pairwise"][0]["ok_rate_change"] == "unavailable"
 
 
-def test_history_comparison_matches_by_index_then_unique_query() -> None:
+def test_history_comparison_matches_by_id_and_rejects_query_mismatch() -> None:
     baseline = _batch("baseline", "对照组", [
         _row(0, "打开蓝牙", "ok", case_id="c1"),
         _row(1, "关闭定位", "nok", case_id="c2", issue_types=["应执行目标未执行"]),
@@ -137,7 +141,7 @@ def test_history_comparison_matches_by_index_then_unique_query() -> None:
     assert issue["count_delta"] == -1
 
 
-def test_history_comparison_uses_index_to_align_duplicate_queries() -> None:
+def test_history_comparison_uses_id_to_align_duplicate_queries() -> None:
     baseline = _batch("baseline", "对照组", [
         _row(0, "打开蓝牙", "ok", data_index="case_1"),
         _row(1, "打开蓝牙", "nok", data_index="case_2"),
@@ -161,6 +165,90 @@ def test_history_comparison_uses_index_to_align_duplicate_queries() -> None:
         "case_1",
         "case_2",
     ]
+
+
+def test_history_comparison_excludes_same_id_with_different_query() -> None:
+    baseline = _batch("baseline", "对照组", [
+        _row(0, "关闭定位", "ok", case_id="same_id", data_index="left_index"),
+    ])
+    target = _batch("target", "实验组", [
+        _row(0, "打开定位", "ok", case_id="same_id", data_index="right_index"),
+    ])
+
+    payload = compare_operation_batches(
+        [baseline, target],
+        baseline_task_id="baseline",
+    )
+
+    assert payload["all_groups_common_matched_count"] == 0
+    assert payload["alignment_summary"]["query_mismatch"] == 1
+    warning = payload["alignment_warnings"][0]
+    assert warning["type"] == "query_mismatch"
+    assert warning["id"] == "same_id"
+    assert warning["baseline_query"] == "关闭定位"
+    assert warning["target_query"] == "打开定位"
+
+
+def test_history_comparison_falls_back_to_unique_query_without_id() -> None:
+    baseline = _batch("baseline", "对照组", [{
+        **_row(0, "相同 Query", "ok", data_index="same_index"),
+        "id": "",
+        "item_id": "",
+    }])
+    target = _batch("target", "实验组", [{
+        **_row(0, "相同 Query", "ok", data_index="same_index"),
+        "id": "",
+        "item_id": "",
+    }])
+
+    payload = compare_operation_batches(
+        [baseline, target],
+        baseline_task_id="baseline",
+    )
+
+    assert payload["all_groups_common_matched_count"] == 1
+    assert payload["alignment_summary"]["missing_id"] == 2
+    assert payload["alignment_summary"]["query_matched"] == 1
+    assert payload["pairwise"][0]["alignment_summary"]["id_matched"] == 0
+
+
+def test_history_comparison_does_not_guess_duplicate_query() -> None:
+    baseline = _batch("baseline", "对照组", [
+        {**_row(0, "重复 Query", "ok"), "id": "", "item_id": ""},
+        {**_row(1, "重复 Query", "nok"), "id": "", "item_id": ""},
+    ])
+    target = _batch("target", "实验组", [
+        {**_row(0, "重复 Query", "ok"), "id": "", "item_id": ""},
+    ])
+
+    payload = compare_operation_batches(
+        [baseline, target],
+        baseline_task_id="baseline",
+    )
+
+    assert payload["all_groups_common_matched_count"] == 0
+    assert payload["alignment_summary"]["duplicate_query"] == 1
+    assert any(
+        warning["type"] == "duplicate_query"
+        for warning in payload["alignment_warnings"]
+    )
+
+
+def test_history_comparison_does_not_use_query_when_both_ids_differ() -> None:
+    baseline = _batch("baseline", "对照组", [
+        _row(0, "相同 Query", "ok", case_id="left_id"),
+    ])
+    target = _batch("target", "实验组", [
+        _row(0, "相同 Query", "ok", case_id="right_id"),
+    ])
+
+    payload = compare_operation_batches(
+        [baseline, target],
+        baseline_task_id="baseline",
+    )
+
+    assert payload["all_groups_common_matched_count"] == 0
+    assert payload["alignment_summary"]["id_conflict"] == 1
 
 
 def test_history_comparison_uses_one_baseline_for_multiple_batches() -> None:
@@ -387,10 +475,10 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     assert "所有组共有" in detail_headers
     merged_ranges = {str(value) for value in detail_sheet.merged_cells.ranges}
     assert "A1:C1" in merged_ranges
-    assert "D1:U1" in merged_ranges
-    assert "V1:AM1" in merged_ranges
+    assert "D1:V1" in merged_ranges
+    assert "W1:AO1" in merged_ranges
     assert detail_sheet.freeze_panes == "D3"
-    assert detail_sheet.auto_filter.ref.startswith("A2:AM")
+    assert detail_sheet.auto_filter.ref.startswith("A2:AO")
     assert detail_sheet["A3"].border.left.style == "thin"
     assert detail_sheet["D3"].alignment.wrap_text is False
 

@@ -49,6 +49,7 @@ def report_case(row: dict[str, Any]) -> dict[str, Any]:
     result = row.get("result") or {}
     exported = row.get("export") or {}
     case = {
+        "id": row.get("id") or row.get("item_id", ""),
         "index": row.get("index", ""),
         "item_id": row.get("item_id", ""),
         "query": row.get("query", ""),
@@ -112,7 +113,7 @@ def build_comparison_report(
         "target_ok_count", "target_nok_count", "target_rate_denominator",
         "target_ok_rate", "target_nok_rate", "ok_rate_delta", "ok_rate_change",
         "ok_rate_change_label", "to_ok_count", "from_ok_count", "net_ok_change",
-        "issue_type_rows", "conclusion",
+        "issue_type_rows", "alignment_summary", "alignment_warnings", "conclusion",
     )
     pairs = []
     allowed_positions = set(comparison.get("common_positions") or [])
@@ -138,6 +139,8 @@ def build_comparison_report(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "baseline_task_id": comparison["baseline_task_id"],
         "all_groups_common_valid_count": comparison["all_groups_common_valid_count"],
+        "alignment_summary": comparison.get("alignment_summary") or {},
+        "alignment_warnings": comparison.get("alignment_warnings") or [],
         "ok_rate_close_threshold": comparison["ok_rate_close_threshold"],
         "groups": groups,
         "pairs": pairs,

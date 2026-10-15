@@ -494,6 +494,13 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
             str(index): list(events)[-2:]
             for index, events in progress_events.items()
         }
+    elif data.get("mode") == "operation":
+        # 兼容旧接口历史：上游可能把业务字段统一放入 metadata。
+        # history 响应只做无损投影，不修改磁盘快照。
+        items = [
+            {**item, "source_data": _source_data_for_item(item)}
+            for item in items
+        ]
     try:
         saved_done_total = int(data.get("done_total") or 0)
     except (TypeError, ValueError):
@@ -1298,7 +1305,11 @@ def _operation_export_rows(
                 item.get("query_images") or []
             ),
             "video_path": source_video_path,
-            "分享链接": source.get("分享链接", ""),
+            "分享链接": _first_export_value(
+                source.get("分享链接"),
+                source.get("share_url"),
+                source.get("share_link"),
+            ),
             "context": result.get("context") or item.get("context") or "",
             "answer": result.get("answer") or item.get("answer") or "",
             "Provider": result.get("judge_provider", ""),
@@ -1452,7 +1463,12 @@ def _operation_user_result_rows(
                 result.get("latency_s"), source.get("latency_s")
             ),
             "分享链接": _first_export_value(
-                result.get("分享链接"), source.get("分享链接")
+                result.get("分享链接"),
+                result.get("share_url"),
+                result.get("share_link"),
+                source.get("分享链接"),
+                source.get("share_url"),
+                source.get("share_link"),
             ),
             "video_path": _first_export_value(
                 result.get("video_path"), source.get("video_path")
@@ -1751,13 +1767,23 @@ def _project_relative_path(
 def _source_data_for_item(item: dict) -> dict:
     source = item.get("source_data")
     if isinstance(source, dict):
-        return dict(source)
+        normalized = dict(source)
+        metadata = normalized.get("metadata")
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                normalized.setdefault(str(key), value)
+        return normalized
     # 旧历史没有 source_data：尽量从规范化 item 回填，不暴露运行时绝对帧列表。
-    return {
+    normalized = {
         key: value
         for key, value in item.items()
         if key not in _RUNTIME_ITEM_FIELDS
     }
+    metadata = normalized.get("metadata")
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            normalized.setdefault(str(key), value)
+    return normalized
 
 
 def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
@@ -2226,7 +2252,8 @@ def operation_comparison_batch(snapshot: dict) -> dict:
         rows.append({
             "position": position,
             "index": match_index,
-            "item_id": item.get("id") or f"q{position}",
+            "id": str(item.get("id") or "").strip(),
+            "item_id": str(item.get("id") or "").strip(),
             "case_id": item.get("case_id") or source.get("case_id") or "",
             "query": item.get("query") or item.get("question") or "",
             "result": aligned_by_index.get(position) or {},
@@ -2855,6 +2882,20 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
     conclusion_lines = str(payload.get("conclusion") or "").splitlines()
     conclusion_start = len(overview) + 1
     overview.extend([[line] for line in conclusion_lines])
+    alignment = payload.get("alignment_summary") or {}
+    overview.extend([
+        [],
+        ["ID / Query 对齐诊断"],
+        ["全组共同对齐", alignment.get("matched", 0)],
+        ["ID 配对", alignment.get("id_matched", 0)],
+        ["Query 兜底", alignment.get("query_matched", 0)],
+        ["Query 冲突", alignment.get("query_mismatch", 0)],
+        ["重复 Query", alignment.get("duplicate_query", 0)],
+        ["ID 冲突", alignment.get("id_conflict", 0)],
+        ["缺少 ID", alignment.get("missing_id", 0)],
+        ["重复 ID", alignment.get("duplicate_id", 0)],
+        ["单边 ID", alignment.get("unmatched", 0)],
+    ])
 
     issue_rows = []
     for pair in payload.get("pairwise") or []:
@@ -2876,6 +2917,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             })
 
     detail_fields = (
+        "id",
         "item_id",
         "index",
         "序号",
