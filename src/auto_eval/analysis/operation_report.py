@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from .operation_comparison import _is_valid, _match_rows
+from .operation_comparison import _is_valid, _match_rows, _normalized_batches
 from .operation_statistics import normalize_operation_issue_types
 
 
@@ -96,7 +96,7 @@ def build_comparison_report(
     comparison: dict[str, Any],
 ) -> dict[str, Any]:
     """逐组仅保留一份 Case 池；配对用索引引用，避免多实验组复制整份对照数据。"""
-    by_id = {batch["task_id"]: batch for batch in batches}
+    by_id = {batch["task_id"]: batch for batch in _normalized_batches(batches)}
     baseline = by_id[comparison["baseline_task_id"]]
     baseline_rows = baseline.get("rows") or []
     groups = [
@@ -113,24 +113,29 @@ def build_comparison_report(
         "target_ok_count", "target_nok_count", "target_rate_denominator",
         "target_ok_rate", "target_nok_rate", "ok_rate_delta", "ok_rate_change",
         "ok_rate_change_label", "to_ok_count", "from_ok_count", "net_ok_change",
-        "issue_type_rows", "alignment_summary", "alignment_warnings", "conclusion",
+        "issue_type_rows", "review_category_rows", "review_valid_pair_count",
+        "baseline_review_case_count", "target_review_case_count",
+        "alignment_summary", "alignment_warnings", "conclusion",
     )
     pairs = []
     allowed_positions = set(comparison.get("common_positions") or [])
     for pair in comparison["pairwise"]:
         target_rows = by_id[pair["target_task_id"]].get("rows") or []
         matches, _ = _match_rows(baseline_rows, target_rows)
-        valid_matches = [
+        review_matches = [
             [match["baseline_index"], match["target_index"]]
             for match in matches
             if _is_valid(baseline_rows[match["baseline_index"]].get("result") or {})
             and _is_valid(target_rows[match["target_index"]].get("result") or {})
-            and (comparison.get("scope") != "common_decidable"
-                 or match["baseline_index"] in allowed_positions)
+        ]
+        valid_matches = [
+            match for match in review_matches
+            if comparison.get("scope") != "common_decidable" or match[0] in allowed_positions
         ]
         pairs.append({
             **{field: pair.get(field) for field in pair_fields},
             "matches": valid_matches,
+            "review_matches": review_matches,
         })
     return {
         "schema_version": 2,

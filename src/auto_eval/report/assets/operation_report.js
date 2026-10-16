@@ -38,11 +38,15 @@
   }
 
   function mount(root, initialPayload) {
-    let payload, sourcePayload, baseline, target, pair, issueRows = [], pairs = [], generation = "", resizeFrame = 0;
+    let payload, sourcePayload, baseline, target, pair, categoryRows = [], pairs = [], reviewPairs = [], generation = "", resizeFrame = 0;
     let disposed = false, observedWidth = 0, observer;
-    const state = { scope: "", group: "", view: "bar", issue: "", change: "all", correctness: "", page: 1, size: 10, open: null, query: "", sort: "default" };
+    const state = { scope: "", group: "", categoryTab: "issue", view: "bar", issue: "", review: "", change: "all", correctness: "", page: 1, size: 10, open: null, query: "", sort: "default" };
     const $ = name => root.querySelector(`[data-or="${name}"]`);
     const comparison = () => payload.kind === "comparison";
+    const reviewing = () => state.categoryTab === "review";
+    const categoryAttr = () => reviewing() ? "data-review" : "data-issue";
+    const selectedCategory = () => reviewing() ? state.review : state.issue;
+    const categoryLabel = () => reviewing() ? "需复核类别" : "效果问题";
     const decidable = () => comparison() && state.scope === "common_decidable";
     const toOkLabel = () => decidable() ? "NOK→OK" : "其他→OK";
     const fromOkLabel = () => decidable() ? "OK→NOK" : "OK→其他";
@@ -61,20 +65,24 @@
         pair = payload.pairs.find(p => p.target_task_id === state.group) || payload.pairs[0];
         state.group = pair?.target_task_id || "";
         target = payload.groups.find(g => g.task_id === state.group);
-        issueRows = (pair?.issue_type_rows || []).map(r => ({
-          name: r.issue_type, count: r.target_count, rate: r.target_rate,
+        categoryRows = (reviewing() ? pair?.review_category_rows || [] : pair?.issue_type_rows || []).map(r => ({
+          name: reviewing() ? r.category : r.issue_type, count: r.target_count, rate: r.target_rate,
           baselineCount: r.baseline_count, baselineRate: r.baseline_rate,
           countDelta: r.count_delta, rateDelta: r.rate_delta,
         }));
         pairs = (pair?.matches || []).map(([left, right]) => ({ left: baseline.cases[left], right: target.cases[right], key: right }));
+        reviewPairs = (pair?.review_matches || pair?.matches || []).map(([left, right]) => ({ left: baseline.cases[left], right: target.cases[right], key: right }));
       } else {
-        issueRows = (payload.statistics.issue_type_rows || []).map(r => ({ name: r.issue_type, count: r.case_count, rate: r.rate }));
+        categoryRows = (reviewing() ? payload.statistics.review_category_rows || [] : payload.statistics.issue_type_rows || []).map(r => ({ name: reviewing() ? r.category : r.issue_type, count: r.case_count, rate: r.rate }));
         pairs = payload.cases.map((right, key) => ({ right, key }));
+        reviewPairs = pairs;
       }
-      if (state.issue && !issueRows.some(r => r.name === state.issue)) state.issue = "";
+      if (selectedCategory() && !categoryRows.some(r => r.name === selectedCategory())) {
+        if (reviewing()) state.review = ""; else state.issue = "";
+      }
     }
-    function topIssues(limit) {
-      return [...issueRows].sort((a, b) =>
+    function topCategories(limit) {
+      return [...categoryRows].sort((a, b) =>
         (comparison() ? (b.count + b.baselineCount) - (a.count + a.baselineCount) : b.count - a.count)
         || a.name.localeCompare(b.name, "zh-CN")).slice(0, limit);
     }
@@ -87,6 +95,17 @@
       const warnings = payload.alignment_warnings || [];
       return `<details class="or-panel"><summary>对齐诊断：共同命中 ${esc(summary.matched || 0)} 条；ID 配对 ${esc(summary.id_matched || 0)}；Query 兜底 ${esc(summary.query_matched || 0)}；Query 冲突 ${esc(summary.query_mismatch || 0)}；重复 Query ${esc(summary.duplicate_query || 0)}；ID 冲突 ${esc(summary.id_conflict || 0)}；缺少 ID ${esc(summary.missing_id || 0)}；重复 ID ${esc(summary.duplicate_id || 0)}；单边 ID ${esc(summary.unmatched || 0)}</summary>${warnings.length ? `<div class="or-hint">${warnings.slice(0, 50).map(warning => `<p>${esc(warning.baseline_label || "对照组")} / ${esc(warning.target_label || "实验组")}：${esc(warning.message || "对齐异常")}</p>`).join("")}${warnings.length > 50 ? `<p>另有 ${warnings.length - 50} 条</p>` : ""}</div>` : '<p class="or-muted or-hint">没有对齐警告。</p>'}</details>`;
     }
+    function categoryNote() {
+      if (reviewing()) {
+        return (comparison()
+          ? `双方共同有效 ${pair.review_valid_pair_count ?? "—"} 条（含 no_support），不随效果口径过滤；对照组带复核类别 ${pair.baseline_review_case_count ?? 0} 条，实验组 ${pair.target_review_case_count ?? 0} 条。`
+          : `带复核类别 ${payload.statistics.review_case_count} 条；占比分母为全部有效评估 ${payload.statistics.valid_count} 条。`)
+          + "按 Case 去重，可多标签；复核原因增减不代表效果优化/劣化。点击类别查看 Case。";
+      }
+      return comparison()
+        ? `两组共同有效 ${pair.valid_pair_count} 条中，效果问题占比分母分别为对照组 OK+NOK ${pair.baseline_rate_denominator} 条、实验组 OK+NOK ${pair.target_rate_denominator} 条。差值=实验组−对照组；问题减少不等于整体结果改善。`
+        : `占比分母为 ${payload.statistics.rate_denominator} 条有效 OK+NOK。点击问题类型查看 Case。`;
+    }
     function render() {
       if (!payload || disposed) return;
       const isCompare = comparison(), stats = payload.statistics;
@@ -97,7 +116,7 @@
         <div class="or-heading"><div><div class="or-name">${isCompare ? "任务类对比报告" : "任务类统计报告"}</div><div class="or-muted">${subtitle}</div></div>
           ${isCompare ? `<label>实验组 <select data-or="group">${payload.pairs.map(p => `<option value="${esc(p.target_task_id)}" ${p.target_task_id === state.group ? "selected" : ""}>${esc(p.target_label)}</option>`).join("")}</select></label>` : ""}
         </div>
-        ${isCompare && sourcePayload.views ? `<div class="or-controls"><span class="or-muted">统计口径</span><div class="or-segments">${[["all_valid", "全部有效判定"], ["common_decidable", "均为 OK/NOK"]].map(([value, label]) => `<button data-scope="${value}" aria-pressed="${state.scope === value}">${label}</button>`).join("")}</div></div><p class="or-muted">${decidable() ? "所有选中组均为 OK/NOK 的共同 Case；任一组为 no_support、失败或缺失时整条排除。全部统计及 Case 明细使用同一集合。" : "全组分布使用全组共同有效 Case，组间对比使用双方共同有效 Case；有效判定包含 ok、nok、no_support。"}</p>` : ""}
+        ${isCompare && sourcePayload.views ? `<div class="or-controls"><span class="or-muted">效果统计口径</span><div class="or-segments">${[["all_valid", "全部有效判定"], ["common_decidable", "均为 OK/NOK"]].map(([value, label]) => `<button data-scope="${value}" aria-pressed="${state.scope === value}">${label}</button>`).join("")}</div></div><p class="or-muted">${decidable() ? "效果指标使用所有选中组均为 OK/NOK 的共同 Case；任一组为 no_support、失败或缺失时从效果集合排除。复核类别另用双方共同有效集（含 no_support）。" : "全组判定分布使用全组共同有效 Case，组间对比使用双方共同有效 Case；效果问题在其中分别以各组 OK+NOK 为分母。"}</p>` : ""}
         ${alignmentPanel()}
         <div class="or-summary">${isCompare
           ? metric("实验组 OK / NOK 率", `${pct(pair.target_ok_rate)} / ${pct(pair.target_nok_rate)}`, `对照组 ${pct(pair.baseline_ok_rate)} / ${pct(pair.baseline_nok_rate)} · 分母为各组 OK+NOK`)
@@ -111,33 +130,33 @@
         }</div>
         <div class="or-panels">
           <section class="or-panel"><div class="or-panel-heading"><h3>Correctness 分布</h3><span class="or-muted">${isCompare ? "全组共同有效集合" : "全部有效评估"}</span></div><div data-or="correctness" class="or-chart"></div></section>
-          <section class="or-panel"><div class="or-panel-heading"><h3>${isCompare ? "问题类型对比" : "Top 问题类型"}</h3><div class="or-segments">${["bar", "radar", "table"].map((v, i) => `<button data-view="${v}" aria-pressed="${state.view === v}">${["柱状图", "雷达图", "表格"][i]}</button>`).join("")}</div></div>
+          <section class="or-panel"><div class="or-panel-heading"><h3>${categoryLabel()}${isCompare ? "对比" : "分布"}</h3><div class="or-segments" role="tablist" aria-label="类别统计切换">${[["issue", "效果问题"], ["review", "需复核类别"]].map(([value, label]) => `<button role="tab" data-category-tab="${value}" aria-selected="${state.categoryTab === value}">${label}</button>`).join("")}</div></div>
+            <div class="or-segments or-controls">${["bar", "radar", "table"].map((v, i) => `<button data-view="${v}" aria-pressed="${state.view === v}">${["柱状图", "雷达图", "表格"][i]}</button>`).join("")}</div>
             ${isCompare ? `<div class="or-controls"><label class="or-muted">排序 <select data-or="sort">
               ${[["default", "频次差值升序"], ["count", "实验组频次降序"], ["baseline", "对照组频次降序"], ["absolute", "差值绝对值降序"]].map(([v, n]) => `<option value="${v}" ${state.sort === v ? "selected" : ""}>${n}</option>`).join("")}
             </select></label><span class="or-muted">雷达图固定使用两组合计 Top 6</span></div>` : ""}
             <div data-or="issues" class="or-chart"></div><p data-or="issue-note" class="or-muted or-hint"></p>
           </section>
         </div>
-        ${!isCompare && stats.review_category_rows?.length ? `<details class="or-panel"><summary>需复核类别（${stats.review_case_count} 条）</summary><div class="or-table-wrap">${table(["类别", "涉及 Case", "占有效评估比例"], stats.review_category_rows.map(r => [esc(r.category), r.case_count, pct(r.rate)]))}</div></details>` : ""}
         <p data-or="conclusion" class="or-conclusion"></p>
         ${isCompare ? `<details class="or-panel"><summary>相对对照组的共同 Case 对比</summary><div class="or-table-wrap">${table(
           ["实验组", "共同有效", "对照组OK率", "实验组OK率", toOkLabel(), fromOkLabel(), "OK净变化", "OK率差值", "结论"],
           payload.pairs.map(p => [esc(p.target_label), p.valid_pair_count, pct(p.baseline_ok_rate), pct(p.target_ok_rate), p.to_ok_count, p.from_ok_count, signed(p.net_ok_change), signed(p.ok_rate_delta, true), esc(p.ok_rate_change_label)]),
         )}</div></details>` : ""}
         <section class="or-panel">
-          <div class="or-panel-heading"><h3>问题 Case</h3><span data-or="case-count" class="or-muted" aria-live="polite"></span></div>
+          <div class="or-panel-heading"><h3>${reviewing() ? "需复核 Case" : "问题 Case"}</h3><span data-or="case-count" class="or-muted" aria-live="polite"></span></div>
           <div data-or="tags" class="or-tags"></div>
           <div class="or-controls">
-            <select data-or="issue" aria-label="问题类型"><option value="">全部问题类型 / 全部有效 Case</option>${topIssues(issueRows.length).map(r => `<option value="${esc(r.name)}" ${state.issue === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>
-            <select data-or="correctness-filter" aria-label="${isCompare ? "实验组判定筛选" : "判定筛选"}"><option value="">${isCompare ? "全部实验组判定" : "全部判定"}</option>${(decidable() ? TYPES.slice(0, 2) : TYPES).map(t => `<option value="${t}" ${state.correctness === t ? "selected" : ""}>${t}</option>`).join("")}</select>
+            <select data-or="${reviewing() ? "review" : "issue"}" aria-label="${reviewing() ? "需复核类别" : "问题类型"}"><option value="">全部${categoryLabel()} / 全部有效 Case</option>${topCategories(categoryRows.length).map(r => `<option value="${esc(r.name)}" ${selectedCategory() === r.name ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>
+            <select data-or="correctness-filter" aria-label="${isCompare ? "实验组判定筛选" : "判定筛选"}"><option value="">${isCompare ? "全部实验组判定" : "全部判定"}</option>${(decidable() && !reviewing() ? TYPES.slice(0, 2) : TYPES).map(t => `<option value="${t}" ${state.correctness === t ? "selected" : ""}>${t}</option>`).join("")}</select>
             <input data-or="search" type="search" placeholder="搜索 id / query / 理由" aria-label="搜索 Case" value="${esc(state.query)}">
           </div>
-          ${isCompare ? `<div class="or-segments or-controls">${[["all", "全部命中"], ["new", "新增问题"], ["resolved", "问题消失"], ["persistent", "持续存在"]].map(([v, n]) => `<button data-change="${v}" aria-pressed="${state.change === v}">${n}</button>`).join("")}</div>` : ""}
+          ${isCompare ? `<div class="or-segments or-controls">${(reviewing() ? [["all", "全部命中"], ["new", "新增复核原因"], ["resolved", "不再标记"], ["persistent", "仍需复核"]] : [["all", "全部命中"], ["new", "新增问题"], ["resolved", "问题消失"], ["persistent", "持续存在"]]).map(([v, n]) => `<button data-change="${v}" aria-pressed="${state.change === v}">${n}</button>`).join("")}</div>` : ""}
           <div data-or="cases" class="or-table-wrap"></div>
           <div class="or-footer"><span class="or-muted">原录屏：域名站 / IP站；空链接不显示，访问需相应网络权限。</span><div class="or-row"><label class="or-muted">每页 <select data-or="size">${[10, 20, 50].map(n => `<option value="${n}" ${state.size === n ? "selected" : ""}>${n} 条</option>`).join("")}</select></label><button data-page="-1">上一页</button><span data-or="page-label" class="or-muted"></span><button data-page="1">下一页</button></div></div>
         </section>
         <p class="or-muted">报告快照 ${esc(payload.generated_at)} · 问题类型按 Case 去重，以 OK+NOK 为分母。${isCompare ? (decidable() ? "NOK→OK 和 OK→NOK 仅统计同一共同集合中的判定变化。" : "NOK 表示判定 nok；其他→OK 中的“其他”包括 nok、no_support。") : ""} 未打包媒体或模型原始调用。</p>`;
-      drawCorrectness(); drawIssues(); renderCases(); renderConclusion();
+      drawCorrectness(); drawCategories(); renderCases(); renderConclusion();
     }
     function drawCorrectness() {
       let body = "";
@@ -160,8 +179,8 @@
       }
       $("correctness").innerHTML = body;
     }
-    function orderedIssues() {
-      return [...issueRows].sort((a, b) => {
+    function orderedCategories() {
+      return [...categoryRows].sort((a, b) => {
         const d = !comparison() || state.sort === "count" ? b.count - a.count
           : state.sort === "baseline" ? b.baselineCount - a.baselineCount
           : state.sort === "absolute" ? Math.abs(b.countDelta) - Math.abs(a.countDelta)
@@ -169,17 +188,18 @@
         return d || a.name.localeCompare(b.name, "zh-CN");
       });
     }
-    function drawIssues() {
-      const rows = orderedIssues(), isCompare = comparison();
+    function drawCategories() {
+      const rows = orderedCategories(), isCompare = comparison();
+      const categoryDeltaClass = value => reviewing() ? "" : deltaClass(value);
       if (!rows.length) {
-        $("issues").innerHTML = '<div class="or-empty">暂无问题类型</div>';
-        $("issue-note").textContent = "仅统计有效评估 Case 的问题类型。"; return;
+        $("issues").innerHTML = `<div class="or-empty">暂无${categoryLabel()}</div>`;
+        $("issue-note").textContent = categoryNote(); return;
       }
       if (state.view === "table") {
         $("issues").innerHTML = `<div class="or-table-wrap">${table(
-          isCompare ? ["问题类型", "对照频次", "对照占比", "实验频次", "实验占比", "频次差值", "占比差值"] : ["问题类型", "Case 数", "占比"],
-          rows.map(r => [`<button class="or-link" data-issue="${esc(r.name)}">${esc(r.name)}</button>`,
-            ...(isCompare ? [r.baselineCount, pct(r.baselineRate), r.count, pct(r.rate), `<span class="${deltaClass(r.countDelta)}">${signed(r.countDelta)}</span>`, `<span class="${deltaClass(r.rateDelta)}">${signed(r.rateDelta, true)}</span>`] : [r.count, pct(r.rate)])]),
+          isCompare ? [categoryLabel(), "对照频次", "对照占比", "实验频次", "实验占比", "频次差值", "占比差值"] : [categoryLabel(), "Case 数", "占比"],
+          rows.map(r => [`<button class="or-link" ${categoryAttr()}="${esc(r.name)}">${esc(r.name)}</button>`,
+            ...(isCompare ? [r.baselineCount, pct(r.baselineRate), r.count, pct(r.rate), `<span class="${categoryDeltaClass(r.countDelta)}">${signed(r.countDelta)}</span>`, `<span class="${categoryDeltaClass(r.rateDelta)}">${signed(r.rateDelta, true)}</span>`] : [r.count, pct(r.rate)])]),
         )}</div>`;
       } else if (state.view === "radar") {
         $("issues").innerHTML = '<div data-or="radar" class="or-radar"></div>';
@@ -187,32 +207,30 @@
       } else {
         const max = Math.max(...rows.map(r => isCompare ? Math.abs(r.rateDelta || 0) : r.count), 1e-6);
         const scrollClass = rows.length > 10 ? " or-issue-scroll" : "";
-        $("issues").innerHTML = `<div class="or-muted">${isCompare ? "← 问题减少 · 占比差值（pp） · 问题增加 →" : "频次降序 · 数量 / 占比"}</div><div class="or-issue-rows${scrollClass}">${rows.map(r => {
+        $("issues").innerHTML = `<div class="or-muted">${isCompare ? (reviewing() ? "← 复核占比降低 · 差值（pp） · 复核占比升高 →" : "← 问题减少 · 占比差值（pp） · 问题增加 →") : "频次降序 · 数量 / 占比"}</div><div class="or-issue-rows${scrollClass}">${rows.map(r => {
           const d = r.rateDelta || 0;
-          const style = isCompare ? `left:${d < 0 ? 50 - Math.abs(d) / max * 50 : 50}%;width:${Math.abs(d) / max * 50}%;background:var(${d < 0 ? "--or-green" : "--or-red"})` : `width:${r.count / max * 100}%`;
-          return `<button class="or-issue-bar" data-issue="${esc(r.name)}" aria-pressed="${state.issue === r.name}"><span>${esc(r.name)}</span><span class="or-track ${isCompare ? "or-delta" : ""}"><span class="or-fill" style="${style}"></span></span><span class="or-value ${isCompare ? deltaClass(d) : ""}">${isCompare ? signed(r.rateDelta, true) : `${r.count} · ${pct(r.rate)}`}</span></button>`;
+          const color = reviewing() ? (d < 0 ? "--or-slate" : "--or-blue") : (d < 0 ? "--or-green" : "--or-red");
+          const style = isCompare ? `left:${d < 0 ? 50 - Math.abs(d) / max * 50 : 50}%;width:${Math.abs(d) / max * 50}%;background:var(${color})` : `width:${r.count / max * 100}%`;
+          return `<button class="or-issue-bar" ${categoryAttr()}="${esc(r.name)}" aria-pressed="${selectedCategory() === r.name}"><span>${esc(r.name)}</span><span class="or-track ${isCompare ? "or-delta" : ""}"><span class="or-fill" style="${style}"></span></span><span class="or-value ${isCompare ? categoryDeltaClass(d) : ""}">${isCompare ? signed(r.rateDelta, true) : `${r.count} · ${pct(r.rate)}`}</span></button>`;
         }).join("")}</div>${rows.length > 10 ? `<p class="or-muted">共 ${rows.length} 类，柱状图已完整展示，可在图内滚动查看。</p>` : ""}`;
       }
-      $("issue-note").textContent = state.view === "radar"
-        ? "相同轴、相同刻度；越向外问题越常见，面积不代表整体能力。下方可选择问题查看 Case。"
-        : isCompare ? `两组共同有效 ${pair.valid_pair_count} 条。差值=实验组−对照组；问题减少不等于整体结果改善。`
-          : `占比分母为 ${payload.statistics.valid_count} 条有效评估。点击问题类型查看 Case。`;
+      $("issue-note").textContent = categoryNote() + (state.view === "radar" ? " 相同轴、相同刻度；越向外类别越常见，面积不代表整体能力。" : "");
     }
     function drawRadar() {
       const el = $("radar"); if (!el) return;
-      const axes = topIssues(6);
-      if (axes.length < 3) { el.innerHTML = '<div class="or-empty">不足 3 类问题，不绘制雷达图；请查看柱状图或表格。</div>'; return; }
+      const axes = topCategories(6);
+      if (axes.length < 3) { el.innerHTML = '<div class="or-empty">不足 3 个类别，不绘制雷达图；请查看柱状图或表格。</div>'; return; }
       const width = Math.max(230, el.clientWidth), height = 280, cx = width / 2, cy = 124, radius = Math.min(78, width * .22);
       const maximum = Math.max(.05, Math.ceil(Math.max(...axes.flatMap(r => [r.rate || 0, r.baselineRate || 0])) * 20) / 20);
       const point = (i, r) => [cx + Math.sin(i * Math.PI * 2 / axes.length) * r, cy - Math.cos(i * Math.PI * 2 / axes.length) * r];
       const points = ratio => axes.map((_, i) => point(i, radius * ratio).join(",")).join(" ");
-      let svg = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Top 问题类型占比雷达图"><title>各轴问题占比；越向外越多</title>`;
+      let svg = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${categoryLabel()}占比雷达图"><title>各轴类别占比；越向外越多</title>`;
       for (const ratio of [1 / 3, 2 / 3, 1]) svg += `<polygon points="${points(ratio)}" fill="none" stroke="var(--or-line)"/>`;
       axes.forEach((r, i) => {
         const p = point(i, radius), l = point(i, radius + 16), label = r.name.length > 10 ? r.name.slice(0, 9) + "…" : r.name;
         const parts = width < 420 || label.length > 7 ? [label.slice(0, 4), label.slice(4)] : [label];
         const sin = Math.sin(i * Math.PI * 2 / axes.length);
-        svg += `<line x1="${cx}" y1="${cy}" x2="${p[0]}" y2="${p[1]}" stroke="var(--or-line)"/><text class="or-radar-label" data-issue="${esc(r.name)}" x="${l[0]}" y="${l[1]}" text-anchor="${Math.abs(sin) < .1 ? "middle" : sin > 0 ? "start" : "end"}" dominant-baseline="middle"><title>${esc(r.name)}</title>${parts.filter(Boolean).map((part, j) => `<tspan x="${l[0]}" dy="${j ? 15 : i === 0 && parts.length > 1 ? -10 : 0}">${esc(part)}</tspan>`).join("")}</text>`;
+        svg += `<line x1="${cx}" y1="${cy}" x2="${p[0]}" y2="${p[1]}" stroke="var(--or-line)"/><text class="or-radar-label" ${categoryAttr()}="${esc(r.name)}" x="${l[0]}" y="${l[1]}" text-anchor="${Math.abs(sin) < .1 ? "middle" : sin > 0 ? "start" : "end"}" dominant-baseline="middle"><title>${esc(r.name)}</title>${parts.filter(Boolean).map((part, j) => `<tspan x="${l[0]}" dy="${j ? 15 : i === 0 && parts.length > 1 ? -10 : 0}">${esc(part)}</tspan>`).join("")}</text>`;
       });
       for (const field of comparison() ? ["baselineRate", "rate"] : ["rate"]) {
         const color = field === "rate" ? "var(--or-blue)" : "var(--or-slate)";
@@ -227,40 +245,47 @@
       el.innerHTML = svg + `<div class="or-legend">${comparison() ? '<span><i class="or-dot" style="background:var(--or-slate)"></i>对照组</span>' : ""}<span><i class="or-dot" style="background:var(--or-blue)"></i>${comparison() ? esc(target.group_label) : "当前批次"}</span><span>各轴范围 0–${(maximum * 100).toFixed(1)}%</span></div>`;
     }
     function changes(row) {
-      const left = new Set(row.left?.issue_types || []), right = new Set(row.right.issue_types || []);
+      const left = new Set(caseCategories(row.left)), right = new Set(caseCategories(row.right));
       return { new: [...right].filter(n => !left.has(n)), resolved: [...left].filter(n => !right.has(n)), persistent: [...right].filter(n => left.has(n)) };
+    }
+    function caseCategories(row) {
+      if (reviewing()) return row?.need_review_cate || [];
+      return ["ok", "nok"].includes(row?.correctness) ? row.issue_types || [] : [];
     }
     function filteredCases() {
       const keyword = state.query.trim().toLocaleLowerCase();
-      return pairs.filter(row => {
+      return (reviewing() ? reviewPairs : pairs).filter(row => {
         const { left, right } = row;
         if (state.correctness && right.correctness !== state.correctness) return false;
-        const leftHit = left?.issue_types.includes(state.issue), rightHit = right.issue_types.includes(state.issue);
+        if (state.review && !(right.need_review_cate || []).includes(state.review) && !(left?.need_review_cate || []).includes(state.review)) return false;
+        const leftHit = caseCategories(left).includes(state.issue), rightHit = caseCategories(right).includes(state.issue);
         if (state.issue && !rightHit && !(comparison() && leftHit)) return false;
         if (comparison() && state.change !== "all") {
           const list = changes(row)[state.change];
-          if (state.issue ? !list.includes(state.issue) : !list.length) return false;
+          if (selectedCategory() ? !list.includes(selectedCategory()) : !list.length) return false;
         }
         return !keyword || [right.id, right.item_id, right.query, right.rationale, left?.rationale].map(text).join(" ").toLocaleLowerCase().includes(keyword);
       });
     }
     function detail(row, group) {
-      const fields = [["sessionid", row.sessionid], ["context", row.context], ["answer", row.answer], ["rationale", row.rationale], ["全部问题类型", row.issue_types.join("；") || "无"], ["是否低级", row.is_low_level], ["执行链路", row.execution_routes], ["维度分数", row.rubric], ["维度理由", row.rubric_reasons], ["评估耗时（秒）", row.duration_s || row.latency_s], ["video_path", row.video_path]];
+      const fields = [["sessionid", row.sessionid], ["context", row.context], ["answer", row.answer], ["rationale", row.rationale], ["效果问题类型", row.issue_types.join("；") || "无"], ["需复核类别", (row.need_review_cate || []).join("；") || "无"], ["是否低级", row.is_low_level], ["执行链路", row.execution_routes], ["维度分数", row.rubric], ["维度理由", row.rubric_reasons], ["评估耗时（秒）", row.duration_s || row.latency_s], ["video_path", row.video_path]];
       return `<div><strong>${esc(group)} · ${verdict(row)}</strong>${fields.filter(([, v]) => v !== "" && v != null).map(([k, v]) => `<p><span class="or-muted">${k}</span><br>${esc(text(v))}</p>`).join("")}<p><span class="or-muted">原录屏</span>${videoLinks(row)}</p>${link(row.share_url, "分享链接")}</div>`;
     }
     function renderCases() {
       const rows = filteredCases(), pageCount = Math.max(1, Math.ceil(rows.length / state.size));
       state.page = Math.max(1, Math.min(state.page, pageCount));
-      $("case-count").textContent = `${state.issue || "全部有效 Case"} · ${rows.length} 条${comparison() ? "（两组共同有效集合）" : ""}`;
-      $("tags").innerHTML = topIssues(5).map(r => `<button data-issue="${esc(r.name)}" aria-pressed="${state.issue === r.name}">${esc(r.name)}</button>`).join("");
-      const heads = ["id", "query", ...(comparison() ? ["对照组", "实验组", "问题变化", "对照组录屏", "实验组录屏"] : ["判定", "理由摘要", "原录屏"]), "详情"];
+      $("case-count").textContent = `${selectedCategory() || "全部有效 Case"} · ${rows.length} 条${comparison() ? (reviewing() ? "（复核：双方全部共同有效集合）" : "（当前效果统计集合）") : ""}`;
+      $("tags").innerHTML = topCategories(5).map(r => `<button ${categoryAttr()}="${esc(r.name)}" aria-pressed="${selectedCategory() === r.name}">${esc(r.name)}</button>`).join("");
+      const heads = ["id", "query", ...(comparison() ? ["对照组", "实验组", reviewing() ? "复核类别变化" : "问题变化", "对照组录屏", "实验组录屏"] : ["判定", "理由摘要", "原录屏"]), "详情"];
       let body = `<table class="or-case-table"><thead><tr>${heads.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>`;
       for (const row of rows.slice((state.page - 1) * state.size, state.page * state.size)) {
         const { right, left } = row;
         let change = "";
         if (comparison()) {
           const all = changes(row);
-          change = [["new", "新增问题"], ["resolved", "问题消失"], ["persistent", "持续存在"]].filter(([k]) => state.issue ? all[k].includes(state.issue) : all[k].length).map(([, v]) => v).join(" / ") || "无问题变化";
+          const selected = selectedCategory();
+          const labels = reviewing() ? [["new", "新增复核原因"], ["resolved", "不再标记"], ["persistent", "仍需复核"]] : [["new", "新增问题"], ["resolved", "问题消失"], ["persistent", "持续存在"]];
+          change = labels.filter(([k]) => selected ? all[k].includes(selected) : all[k].length).map(([, v]) => v).join(" / ") || "无类别变化";
         }
         body += `<tr><td class="or-id">${esc(right.id || right.item_id)}</td><td class="or-query">${esc(right.query)}</td>${comparison()
           ? `<td>${verdict(left)}</td><td>${verdict(right)}</td><td>${esc(change)}</td><td>${videoLinks(left)}</td><td>${videoLinks(right)}</td>`
@@ -282,30 +307,39 @@
     }
     function resetCasePage() { state.page = 1; state.open = null; }
     function onClick(event) {
+      const review = event.target.closest("[data-review]");
+      if (review && root.contains(review)) {
+        state.categoryTab = "review"; state.review = review.dataset.review; state.issue = ""; state.correctness = ""; state.change = "all"; resetCasePage(); prepare(); render(); return;
+      }
       const issue = event.target.closest("[data-issue]");
       if (issue && root.contains(issue)) {
-        state.issue = issue.dataset.issue; state.correctness = ""; resetCasePage(); render(); return;
+        state.categoryTab = "issue"; state.issue = issue.dataset.issue; state.review = ""; state.correctness = ""; state.change = "all"; resetCasePage(); prepare(); render(); return;
       }
       const b = event.target.closest("button");
       if (!b || !root.contains(b)) return;
-      if (b.dataset.scope) {
-        state.scope = b.dataset.scope; state.issue = ""; state.correctness = "";
+      if (b.dataset.categoryTab && ["issue", "review"].includes(b.dataset.categoryTab)) {
+        state.categoryTab = b.dataset.categoryTab; state.issue = ""; state.review = "";
+        state.correctness = ""; state.query = ""; state.change = "all"; resetCasePage(); prepare(); render();
+      }
+      else if (b.dataset.scope) {
+        state.scope = b.dataset.scope; state.issue = ""; state.review = ""; state.correctness = "";
         state.change = "all"; resetCasePage(); prepare(); render();
         root.dispatchEvent(new CustomEvent("report-scope-change", { bubbles: true, detail: state.scope }));
       }
       else if (b.dataset.view) { state.view = b.dataset.view; render(); }
       else if (b.dataset.change) { state.change = b.dataset.change; resetCasePage(); render(); }
-      else if ("correctness" in b.dataset) { state.correctness = b.dataset.correctness; state.issue = ""; state.change = "all"; resetCasePage(); render(); }
+      else if ("correctness" in b.dataset) { state.categoryTab = "issue"; state.correctness = b.dataset.correctness; state.issue = ""; state.review = ""; state.change = "all"; resetCasePage(); prepare(); render(); }
       else if ("detail" in b.dataset) { const key = Number(b.dataset.detail); state.open = state.open === key ? null : key; renderCases(); }
       else if ("page" in b.dataset) { state.page += Number(b.dataset.page); state.open = null; renderCases(); }
     }
     function onChange(event) {
       const name = event.target.dataset.or;
-      if (name === "group") { state.group = event.target.value; state.change = "all"; state.correctness = ""; resetCasePage(); prepare(); render(); }
-      if (name === "issue") { state.issue = event.target.value; resetCasePage(); render(); }
+      if (name === "group") { state.group = event.target.value; state.review = ""; state.change = "all"; state.correctness = ""; resetCasePage(); prepare(); render(); }
+      if (name === "issue") { state.categoryTab = "issue"; state.issue = event.target.value; state.review = ""; resetCasePage(); prepare(); render(); }
+      if (name === "review") { state.categoryTab = "review"; state.review = event.target.value; state.issue = ""; state.correctness = ""; state.change = "all"; resetCasePage(); prepare(); render(); }
       if (name === "correctness-filter") { state.correctness = event.target.value; resetCasePage(); renderCases(); }
       if (name === "size") { state.size = Number(event.target.value); resetCasePage(); renderCases(); }
-      if (name === "sort") { state.sort = event.target.value; drawIssues(); }
+      if (name === "sort") { state.sort = event.target.value; drawCategories(); }
     }
     function onInput(event) {
       if (event.target.dataset.or === "search") { state.query = event.target.value; resetCasePage(); renderCases(); }
@@ -313,15 +347,15 @@
     function update(next) {
       if (disposed) return;
       sourcePayload = payload = next;
-      if (!payload) { root.replaceChildren(); baseline = target = pair = null; pairs = []; issueRows = []; return; }
+      if (!payload) { root.replaceChildren(); baseline = target = pair = null; pairs = []; reviewPairs = []; categoryRows = []; return; }
       const nextGeneration = `${payload.kind}:${payload.task_id || payload.baseline_task_id}`;
       state.scope = next.scope || "all_valid";
       if (generation !== nextGeneration) {
-        Object.assign(state, { scope: next.scope || "all_valid", group: "", issue: "", change: "all", correctness: "", query: "", page: 1, open: null });
+        Object.assign(state, { scope: next.scope || "all_valid", group: "", categoryTab: "issue", issue: "", review: "", change: "all", correctness: "", query: "", page: 1, open: null });
       }
       generation = nextGeneration;
       prepare();
-      if (!state.issue && !state.correctness) state.issue = topIssues(1)[0]?.name || "";
+      if (!reviewing() && !state.issue && !state.correctness) state.issue = topCategories(1)[0]?.name || "";
       render();
     }
     root.addEventListener("click", onClick);
@@ -343,7 +377,7 @@
       destroy() {
         disposed = true; observer?.disconnect(); global.cancelAnimationFrame(resizeFrame);
         root.removeEventListener("click", onClick); root.removeEventListener("change", onChange); root.removeEventListener("input", onInput);
-        root.replaceChildren(); sourcePayload = payload = baseline = target = pair = null; pairs = []; issueRows = [];
+        root.replaceChildren(); sourcePayload = payload = baseline = target = pair = null; pairs = []; reviewPairs = []; categoryRows = [];
       },
     };
   }
