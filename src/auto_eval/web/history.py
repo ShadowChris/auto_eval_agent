@@ -2273,7 +2273,7 @@ def operation_comparison_batch(snapshot: dict) -> dict:
 
 
 def _operation_statistics_export_rows(snapshot: dict) -> list[dict]:
-    """统计分布的结构化行；XLSX 会将其渲染为同 Sheet 内的两张表。"""
+    """统计分布的结构化行；XLSX 分别展示判定、效果问题与复核类别。"""
     statistics = operation_statistics_payload(snapshot)["statistics"]
     rows: list[dict] = []
     for row in statistics["correctness_rows"]:
@@ -2288,7 +2288,7 @@ def _operation_statistics_export_rows(snapshot: dict) -> list[dict]:
             "统计类型": "Issue Type 分布",
             "类别": row["issue_type"],
             "频次": row["case_count"],
-            "占有效评估比例": row["rate"],
+            "占 OK+NOK 比例": row["rate"],
         })
     for row in statistics["review_category_rows"]:
         rows.append({
@@ -2811,10 +2811,11 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         [
             "统计口径",
             ("当前口径：所有选中组均为 OK/NOK 的共同 Case；全部统计使用同一集合；"
-             "OK/NOK 率和 Issue Type 占比的分母均为该集合大小；逐题横向对比保留原始并集供追溯。"
+             "OK/NOK 率和 Issue Type 占比的分母均为该集合大小；复核类别独立使用双方共同有效集（含 no_support）；逐题横向对比保留原始并集供追溯。"
              if decidable else
             "Correctness 仅统计所有选中批次共有且均有效的 Case；"
-            "Issue Type 使用对应两组共同有效 Case；"
+            "Issue Type 在对应两组共同有效 Case 中，分别以各组 OK+NOK 为分母；"
+            "复核类别以双方共同有效 Case（含 no_support）为分母，增减不表示效果优化/劣化；"
             "相对对照组表按每个实验组与对照组各自的共同有效 Case 计算；"
             "OK/NOK 率统一以各组 ok+nok 为分母；"
             "“其他”表示 nok 或 no_support。"),
@@ -2907,6 +2908,8 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
                 "实验组": pair.get("target_label") or "",
                 "共同有效Case": pair.get("valid_pair_count", 0),
                 "Issue Type": row.get("issue_type") or "",
+                "对照组效果分母": pair.get("baseline_rate_denominator", 0),
+                "实验组效果分母": pair.get("target_rate_denominator", 0),
                 "对照组频次": row.get("baseline_count", 0),
                 "对照组占比": row.get("baseline_rate"),
                 "实验组频次": row.get("target_count", 0),
@@ -2917,6 +2920,29 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
                     if row.get("rate_delta") is not None else None
                 ),
             })
+
+    review_rows = []
+    for pair in payload.get("pairwise") or []:
+        for row in pair.get("review_category_rows") or []:
+            review_rows.append({
+                "对比关系": f"{pair.get('baseline_label') or '对照组'} / {pair.get('target_label') or '实验组'}",
+                "共同有效Case": pair.get("review_valid_pair_count", 0),
+                "需复核类别": row["category"],
+                "对照组频次": row["baseline_count"],
+                "对照组占比": row["baseline_rate"],
+                "实验组频次": row["target_count"],
+                "实验组占比": row["target_rate"],
+                "频次差值": row["count_delta"],
+                "占比差值（pp）": row["rate_delta"] * 100 if row["rate_delta"] is not None else None,
+            })
+    review_headers = (
+        "对比关系", "共同有效Case", "需复核类别", "对照组频次", "对照组占比",
+        "实验组频次", "实验组占比", "频次差值", "占比差值（pp）",
+    )
+    review_styles = {
+        (index, column): 10
+        for index in range(2, len(review_rows) + 2) for column in (5, 7)
+    }
 
     detail_fields = (
         "id",
@@ -2931,6 +2957,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         "is_low_level",
         "correctness",
         "issue_types",
+        "need_review_cate",
         "execution_routes",
         "链路类型",
         "rationale",
@@ -3020,6 +3047,12 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             hide_gridlines=True,
         )),
         ("Issue Type对比", _operation_comparison_issue_sheet(issue_rows)),
+        ("需复核类别对比", _matrix_sheet_xml(
+            [list(review_headers)] + [[row[key] for key in review_headers] for row in review_rows],
+            widths=[30, 18, 32, 16, 16, 16, 16, 18, 20],
+            row_styles={1: 2}, cell_styles=review_styles, freeze_rows=1,
+            auto_filter_ref=f"A1:I{len(review_rows) + 1}", hide_gridlines=True,
+        )),
         ("逐题横向对比", _operation_comparison_detail_sheet(
             groups,
             union_rows,
@@ -3042,6 +3075,8 @@ def _operation_comparison_issue_sheet(rows: list[dict[str, Any]]) -> str:
         "实验组占比",
         "频次差值",
         "占比差值",
+        "对照组效果分母",
+        "实验组效果分母",
     ]
     table = [headers] + [[row.get(header) for header in headers] for row in rows]
     cell_styles: dict[tuple[int, int], int] = {}
@@ -3056,11 +3091,11 @@ def _operation_comparison_issue_sheet(rows: list[dict[str, Any]]) -> str:
         cell_styles[(row_index, 10)] = 11 if rate_delta < 0 else 12 if rate_delta > 0 else 13
     return _matrix_sheet_xml(
         table,
-        widths=[22, 14, 16, 36, 14, 14, 14, 14, 20, 20],
+        widths=[22, 14, 16, 36, 14, 14, 14, 14, 20, 20, 20, 20],
         row_styles={1: 2},
         cell_styles=cell_styles,
         row_heights={1: 32},
-        auto_filter_ref=(f"A1:J{len(table)}" if headers else None),
+        auto_filter_ref=(f"A1:L{len(table)}" if headers else None),
         freeze_rows=1,
         freeze_columns=4,
         hide_gridlines=True,
@@ -3089,6 +3124,7 @@ def _operation_comparison_detail_sheet(
         "is_low_level": 14,
         "correctness": 14,
         "issue_types": 24,
+        "need_review_cate": 28,
         "execution_routes": 28,
         "链路类型": 18,
         "rationale": 44,

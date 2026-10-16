@@ -1328,6 +1328,7 @@
           <span>query：{{ source.mapping?.query || '未识别' }}</span>
           <span>correctness：{{ source.mapping?.correctness || '未识别' }}</span>
           <span>issue_types：{{ source.mapping?.issue_types || '未识别（可选）' }}</span>
+          <span>need_review_cate：{{ source.mapping?.need_review_cate || '未识别（可选）' }}</span>
         </div>
         <details v-if="source.warnings?.length"><summary>导入警告（{{ source.warnings.length }}）</summary><div class="comparison-warning-list"><div v-for="warning in source.warnings.slice(0,20)" :key="source.source_id+'-'+warning.row+'-'+warning.message">第 {{ warning.row }} 行：{{ warning.message }}</div><div v-if="source.warnings.length>20">另有 {{ source.warnings.length-20 }} 条</div></div></details>
       </article>
@@ -1424,10 +1425,19 @@
           <tr v-for="row in comparisonIssueRows(pair)" :key="pair.target_task_id+'-'+row.issue_type"><td>{{ row.issue_type }}</td><td>{{ row.baseline_count }}</td><td>{{ row.baseline_rate!=null ? (row.baseline_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ row.target_count }}</td><td>{{ row.target_rate!=null ? (row.target_rate*100).toFixed(2)+'%' : '—' }}</td><td class="comparison-delta-cell" :class="comparisonIssueDeltaClass(row.count_delta)" :style="comparisonIssueDeltaStyle(pair,row.count_delta,'count_delta')">{{ comparisonIssueDeltaText(row.count_delta) }}</td><td class="comparison-delta-cell" :class="comparisonIssueDeltaClass(row.rate_delta)" :style="comparisonIssueDeltaStyle(pair,row.rate_delta,'rate_delta')">{{ comparisonIssueDeltaText(row.rate_delta,'rate') }}</td></tr>
           <tr v-if="!comparisonIssueRows(pair).length"><td colspan="7" class="hint">没有符合筛选条件的 Issue Type</td></tr>
         </tbody></table></div>
-        <p class="hint">差值=实验组-对照组；负值表示问题减少（优化），正值表示问题增加（劣化）。占比分母为双方共同且均评估有效的 Case；同一 Case 可包含多个 Issue Type。</p>
+        <p class="hint">差值=实验组-对照组；负值表示效果问题减少，正值表示增加。双方共同有效 {{ pair.valid_pair_count }} 条中，占比分母分别为对照组 OK+NOK {{ pair.baseline_rate_denominator }} 条、实验组 OK+NOK {{ pair.target_rate_denominator }} 条；同一 Case 可包含多个 Issue Type。</p>
+      </details>
+      <h4>需复核类别对比（独立于效果统计）</h4>
+      <details v-for="pair in historyComparison.pairwise" :key="'comparison-review-'+pair.target_task_id" class="history-comparison-detail">
+        <summary>{{ pair.target_label }} 相对 {{ pair.baseline_label }}：需复核类别</summary>
+        <p class="hint">分母为双方共同有效 {{ pair.review_valid_pair_count }} 条（含 no_support），不随效果口径过滤；对照组带复核类别 {{ pair.baseline_review_case_count }} 条，实验组 {{ pair.target_review_case_count }} 条。增减不代表效果优化/劣化。</p>
+        <div class="table-scroll"><table class="grid auto-table"><thead><tr><th>需复核类别</th><th>对照频次</th><th>对照占比</th><th>实验频次</th><th>实验占比</th><th>频次差值</th><th>占比差值</th></tr></thead><tbody>
+          <tr v-for="row in pair.review_category_rows || []" :key="pair.target_task_id+'-review-'+row.category"><td>{{ row.category }}</td><td>{{ row.baseline_count }}</td><td>{{ row.baseline_rate!=null ? (row.baseline_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ row.target_count }}</td><td>{{ row.target_rate!=null ? (row.target_rate*100).toFixed(2)+'%' : '—' }}</td><td>{{ comparisonIssueDeltaText(row.count_delta) }}</td><td>{{ comparisonIssueDeltaText(row.rate_delta,'rate') }}</td></tr>
+          <tr v-if="!pair.review_category_rows?.length"><td colspan="7" class="hint">暂无需复核类别</td></tr>
+        </tbody></table></div>
       </details>
       <div class="history-comparison-conclusion">
-        <p>{{ historyComparison.scope==='common_decidable' ? '全部指标使用所有选中组均为 OK/NOK 的共同 Case。' : '各组 Correctness 使用所有结果集共有且均有效的 Case；Issue Type 使用对应实验组与对照组的共同有效 Case。' }}</p>
+        <p>{{ historyComparison.scope==='common_decidable' ? '效果指标使用所有选中组均为 OK/NOK 的共同 Case。' : '各组 Correctness 使用全组共同有效集；Issue Type 在双方共同有效集内分别以各组 OK+NOK 为分母。' }}复核类别独立使用双方共同有效集（含 no_support）。</p>
         <p v-for="pair in historyComparison.pairwise" :key="'comparison-conclusion-'+pair.target_task_id"><strong>{{ pair.target_label }}</strong> 相对 <strong>{{ pair.baseline_label }}</strong>：<strong class="comparison-rate-change" :class="comparisonPairChangeClass(pair)">{{ comparisonPairChangeLabel(pair) }}</strong>，共同有效 {{ pair.valid_pair_count }} 条，OK率相差 {{ pair.ok_rate_delta!=null ? (pair.ok_rate_delta>=0?'+':'')+(pair.ok_rate_delta*100).toFixed(2)+'pp' : '—' }}；{{ historyComparison.scope==='common_decidable' ? 'NOK→OK' : '其他→OK' }} {{ pair.to_ok_count }} 条，{{ historyComparison.scope==='common_decidable' ? 'OK→NOK' : 'OK→其他' }} {{ pair.from_ok_count }} 条，OK净变化 {{ pair.net_ok_change>0?'+':'' }}{{ pair.net_ok_change }} 条。</p>
       </div>
       </details>

@@ -3,7 +3,7 @@
 .operation-report button,.operation-report select,.operation-report input{font:inherit;border:1px solid var(--or-line);background:var(--or-panel);color:var(--or-ink);border-radius:6px;padding:6px 10px;max-width:100%;min-width:0}
 .operation-report button,.operation-report select{cursor:pointer}
 .operation-report button:hover{background:var(--or-soft)}
-.operation-report button[aria-pressed=true]{color:var(--or-blue);background:var(--or-soft);border-color:var(--or-blue)}
+.operation-report button[aria-pressed=true],.operation-report button[role=tab][aria-selected=true]{color:var(--or-blue);background:var(--or-soft);border-color:var(--or-blue)}
 .operation-report button:disabled{opacity:.4;cursor:default}
 .operation-report :is(button,input,select,a):focus-visible{outline:2px solid var(--or-blue);outline-offset:2px}
 .operation-report h3{margin:0;font-size:14px;color:var(--or-ink)}

@@ -29,7 +29,8 @@ def compare_operation_batches(
 
     全组分布只统计所有批次共有且均有效的 Case；相对对照组指标则使用
     对照组与各实验组各自的共同有效 Case。common_decidable 口径下，
-    所有指标统一使用全组均为 OK/NOK 的交集。导出时可额外生成逐题并集。
+    效果指标统一使用全组均为 OK/NOK 的交集；复核类别独立使用双方
+    共同有效集（含 no_support）。导出时可额外生成逐题并集。
     """
     if scope not in {"all_valid", "common_decidable"}:
         raise ValueError("未知的对比统计口径")
@@ -41,20 +42,7 @@ def compare_operation_batches(
     if baseline_task_id not in task_ids:
         raise ValueError("对照组必须包含在已选历史批次中")
 
-    # 旧结果只在内存中的分析副本上转换；历史快照本身不改写。
-    batches = copy.deepcopy(batches)
-    for batch in batches:
-        for row in batch.get("rows") or []:
-            result = row.get("result") or {}
-            if result.get("correctness") == "others":
-                result["judge_correctness"] = "others"
-                result["correctness"] = "no_support"
-            issues = normalize_operation_issue_types(result.get("issue_types"))
-            effect, review = split_operation_issue_fields(issues, LEGACY_REVIEW_CATEGORIES)
-            result["issue_types"] = effect
-            result["need_review_cate"] = list(dict.fromkeys([
-                *normalize_operation_issue_types(result.get("need_review_cate")), *review,
-            ]))
+    batches = _normalized_batches(batches)
 
     _assign_names(batches)
     baseline = next(
@@ -144,9 +132,17 @@ def compare_operation_batches(
         )
     ]
     if scope == "common_decidable":
+        all_valid_pairs = {pair["target_task_id"]: pair for pair in pairwise}
         pairwise = []
         for target in ordered[1:]:
             pair = _compare_pair(baseline, target, allowed_positions=set(valid_common_positions))
+            # 复核原因始终看双方共同有效集，不随效果口径排除 no_support。
+            full_pair = all_valid_pairs[target["task_id"]]
+            for key in (
+                "review_category_rows", "review_valid_pair_count",
+                "baseline_review_case_count", "target_review_case_count",
+            ):
+                pair[key] = full_pair[key]
             pair.pop("_match_map")
             pairwise.append(pair)
     common_results: dict[str, list[dict[str, Any]]] = {}
@@ -190,6 +186,26 @@ def compare_operation_batches(
     if include_union_rows:
         payload["union_rows"] = _build_union_rows(ordered)
     return payload
+
+
+def _normalized_batches(batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """统计和报告共享旧字段兼容，只修改内存副本。"""
+    batches = copy.deepcopy(batches)
+    for batch in batches:
+        for row in batch.get("rows") or []:
+            result = row.get("result") or {}
+            if result.get("correctness") == "others":
+                result["judge_correctness"] = "others"
+                result["correctness"] = "no_support"
+            effect, review = split_operation_issue_fields(
+                normalize_operation_issue_types(result.get("issue_types")),
+                LEGACY_REVIEW_CATEGORIES,
+            )
+            result["issue_types"] = effect
+            result["need_review_cate"] = list(dict.fromkeys([
+                *normalize_operation_issue_types(result.get("need_review_cate")), *review,
+            ]))
+    return batches
 
 
 def _assign_names(batches: list[dict[str, Any]]) -> None:
@@ -485,6 +501,29 @@ def _paired_issue_rows(
     return rows
 
 
+def _paired_review_rows(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    counts = [Counter(), Counter()]
+    for pair in pairs:
+        for side, result in enumerate(pair):
+            counts[side].update(set(normalize_operation_issue_types(result.get("need_review_cate"))))
+    denominator = len(pairs)
+    rows = []
+    for category in counts[0].keys() | counts[1].keys():
+        baseline, target = counts[0][category], counts[1][category]
+        rows.append({
+            "category": category,
+            "baseline_count": baseline,
+            "target_count": target,
+            "baseline_rate": round(baseline / denominator, 4) if denominator else None,
+            "target_rate": round(target / denominator, 4) if denominator else None,
+            "count_delta": target - baseline,
+            "rate_delta": round((target - baseline) / denominator, 4) if denominator else None,
+        })
+    return sorted(rows, key=lambda row: (-row["target_count"], row["category"]))
+
+
 def _compare_pair(
     baseline: dict[str, Any], target: dict[str, Any],
     *, allowed_positions: set[int] | None = None,
@@ -608,6 +647,10 @@ def _compare_pair(
             [left for left, _ in valid_pairs],
             [right for _, right in valid_pairs],
         ),
+        "review_category_rows": _paired_review_rows(valid_pairs),
+        "review_valid_pair_count": denominator,
+        "baseline_review_case_count": sum(bool(left.get("need_review_cate")) for left, _ in valid_pairs),
+        "target_review_case_count": sum(bool(right.get("need_review_cate")) for _, right in valid_pairs),
         "alignment_summary": {
             "matched": len(matches),
             "id_matched": sum(
