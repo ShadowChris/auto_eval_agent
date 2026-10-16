@@ -20,8 +20,16 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from ..analysis.operation_statistics import summarize_operation_results
-from ..judges.operation_fields import map_legacy_operation_result
+from ..analysis.operation_statistics import (
+    normalize_operation_issue_types,
+    summarize_operation_results,
+)
+from ..judges.operation_fields import (
+    LEGACY_REVIEW_CATEGORIES,
+    clean_operation_card_name,
+    map_legacy_operation_result,
+    split_operation_issue_fields,
+)
 from ..judges.trace_storage import (
     configured_legacy_trace_path,
     configured_task_trace_path,
@@ -844,19 +852,45 @@ def _with_operation_compat(data: dict) -> dict:
     """按读取时兼容旧任务判定，不修改磁盘上的历史快照。"""
     if data.get("mode") != "operation":
         return data
-    normalized = dict(data)
-    results: list[dict] = []
-    for original in data.get("results") or []:
+
+    def normalize_row(original: dict) -> dict:
         row = dict(original)
+        if "card_presence" in row:
+            row["card_presence"] = {
+                "ok": "是", "nok": "否", "present": "是", "absent": "否", "unclear": "",
+            }.get(row["card_presence"], row["card_presence"])
+        if "card_suitability" in row:
+            row["card_suitability"] = {"suitable": "ok", "unsuitable": "nok", "unclear": "", "not_applicable": ""}.get(row["card_suitability"], row["card_suitability"])
+        if isinstance(row.get("card_types"), list):
+            row["card_types"] = list(dict.fromkeys(clean_operation_card_name(name) for name in row["card_types"]))
         if "correctness" in row and "issue_types" not in row:
             correctness, issue_types = map_legacy_operation_result(
-                row.get("correctness"),
-                row.get("error_type"),
+                row.get("correctness"), row.get("error_type")
             )
             row["correctness"] = correctness
             row["issue_types"] = issue_types
             row.pop("error_type", None)
-        results.append(row)
+        if row.get("correctness") in {"ok", "nok", "no_support", "others"}:
+            raw_correctness = row.get("judge_correctness") or row["correctness"]
+            row["judge_correctness"] = raw_correctness
+            row["correctness"] = "no_support" if raw_correctness == "others" else row["correctness"]
+            effect, review = split_operation_issue_fields(
+                normalize_operation_issue_types(row.get("issue_types")),
+                LEGACY_REVIEW_CATEGORIES,
+            )
+            row["issue_types"] = effect
+            row["need_review_cate"] = list(dict.fromkeys([
+                *normalize_operation_issue_types(row.get("need_review_cate")), *review,
+            ]))
+        if isinstance(row.get("group_results"), list):
+            row["group_results"] = [
+                normalize_row(group) if isinstance(group, dict) else group
+                for group in row["group_results"]
+            ]
+        return row
+
+    normalized = dict(data)
+    results = [normalize_row(original) for original in data.get("results") or []]
     normalized["results"] = results
     summary = dict(data.get("summary") or {})
     current_results = [
@@ -878,8 +912,13 @@ def _with_operation_compat(data: dict) -> dict:
         summary.pop("right_count", None)
         summary.pop("accuracy", None)
         summary["ok_count"] = ok_count
-        summary["problem_count"] = len(judged) - ok_count
-        summary["completion_rate"] = round(ok_count / len(judged), 3)
+        decisive_count = sum(row.get("correctness") in {"ok", "nok"} for row in judged)
+        summary["problem_count"] = sum(row.get("correctness") == "nok" for row in judged)
+        summary["completion_rate"] = round(ok_count / decisive_count, 3) if decisive_count else None
+        summary["correctness_dist"] = {
+            status: sum(row.get("correctness") == status for row in judged)
+            for status in ("ok", "nok", "no_support")
+        }
     if (data.get("options") or {}).get("operation_layout") != "multi_group":
         summary["operation_statistics"] = summarize_operation_results(
             current_results,
@@ -946,6 +985,13 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
                 ),
                 **rows,
             }
+    if mode == "operation":
+        for name in ("评估结果", "逐题结果"):
+            if name in rows:
+                rows[name] = [
+                    {_OPERATION_CARD_LABELS.get(key, key): value for key, value in row.items()}
+                    for row in rows[name]
+                ]
     frame_rows = _frame_manifest_rows(
         snapshot,
         include_original_video=mode != "operation",
@@ -1108,7 +1154,14 @@ _OPERATION_EXPORT_COLUMNS = (
     "route_evidence",
     "route_rationale",
     "correctness",
+    "judge_correctness",
     "issue_types",
+    "need_review_cate",
+    "card_presence",
+    "card_types",
+    "card_suitability",
+    "card_suitability_reason",
+    "cards",
     "is_low_level",
     "total",
     "维度_操作完成度",
@@ -1125,6 +1178,13 @@ _OPERATION_EXPORT_COLUMNS = (
 )
 
 # 普通任务类 Excel 的首个 Sheet：只呈现用户最常用的输入、媒体与评估字段。
+_OPERATION_CARD_LABELS = {
+    "card_presence": "是否挂卡",
+    "card_types": "卡片类型",
+    "card_suitability": "卡片合适判断",
+    "card_suitability_reason": "卡片合适判断原因",
+}
+
 _OPERATION_USER_RESULT_COLUMNS = (
     "数据集序号",
     "item_id",
@@ -1138,6 +1198,11 @@ _OPERATION_USER_RESULT_COLUMNS = (
     "answer",
     "correctness",
     "issue_types",
+    "need_review_cate",
+    "card_presence",
+    "card_types",
+    "card_suitability",
+    "card_suitability_reason",
     "rationale",
     "is_low_level",
     "total",
@@ -1262,7 +1327,14 @@ def _operation_export_rows(
             "route_evidence": result.get("route_evidence", ""),
             "route_rationale": result.get("route_rationale", ""),
             "correctness": result.get("correctness", ""),
+            "judge_correctness": result.get("judge_correctness", ""),
             "issue_types": result.get("issue_types", ""),
+            "need_review_cate": result.get("need_review_cate", ""),
+            "card_presence": result.get("card_presence", ""),
+            "card_types": result.get("card_types", ""),
+            "card_suitability": result.get("card_suitability", ""),
+            "card_suitability_reason": result.get("card_suitability_reason", ""),
+            "cards": result.get("cards", []),
             "is_low_level": result.get("is_low_level", ""),
             "total": result.get("total", ""),
             "维度_操作完成度": rubric.get("操作完成度", ""),
@@ -1277,9 +1349,11 @@ def _operation_export_rows(
             "error": result.get("error", ""),
             "video_prepare_warnings": result.get("video_prepare_warnings", ""),
         }
-        for key in ("execution_routes", "issue_types", "video_prepare_warnings"):
+        for key in ("execution_routes", "issue_types", "need_review_cate", "card_types", "video_prepare_warnings"):
             if isinstance(values[key], list):
                 values[key] = "；".join(str(value) for value in values[key])
+        if isinstance(values["cards"], (list, dict)):
+            values["cards"] = json.dumps(values["cards"], ensure_ascii=False)
         if isinstance(values["route_evidence"], (list, dict)):
             values["route_evidence"] = json.dumps(
                 values["route_evidence"], ensure_ascii=False
@@ -1318,6 +1392,15 @@ def _operation_user_result_rows(
         if isinstance(issue_types, (list, tuple, set)):
             issue_types = "；".join(str(value) for value in issue_types)
 
+        review_categories = _first_export_value(
+            result.get("need_review_cate"), source.get("need_review_cate")
+        )
+        if isinstance(review_categories, (list, tuple, set)):
+            review_categories = "；".join(str(value) for value in review_categories)
+        card_types = _first_export_value(result.get("card_types"), source.get("card_types"))
+        if isinstance(card_types, (list, tuple, set)):
+            card_types = "；".join(str(value) for value in card_types)
+
         values = {
             "数据集序号": result.get("数据集序号", position + 1),
             "item_id": result.get("item_id") or item.get("id") or f"q{position}",
@@ -1354,6 +1437,11 @@ def _operation_user_result_rows(
                 result.get("correctness"), source.get("correctness")
             ),
             "issue_types": issue_types,
+            "need_review_cate": review_categories,
+            "card_presence": _first_export_value(result.get("card_presence"), source.get("card_presence")),
+            "card_types": card_types,
+            "card_suitability": _first_export_value(result.get("card_suitability"), source.get("card_suitability")),
+            "card_suitability_reason": _first_export_value(result.get("card_suitability_reason"), source.get("card_suitability_reason")),
             "rationale": _first_export_value(
                 result.get("rationale"), source.get("rationale")
             ),
@@ -1522,6 +1610,17 @@ def _operation_multi_comparison_rows(snapshot: dict) -> list[dict]:
                 "；".join(str(value) for value in issue_types)
                 if isinstance(issue_types, list) else issue_types
             )
+            review_categories = result.get("need_review_cate") or []
+            row[f"{prefix}need_review_cate"] = (
+                "；".join(str(value) for value in review_categories)
+                if isinstance(review_categories, list) else review_categories
+            )
+            row[f"{prefix}是否挂卡"] = result.get("card_presence") or ""
+            row[f"{prefix}卡片类型"] = "；".join(
+                str(value) for value in (result.get("card_types") or [])
+            )
+            row[f"{prefix}卡片合适判断"] = result.get("card_suitability") or ""
+            row[f"{prefix}卡片合适判断原因"] = result.get("card_suitability_reason") or ""
             routes = result.get("execution_routes") or []
             row[f"{prefix}执行链路"] = _format_operation_routes_zh(routes)
             row[f"{prefix}rationale"] = result.get("rationale") or ""
@@ -2174,7 +2273,7 @@ def operation_comparison_batch(snapshot: dict) -> dict:
 
 
 def _operation_statistics_export_rows(snapshot: dict) -> list[dict]:
-    """统计分布的结构化行；XLSX 会将其渲染为同 Sheet 内的两张表。"""
+    """统计分布的结构化行；XLSX 分别展示判定、效果问题与复核类别。"""
     statistics = operation_statistics_payload(snapshot)["statistics"]
     rows: list[dict] = []
     for row in statistics["correctness_rows"]:
@@ -2188,6 +2287,13 @@ def _operation_statistics_export_rows(snapshot: dict) -> list[dict]:
         rows.append({
             "统计类型": "Issue Type 分布",
             "类别": row["issue_type"],
+            "频次": row["case_count"],
+            "占 OK+NOK 比例": row["rate"],
+        })
+    for row in statistics["review_category_rows"]:
+        rows.append({
+            "统计类型": "需复核类别分布",
+            "类别": row["category"],
             "频次": row["case_count"],
             "占有效评估比例": row["rate"],
         })
@@ -2237,7 +2343,7 @@ def _operation_statistics_sheet(payload: dict) -> tuple[list[list[Any]], set[int
     matrix.extend([
         [],
         ["Issue Type 分布"],
-        ["问题类型", "涉及 Case 数", "占有效 Case 比例"],
+        ["问题类型", "涉及 Case 数", "占 OK+NOK 比例"],
     ])
     if statistics["issue_type_rows"]:
         for row in statistics["issue_type_rows"]:
@@ -2248,13 +2354,19 @@ def _operation_statistics_sheet(payload: dict) -> tuple[list[list[Any]], set[int
             ])
     else:
         matrix.append(["暂无问题类型", 0, "0.00%"])
+    matrix.extend([[], ["需复核类别分布"], ["类别", "涉及 Case 数", "占有效评估比例"]])
+    if statistics["review_category_rows"]:
+        for row in statistics["review_category_rows"]:
+            matrix.append([row["category"], row["case_count"], _display_percent(row["rate"])])
+    else:
+        matrix.append(["暂无复核类别", 0, "0.00%"])
     matrix.extend([
         [],
         ["统计结论"],
         [statistics["conclusion"]],
         [],
         ["口径说明"],
-        ["OK 率、Correctness 和问题类型占比均以具有合法 correctness 的全部有效评估 Case 为分母。同一 Case 的同一问题类型只计一次，问题类型占比之和可能超过 100%。"],
+        ["OK/NOK 率和问题类型占比以 OK+NOK 为分母；Correctness 与需复核类别占比以全部有效评估 Case 为分母。同一 Case 的同一类型只计一次。"],
     ])
     # 行号从 1 开始，与 OOXML 一致。
     bold_rows = {1, 11, 12, 17, 18, len(matrix) - 4, len(matrix) - 1}
@@ -2279,6 +2391,11 @@ def _result_rows(results: list[dict], dim_names: list[str] | None = None) -> lis
         row = dict(r)
         if isinstance(row.get("issue_types"), list):
             row["issue_types"] = "；".join(str(value) for value in row["issue_types"])
+        for key in ("need_review_cate", "card_types"):
+            if isinstance(row.get(key), list):
+                row[key] = "；".join(str(value) for value in row[key])
+        if isinstance(row.get("cards"), (list, dict)):
+            row["cards"] = json.dumps(row["cards"], ensure_ascii=False)
         if isinstance(row.get("execution_routes"), list):
             row["execution_routes"] = "；".join(
                 str(value) for value in row["execution_routes"]
@@ -2694,18 +2811,19 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         [
             "统计口径",
             ("当前口径：所有选中组均为 OK/NOK 的共同 Case；全部统计使用同一集合；"
-             "OK/NOK 率和 Issue Type 占比的分母均为该集合大小；逐题横向对比保留原始并集供追溯。"
+             "OK/NOK 率和 Issue Type 占比的分母均为该集合大小；复核类别独立使用双方共同有效集（含 no_support）；逐题横向对比保留原始并集供追溯。"
              if decidable else
             "Correctness 仅统计所有选中批次共有且均有效的 Case；"
-            "Issue Type 使用对应两组共同有效 Case；"
+            "Issue Type 在对应两组共同有效 Case 中，分别以各组 OK+NOK 为分母；"
+            "复核类别以双方共同有效 Case（含 no_support）为分母，增减不表示效果优化/劣化；"
             "相对对照组表按每个实验组与对照组各自的共同有效 Case 计算；"
             "OK/NOK 率统一以各组 ok+nok 为分母；"
-            "“其他”表示 nok、no_support 或 others。"),
+            "“其他”表示 nok 或 no_support。"),
         ],
         ["全组共同 Case", payload.get("all_groups_common_matched_count", 0)],
         ["全组共同有效 Case", payload.get("all_groups_common_valid_count", 0)],
         [],
-        ["组别", "数据集", "task_id", "原始数据量", "共有有效数据量", "ok", "nok", "no_support", "others", "OK率", "NOK率", "率分母"],
+        ["组别", "数据集", "task_id", "原始数据量", "共有有效数据量", "ok", "nok", "no_support", "OK率", "NOK率", "率分母"],
     ]
     for group in groups:
         statistics = group.get("statistics") or {}
@@ -2722,7 +2840,6 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             correctness.get("ok", 0),
             correctness.get("nok", 0),
             correctness.get("no_support", 0),
-            correctness.get("others", 0),
             _display_percent(statistics.get("ok_rate")),
             _display_percent(statistics.get("nok_rate")),
             statistics.get("rate_denominator", 0),
@@ -2791,6 +2908,8 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
                 "实验组": pair.get("target_label") or "",
                 "共同有效Case": pair.get("valid_pair_count", 0),
                 "Issue Type": row.get("issue_type") or "",
+                "对照组效果分母": pair.get("baseline_rate_denominator", 0),
+                "实验组效果分母": pair.get("target_rate_denominator", 0),
                 "对照组频次": row.get("baseline_count", 0),
                 "对照组占比": row.get("baseline_rate"),
                 "实验组频次": row.get("target_count", 0),
@@ -2801,6 +2920,29 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
                     if row.get("rate_delta") is not None else None
                 ),
             })
+
+    review_rows = []
+    for pair in payload.get("pairwise") or []:
+        for row in pair.get("review_category_rows") or []:
+            review_rows.append({
+                "对比关系": f"{pair.get('baseline_label') or '对照组'} / {pair.get('target_label') or '实验组'}",
+                "共同有效Case": pair.get("review_valid_pair_count", 0),
+                "需复核类别": row["category"],
+                "对照组频次": row["baseline_count"],
+                "对照组占比": row["baseline_rate"],
+                "实验组频次": row["target_count"],
+                "实验组占比": row["target_rate"],
+                "频次差值": row["count_delta"],
+                "占比差值（pp）": row["rate_delta"] * 100 if row["rate_delta"] is not None else None,
+            })
+    review_headers = (
+        "对比关系", "共同有效Case", "需复核类别", "对照组频次", "对照组占比",
+        "实验组频次", "实验组占比", "频次差值", "占比差值（pp）",
+    )
+    review_styles = {
+        (index, column): 10
+        for index in range(2, len(review_rows) + 2) for column in (5, 7)
+    }
 
     detail_fields = (
         "id",
@@ -2815,6 +2957,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         "is_low_level",
         "correctness",
         "issue_types",
+        "need_review_cate",
         "execution_routes",
         "链路类型",
         "rationale",
@@ -2904,6 +3047,12 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             hide_gridlines=True,
         )),
         ("Issue Type对比", _operation_comparison_issue_sheet(issue_rows)),
+        ("需复核类别对比", _matrix_sheet_xml(
+            [list(review_headers)] + [[row[key] for key in review_headers] for row in review_rows],
+            widths=[30, 18, 32, 16, 16, 16, 16, 18, 20],
+            row_styles={1: 2}, cell_styles=review_styles, freeze_rows=1,
+            auto_filter_ref=f"A1:I{len(review_rows) + 1}", hide_gridlines=True,
+        )),
         ("逐题横向对比", _operation_comparison_detail_sheet(
             groups,
             union_rows,
@@ -2926,6 +3075,8 @@ def _operation_comparison_issue_sheet(rows: list[dict[str, Any]]) -> str:
         "实验组占比",
         "频次差值",
         "占比差值",
+        "对照组效果分母",
+        "实验组效果分母",
     ]
     table = [headers] + [[row.get(header) for header in headers] for row in rows]
     cell_styles: dict[tuple[int, int], int] = {}
@@ -2940,11 +3091,11 @@ def _operation_comparison_issue_sheet(rows: list[dict[str, Any]]) -> str:
         cell_styles[(row_index, 10)] = 11 if rate_delta < 0 else 12 if rate_delta > 0 else 13
     return _matrix_sheet_xml(
         table,
-        widths=[22, 14, 16, 36, 14, 14, 14, 14, 20, 20],
+        widths=[22, 14, 16, 36, 14, 14, 14, 14, 20, 20, 20, 20],
         row_styles={1: 2},
         cell_styles=cell_styles,
         row_heights={1: 32},
-        auto_filter_ref=(f"A1:J{len(table)}" if headers else None),
+        auto_filter_ref=(f"A1:L{len(table)}" if headers else None),
         freeze_rows=1,
         freeze_columns=4,
         hide_gridlines=True,
@@ -2973,6 +3124,7 @@ def _operation_comparison_detail_sheet(
         "is_low_level": 14,
         "correctness": 14,
         "issue_types": 24,
+        "need_review_cate": 28,
         "execution_routes": 28,
         "链路类型": 18,
         "rationale": 44,

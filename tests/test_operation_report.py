@@ -242,6 +242,8 @@ def test_report_scope_switch_updates_issues_case_pool_and_transition_labels(monk
     if not node:
         pytest.skip("Node.js unavailable")
     snapshots = {key: snapshot(key) for key in ("control", "experiment")}
+    for data in snapshots.values():
+        data["results"][0]["need_review_cate"] = ["关键事实待核验"]
     monkeypatch.setattr(server, "get_live_task", lambda _: None)
     monkeypatch.setattr(server, "load_snapshot", snapshots.get)
     payload = server.api_operation_comparison_analyze(server.OperationComparisonAnalyzeReq(
@@ -264,7 +266,7 @@ const root = {
 const viewer = AutoEvalOperationReport.mount(root, payload);
 const read = name => root.querySelector(`[data-or="${name}"]`);
 const clickScope = scope => handlers.click({ target: { closest: selector => selector === 'button' ? {dataset: {scope}} : null } });
-assert(read('issues').innerHTML.includes('缺少前置条件'));
+assert(!read('issues').innerHTML.includes('缺少前置条件'));
 clickScope('common_decidable');
 assert(!read('issues').innerHTML.includes('缺少前置条件'));
 assert(read('issues').innerHTML.includes('任务结果错误'));
@@ -272,12 +274,74 @@ assert(read('case-count').textContent.includes('30 条'));
 assert(root.innerHTML.includes('NOK→OK'));
 assert(!read('cases').innerHTML.includes('>no_support<'));
 assert.strictEqual(events.at(-1).detail, 'common_decidable');
-clickScope('all_valid');
+const clickTab = categoryTab => handlers.click({target:{closest:selector => selector === 'button' ? {dataset:{categoryTab}} : null}});
+assert(root.innerHTML.includes('role="tablist"'));
+assert(root.innerHTML.includes('aria-selected="true">效果问题'));
+clickTab('review');
+assert(root.innerHTML.includes('需复核类别对比'));
 assert(read('issues').innerHTML.includes('缺少前置条件'));
+assert(!read('issues').innerHTML.includes('or-good'));
+assert(!read('issues').innerHTML.includes('or-bad'));
+assert(read('case-count').textContent.includes('60 条'));
+assert(!read('tags').innerHTML.includes('data-issue='));
+assert(read('tags').innerHTML.includes('data-review='));
+assert(read('issue-note').textContent.includes('双方共同有效 60 条'));
+handlers.click({target:{closest:selector => selector === '[data-review]' ? {dataset:{review:'缺少前置条件'}} : null}});
+assert(read('case-count').textContent.includes('15 条'));
+assert(read('cases').innerHTML.includes('>no_support<'));
+assert(read('issues').innerHTML.includes('缺少前置条件'));
+handlers.click({target:{closest:selector => selector === 'button' ? {dataset:{detail:'2'}} : null}});
+assert(read('cases').innerHTML.includes('需复核类别'));
+assert(read('cases').innerHTML.includes('缺少前置条件'));
+handlers.click({target:{closest:selector => selector === 'button' ? {dataset:{view:'table'}} : null}});
+assert(read('issues').innerHTML.includes('<th>需复核类别</th>'));
+assert(!read('issues').innerHTML.includes('or-good'));
+handlers.click({target:{closest:selector => selector === 'button' ? {dataset:{view:'radar'}} : null}});
+assert(read('radar').innerHTML.includes('<svg'));
+assert(read('radar').innerHTML.includes('需复核类别占比雷达图'));
+assert(read('radar').innerHTML.includes('data-review='));
+assert(!read('radar').innerHTML.includes('data-issue='));
+assert(read('issue-note').textContent.includes('双方共同有效 60 条'));
+clickTab('issue');
+assert(!root.innerHTML.includes('aria-selected="true">需复核类别'));
+assert(read('case-count').textContent.includes('30 条'));
+assert(!read('cases').innerHTML.includes('>no_support<'));
+handlers.click({target:{closest:selector => selector === 'button' ? {dataset:{view:'bar'}} : null}});
+handlers.change({target:{dataset:{or:'issue'},value:'任务结果错误'}});
+assert(!read('cases').innerHTML.includes('>no_support<'));
+clickScope('all_valid');
+assert(!read('issues').innerHTML.includes('缺少前置条件'));
 assert(read('case-count').textContent.includes('60 条'));
 assert(root.innerHTML.includes('其他→OK'));
 assert.strictEqual(events.at(-1).detail, 'all_valid');
 viewer.destroy();
+const single = {
+  kind:'single',task_id:'single',generated_at:'test',
+  statistics:payload.views.all_valid.groups[0].statistics,cases:payload.groups[0].cases,
+};
+const singleViewer = AutoEvalOperationReport.mount(root, single);
+assert(read('issue-note').textContent.includes('30 条有效 OK+NOK'));
+clickTab('review');
+assert(read('issue-note').textContent.includes('全部有效评估 60 条'));
+assert(read('issues').innerHTML.includes('data-review="缺少前置条件"'));
+handlers.click({target:{closest:selector => selector === '[data-review]' ? {dataset:{review:'缺少前置条件'}} : null}});
+assert(read('case-count').textContent.includes('15 条'));
+handlers.input({target:{dataset:{or:'search'},value:'a query that does not exist'}});
+assert(read('case-count').textContent.includes('0 条'));
+clickTab('issue');
+assert(!read('issues').innerHTML.includes('缺少前置条件'));
+assert(read('case-count').textContent.includes('60 条')); // Tab 切换清空旧类别和搜索。
+singleViewer.destroy();
+const empty = JSON.parse(JSON.stringify(single));
+empty.task_id = 'empty-review';
+empty.statistics.review_category_rows = []; empty.statistics.review_case_count = 0;
+empty.cases.forEach(row => {row.need_review_cate = [];});
+const emptyViewer = AutoEvalOperationReport.mount(root, empty);
+clickTab('review');
+assert(read('issues').innerHTML.includes('暂无需复核类别'));
+assert(!read('tags').innerHTML.includes('data-issue='));
+assert(read('issue-note').textContent.includes('带复核类别 0 条'));
+emptyViewer.destroy();
 '''
     result = subprocess.run(
         [node, "-e", script, str(OPERATION_REPORT_ASSETS / "operation_report.js")],

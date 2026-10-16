@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -6,12 +7,16 @@ from pydantic import ValidationError
 from auto_eval.config import load_config
 from auto_eval.expert_knowledge import render_expert_knowledge
 from auto_eval.judges.operation_fields import (
+    LEGACY_REVIEW_CATEGORIES,
     format_operation_route_rationale,
     hoist_misnested_operation_fields,
     map_legacy_operation_result,
     normalize_operation_fields,
     normalize_operation_routes,
 )
+from auto_eval.judges.rubric_judge import _operation_score_from_data
+from auto_eval.judges.ensemble import aggregate_operation_scores
+from auto_eval.web.runner import _fill_operation_verdict
 from auto_eval.judges.prompts import ARBITRATOR_SYSTEM, OPERATION_SYSTEM, OPERATION_USER
 from auto_eval.judges.rubric_judge import _flatten_rubric
 from auto_eval.schema import OperationSingleScore
@@ -40,7 +45,7 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     assert [dim.name for dim in operation.rubrics] == ["操作完成度", "步骤正确性"]
     assert [dim.weight for dim in operation.rubrics] == [0.7, 0.3]
     assert operation.operation_policy is not None
-    assert config.expert_knowledge["operation"].version == 4
+    assert config.expert_knowledge["operation"].version == 9
     assert config.expert_knowledge["operation"].categories
     assert operation.operation_policy.scope_rules
     assert operation.operation_policy.evidence_rules
@@ -56,9 +61,10 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
         "no_support",
         "others",
     ]
+    assert set(operation.operation_policy.review_category_names) == LEGACY_REVIEW_CATEGORIES
     assert "有非空 answer 时只检查 answer" in prompt
     assert "系统 step info" in prompt
-    assert "不得标记本类型" in prompt
+    assert "不能充当泄露证据" in prompt
     assert "route_policy" not in type(operation.operation_policy).model_fields
     assert operation.operation_policy.issue_types[
         "录屏Query无法与输入Query一致核验"
@@ -68,6 +74,86 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     )
     assert "1. 操作完成度（权重 0.7，1–5 分）" in prompt
     assert "2. 步骤正确性（权重 0.3，1–5 分）" in prompt
+
+
+def test_operation_result_separates_review_reasons_and_preserves_card_evidence() -> None:
+    config = load_config(Path(__file__).resolve().parents[1] / "config")
+    skill = config.domain_skills["operation"]
+    judge = SimpleNamespace(
+        cfg=SimpleNamespace(name="judge_1", persona="终端用户"),
+    )
+    reply = SimpleNamespace(
+        used_search=False, tool_trace=[], search_queries=[], truncated=False,
+    )
+    score = _operation_score_from_data(
+        {
+            "correctness": "nok",
+            "task_type": "simple",
+            "issue_types": ["任务结果错误", "无关挂卡"],
+            "need_review_cate": ["缺少前置条件"],
+            "cards": [{
+                "type": "xiaoyi_memory",
+                "visible_content": "周六出发",
+                "target": "周六到点提醒",
+                "relation_to_query": "direct",
+                "suitability": "unsuitable",
+                "reason": "只记录信息，不能到点提醒",
+                "evidence_frames": [8, 8, 9],
+            }],
+        },
+        item_id="card-case", model_name="model", judge=judge,
+        dims=skill.rubrics, policy=skill.operation_policy,
+        reply=reply, latency=100,
+        known_card_types={
+            card.key: card.name
+            for card in config.expert_knowledge["operation"].result_cards
+        },
+    )
+    assert score.issue_types == ["任务结果错误", "无关挂卡"]
+    assert score.need_review_cate == ["缺少前置条件"]
+    assert score.cards[0].observed_name == "小艺帮记卡"
+    assert score.cards[0].type == "xiaoyi_memory"
+    assert score.cards[0].evidence_frames == [8, 9]
+
+    verdict = aggregate_operation_scores(
+        [score], skill.rubrics, config.ensemble, 0.6,
+        skill.operation_policy.issue_types,
+    )
+    result = {}
+    _fill_operation_verdict(result, verdict)
+    assert result["correctness"] == "nok"
+    assert result["card_presence"] == "是"
+    assert result["card_types"] == ["小艺帮记卡"]
+    assert result["card_suitability"] == "nok"
+
+
+def test_operation_raw_others_is_public_no_support_with_review_category() -> None:
+    config = load_config(Path(__file__).resolve().parents[1] / "config")
+    skill = config.domain_skills["operation"]
+    judge = SimpleNamespace(
+        cfg=SimpleNamespace(name="judge_1", persona="终端用户"),
+        expert_knowledge=config.expert_knowledge["operation"],
+    )
+    reply = SimpleNamespace(
+        used_search=False, tool_trace=[], search_queries=[], truncated=False,
+    )
+    score = _operation_score_from_data(
+        {"correctness": "others", "issue_types": [],
+         "need_review_cate": ["未展示可验证结果"], "cards": []},
+        item_id="review-case", model_name="model", judge=judge,
+        dims=skill.rubrics, policy=skill.operation_policy,
+        reply=reply, latency=100,
+    )
+    verdict = aggregate_operation_scores(
+        [score], skill.rubrics, config.ensemble, 0.6,
+        skill.operation_policy.issue_types,
+    )
+    result = {}
+    _fill_operation_verdict(result, verdict)
+    assert result["judge_correctness"] == "others"
+    assert result["correctness"] == "no_support"
+    assert result["issue_types"] == []
+    assert result["need_review_cate"] == ["未展示可验证结果"]
 
 
 def test_operation_prompt_does_not_request_route_detection() -> None:
@@ -337,9 +423,10 @@ def test_operation_prompt_keeps_response_quality_issues_separate_from_correctnes
     assert "回复语义重复" in prompt
     assert "回复内容自相矛盾" in prompt
     assert "重复系统卡片" in prompt
-    assert "通用质量问题不能作为 nok、no_support、others 的第一项" in prompt
+    assert "通用质量问题不能作为 nok 的第一项" in prompt
     assert "默认不直接改变 correctness" in prompt
-    assert "必须再独立通读完整 agent 回复" in prompt
+    assert "独立检查回复质量" in prompt
+    assert "只从该来源摘录泄露、重复或矛盾原句" in prompt
     assert "我先想想任务规划" in prompt
     assert "严重回复质量问题" not in operation.operation_policy.issue_types
 
@@ -355,7 +442,7 @@ def test_operation_prompt_handles_conditional_tasks_and_causality() -> None:
     assert "同一个目标不要同时记录根因和其必然后果" in prompt
     assert "优先标记三方应用跳转中断" in prompt
     assert "不能覆盖已经发生的错误路径、无关操作或执行失败" in prompt
-    assert "所有未完成目标都被外部条件阻塞时判 no_support" in prompt
+    assert "将正确停止流程中尚未开始的目标按串行待续处理" in prompt
 
 
 def test_operation_output_hoists_fields_accidentally_nested_in_rubric() -> None:
@@ -406,12 +493,12 @@ def test_operation_prompt_judges_evidence_by_sufficiency_not_container() -> None
     assert "严格区分“目标未执行”和“执行后缺少结果证据”" in prompt
     assert "同一目标不能同时使用两者" in prompt
     assert "该状态与 query 要求不一致时，优先标记任务结果错误" in prompt
-    assert "没有展示可判断对错的具体结果状态时" in prompt
+    assert "画面不足以验证结果，且没有独立错误时判 others" in prompt
     assert "最终画面或初始状态直接满足 query 即可" in prompt
     assert "关键帧未展示全部过渡过程不等于步骤错误" in prompt
-    assert "将每个生效目标归入：已完成、等待用户、缺少前置条件" in prompt
-    assert "不主动进行外部事实核验" in prompt
-    assert "是否与录屏、结果卡、上下文或可信先验存在明确冲突" in prompt
+    assert "【逐目标状态】" in prompt
+    assert "当前不进行外部事实核验" in prompt
+    assert "可直接核对的约束冲突是任务结果错误" in prompt
     assert "自动操作卡片、进度、目标入口和操作轨迹属于过程证据" not in prompt
     assert "ok 必须有最终状态强证据" not in prompt
 
@@ -501,8 +588,9 @@ def test_operation_prompt_distinguishes_guided_user_wait_from_silent_stall() -> 
     _, prompt = _operation_prompt()
 
     assert "对未完成目标必须识别其最后有效状态" in prompt
-    assert "界面、任务执行过程文字或 agent 最终回答明确提示用户登录、授权、验证" in prompt
-    assert "没有任何用户指引、最终回答为空且流程停止或超时" in prompt
+    assert "逐帧扫描并逐字摘录面向用户的登录、授权、同意、验证" in prompt
+    assert "agent 最终回答为空" in prompt
+    assert "流程静默停止" in prompt
     assert "只有同时满足以下条件时才判 nok / 三方应用跳转中断" in prompt
     assert "明确反馈本次任务已因等待而超时、终止" in prompt
     assert "界面、任务执行文字和 agent 均无任何澄清或用户操作提示" in prompt
@@ -510,8 +598,8 @@ def test_operation_prompt_distinguishes_guided_user_wait_from_silent_stall() -> 
     assert "没有因等待用户而超时或终止的反馈" in prompt
     assert "回复非空不自动等于 no_support" in prompt
     assert "缺少用户后续操作和最终结果只是阻塞的必然后果" in prompt
-    assert "已经明确等待用户的目标，不得再因用户未响应" in prompt
-    assert "agent 明确说明助手、设备或系统不支持" in prompt
+    assert "将正确停止流程中尚未开始的目标按串行待续处理" in prompt
+    assert "agent 明确声明能力不支持" in prompt
     assert "没有可信专家经验或可见证据反驳" in prompt
     assert "必须同时检查按时间顺序的视觉证据和 agent 文本自述" in prompt
     assert "不得只依据其中一路下结论" in prompt
@@ -520,9 +608,9 @@ def test_operation_prompt_distinguishes_guided_user_wait_from_silent_stall() -> 
     assert "缺少完成任务所需的信息并指引用户提供" in prompt
     assert "泛化能力常识、相似能力或裁判设想的替代策略" in prompt
     assert "判 no_support 前必须逐项写明" in prompt
-    assert "先发生可见错误后再询问用户换路径" in prompt
+    assert "只是错误后的恢复询问" in prompt
     assert "用户实际答复、选择、确认、完成登录授权" in prompt
-    assert "通常可以通过其他网络、应用、入口或方法完成" in prompt
+    assert "不能以通常可用的其他网络、应用或入口作为反证" in prompt
     assert "不强制要求 agent 再重复说明" in prompt
     assert "仅返回桌面或助手界面不算解除" in prompt
     assert "无法继续”“请自行操作”“相关工具已返回结果" in prompt
@@ -535,19 +623,18 @@ def test_operation_prompt_does_not_expand_goal_or_treat_recovery_question_as_blo
     assert "可以按打开、查看或展示该功能入口理解" in prompt
     assert "query 已提供继续执行所需信息" in prompt
     assert "只是错误后的恢复询问" in prompt
-    assert "不能把此前可见错误改写为等待用户" in prompt
-    assert "专家经验已确认能力或页面存在时" in prompt
+    assert "明确能力受支持的专家经验也不证明本次已授权" in prompt
     assert "用户不负责选择 agent 的搜索、导航、工具或补救策略" in prompt
-    assert "需要我继续到设置中查找吗" in prompt
-    assert "换关键词、换入口还是上报" in prompt
+    assert "询问是否换路径、换入口、继续查找或上报" in prompt
 
 
 def test_operation_prompt_requires_complete_blocker_qualification() -> None:
     _, prompt = _operation_prompt()
 
     assert "【阻塞资格表】" in prompt
-    assert "用户必须补充的信息或完成的具体动作" in prompt
-    assert "最后有效状态中该阻塞是否仍未解除" in prompt
+    assert "A.用户必须补充的信息或动作" in prompt
+    assert "B.为何是继续原任务不可替代的条件" in prompt
+    assert "C.最后有效状态中该阻塞是否仍未解除" in prompt
     assert "只有 A/B/C 成立且 D 为否" in prompt
 
 
@@ -564,10 +651,12 @@ def test_operation_prompt_distinguishes_empty_query_result_from_missing_action_o
     _, prompt = _operation_prompt()
 
     assert "区分“查询结果为空”和“动作缺少目标对象”" in prompt
-    assert "未找到、无记录、暂无结果" in prompt
+    assert "未找到、无记录、未绑定、尚未创建" in prompt
     assert "没有可恢复应用、目标文件、剪贴板内容或活动对象" in prompt
     assert "不能因为成功进入页面或展示空状态就判 ok" in prompt
-    assert "仅有 agent 文字声称“没有结果/找不到”" in prompt
+    assert "仅文字声称“没有结果/找不到”而无查询证据时判 others" in prompt
+    assert "不因为结果为空就额外要求用户创建、绑定或添加对象" in prompt
+    assert "若缺少绑定、登录或输入导致原状态尚不能查询" in prompt
     assert "页面仅显示“搜索中/加载中”" in prompt
     assert "不能证明查询完成" in prompt
     assert "泛化的“执行查询”“调用工具”“已完成”" in prompt
@@ -579,7 +668,7 @@ def test_operation_prompt_distinguishes_sensitive_credentials_from_privacy_setti
 
     assert "账号密码、支付密码、验证码、私钥" in prompt
     assert "明确说明安全或隐私原因的拒绝属于正确响应" in prompt
-    assert "不要把普通隐私或权限设置误当成敏感凭据披露" in prompt
+    assert "该规则不适用于普通隐私或权限设置" in prompt
     assert "常规系统设置与设备操控默认属于已支持能力" in prompt
     assert "静态隐私说明、帮助文案、风险提示或协议链接" in prompt
 
@@ -603,7 +692,7 @@ def test_operation_prompt_distinguishes_unverified_condition_from_false_conditio
 def test_operation_prompt_models_shared_clarification_dependencies() -> None:
     _, prompt = _operation_prompt()
 
-    assert "多个目标共享同一个必须由用户补充" in prompt
+    assert "多个目标共享同一对象、搜索词、候选选择或预订偏好" in prompt
     assert "不要求 agent 在询问前先打开应用" in prompt
     assert "自动接听、日程、联系人或地址、机票酒店门票" in prompt
     assert "合理搜索未找到 query 指定对象后" in prompt
@@ -630,7 +719,7 @@ def test_operation_prompt_keeps_action_task_open_while_waiting_for_user() -> Non
     assert "只要原始任务仍需用户答复后才能继续" in prompt
     assert "按时间顺序检查全部关键帧" in prompt
     assert "通读完整 agent 自述" in prompt
-    assert "已完成、等待用户、缺少前置条件、静默停滞" in prompt
+    assert "【逐目标状态】" in prompt
     assert "阻塞前是否已有足以独立导致失败的可见错误" in prompt
     assert "禁止把任务面板的步骤、“已完成”或“超时，任务终止”当成 agent 回复" in prompt
     assert "必须引用冲突的具体 agent 自然语言回复" in prompt
@@ -647,8 +736,9 @@ def test_operation_prompt_requires_blocker_evidence_gate_before_correctness() ->
     assert "【视觉指引扫描】" in prompt
     assert "【文本指引扫描】" in prompt
     assert "【阻塞资格表】" in prompt
-    assert "【时序与强制映射】" in prompt
-    assert "只有能够逐字引用的完整句子或协议提示" in prompt
+    assert "【已交付结果与卡片验收】" in prompt
+    assert "具体条件说明" in prompt
+    assert "注明来源与帧号，不得意译或补写原文中没有的询问" in prompt
     assert "普通“登录”入口、“查看”按钮、“手动操作中”状态" in prompt
     assert "泛化终止语只有在同时说明具体能力限制" in prompt
     assert "不得意译或补写原文中没有的询问" in prompt
@@ -660,7 +750,7 @@ def test_operation_prompt_follows_serial_execution_chain_and_requires_direct_pla
     assert "复杂多任务按实际串行执行链判断" in prompt
     assert "后续尚未开始的目标属于串行中断后果" in prompt
     assert "即使这些目标逻辑上不依赖同一信息" in prompt
-    assert "阻塞前已经发生可见错误" in prompt
+    assert "阻塞前已有实际错操作、错误交付" in prompt
     assert "搜索结果卡、影视详情卡、播放按钮" in prompt
     assert "不能证明播放动作已经发生" in prompt
     assert "普通应用跳转、打开视频应用、模糊的应用加载画面" in prompt
@@ -668,8 +758,8 @@ def test_operation_prompt_follows_serial_execution_chain_and_requires_direct_pla
     assert "正在播放/播放中" in prompt
     assert "不能仅因画面跳转或模糊而降级为 others" in prompt
     assert "判 nok / 应执行目标未执行" in prompt
-    assert "已经观察到上述播放专属启动信号" in prompt
-    assert "【结果证据专项】" in prompt
+    assert "播放专属的直接信号" in prompt
+    assert "准备卡不证明后续动作" in prompt
 
 
 def test_operation_prompt_distinguishes_action_preparation_from_core_trigger() -> None:
@@ -687,9 +777,9 @@ def test_operation_prompt_uses_explicit_login_feedback_gate() -> None:
     _, prompt = _operation_prompt()
 
     assert "录屏停在登录、授权或身份验证页面" in prompt
-    assert "本次任务超时/终止" in prompt
-    assert "只有普通登录入口或登录页面、三路证据均无澄清提示" in prompt
-    assert "agent 最终回答为空、没有等待反馈且流程静默停止" in prompt
+    assert "本次任务已因等待而超时、终止" in prompt
+    assert "停在普通登录入口或登录页面，界面、任务执行文字和 agent 均无任何澄清或用户操作提示" in prompt
+    assert "agent 最终回答为空，没有因等待用户而超时或终止的反馈，流程静默停止" in prompt
     assert "三方应用跳转中断" in prompt
     assert "不得使用日志、内部规划或 skill 调用推断" not in prompt
     assert "不得使用日志或内部规划" not in prompt
@@ -699,11 +789,13 @@ def test_operation_prompt_requires_issue_types_and_low_level_flag() -> None:
     _, prompt = _operation_prompt()
 
     assert "【issue_types】" in prompt
-    assert "输出受控中文字符串数组" in prompt
-    assert "nok、no_support、others 至少填写一项" in prompt
+    assert "只输出 Agent 执行或回答质量问题" in prompt
+    assert "【need_review_cate】" in prompt
+    assert "原判 no_support、others 至少输出一项" in prompt
     assert "只有意图清晰的简单任务被判 nok" in prompt
     assert "复杂多任务固定输出 no" in prompt
-    assert '"issue_types": ["<受控中文问题类型>"]' in prompt
+    assert '"issue_types": ["<执行或回答质量问题>"]' in prompt
+    assert '"cards": [{"type":"<已知key或other>"' in prompt
     assert '"is_low_level": "yes|no"' in prompt
     assert "error_type" not in prompt
 
@@ -727,7 +819,8 @@ def test_operation_arbitrator_reuses_the_same_policy() -> None:
     assert "缺少前置条件" in prompt
     assert "任务执行窗口未展开" in prompt
     assert '"correctness": "ok|nok|no_support|others"' in prompt
-    assert '"issue_types": ["<受控中文问题类型>"]' in prompt
+    assert '"issue_types": ["<执行质量问题>"]' in prompt
+    assert '"need_review_cate": ["<客观阻塞或复核原因>"]' in prompt
     assert "error_type" not in prompt
 
 

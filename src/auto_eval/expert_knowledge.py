@@ -26,6 +26,13 @@ def render_expert_knowledge(knowledge: ExpertKnowledgeBase | None) -> str:
         lines.append(f"### {category.name}")
         lines.extend(f"- {rule}" for rule in category.rules)
         lines.append("")
+    if knowledge.result_cards:
+        lines.append("### 结果卡片类型与能力")
+        for card in knowledge.result_cards:
+            lines.append(f"- {card.name}（类型 {card.key}）：识别线索：{'、'.join(card.visual_cues)}；"
+                         f"可证明：{'、'.join(card.proves)}；不能单独证明：{'、'.join(card.does_not_prove)}。")
+        lines.append("- 未收录的对话卡片使用 other，observed_name 只写2–12字简短类别名（如航班卡），不写标题、内容或括号备注；other 不代表不合适。")
+        lines.append("")
     return "\n".join(lines).rstrip()
 
 
@@ -61,8 +68,12 @@ class ExpertKnowledgeStore:
         return _read(self.draft_path) if self.draft_path.exists() else None
 
     def save_draft(self, knowledge: ExpertKnowledgeBase) -> ExpertKnowledgeBase:
-        current_version = self.published().version
-        normalized = knowledge.model_copy(update={"version": current_version})
+        published = self.published()
+        # Web 规则编辑器目前只编辑 categories；保存旧草稿时保留 YAML 中的卡片目录。
+        normalized = knowledge.model_copy(update={
+            "version": published.version,
+            "result_cards": knowledge.result_cards or published.result_cards,
+        })
         _write_atomic(self.draft_path, normalized)
         return normalized
 
@@ -70,7 +81,11 @@ class ExpertKnowledgeStore:
         draft = self.draft()
         if draft is None:
             raise FileNotFoundError("没有可发布的专家经验草稿")
-        published = draft.model_copy(update={"version": self.published().version + 1})
+        current = self.published()
+        published = draft.model_copy(update={
+            "version": current.version + 1,
+            "result_cards": draft.result_cards or current.result_cards,
+        })
         _write_atomic(self.published_path, published)
         self.draft_path.unlink(missing_ok=True)
         return published

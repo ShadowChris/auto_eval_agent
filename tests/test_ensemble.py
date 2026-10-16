@@ -102,7 +102,8 @@ def test_aggregate_operation_tie_falls_back_to_others():
     verdict = aggregate_operation_scores(scores, dims, EnsembleConfig(), 0.6)
 
     assert verdict.correctness == "others"
-    assert verdict.issue_types == ["评测证据冲突"]
+    assert verdict.issue_types == []
+    assert verdict.need_review_cate == ["其他未归类情况"]
     assert verdict.is_low_level == "no"
 
 
@@ -149,6 +150,7 @@ def test_aggregate_operation_query_alignment_issue_clears_scores():
     verdict = aggregate_operation_scores(scores, dims, EnsembleConfig(), 0.6)
 
     assert verdict.rubric == {}
+    assert verdict.need_review_cate == ["录屏Query无法与输入Query一致核验"]
     assert verdict.rubric_reasons == {}
     assert verdict.na_dimensions == ["操作完成度", "步骤正确性"]
     assert verdict.total is None

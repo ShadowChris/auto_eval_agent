@@ -29,7 +29,7 @@ from ..judges import (
     _format_visual_findings_for_rubric,
     ensure_classified,
 )
-from ..judges.base import flush_web_trace_records
+from ..judges.base import JudgeOutputParseError, flush_web_trace_records
 from ..judges.ensemble import (
     aggregate_operation_scores,
     aggregate_pairs,
@@ -922,6 +922,7 @@ async def _run(
                         )
                 if last_error is None:
                     for attempt in range(2):
+                        trace_start = len(pending_judge_traces)
                         try:
                             if attempt:
                                 log_event(
@@ -954,7 +955,12 @@ async def _run(
                             break
                         except Exception as e:
                             last_error = e
-                            retryable = is_retriable_llm_error(e)
+                            format_error = task.mode == "operation" and isinstance(e, JudgeOutputParseError)
+                            if format_error:
+                                for _, record in pending_judge_traces[trace_start:]:
+                                    record["status"] = "invalid_output"
+                                    record["output_validation_error"] = str(e)
+                            retryable = is_retriable_llm_error(e) or format_error
                             will_retry = attempt == 0 and retryable
                             log_event(
                                 "单题评测",
@@ -1477,6 +1483,8 @@ async def _eval_one(
                     v.correctness, v.total, v.rubric = arb["correctness"], arb["total"], arb["rubric"]
                     v.task_type = arb["task_type"]
                     v.issue_types = arb["issue_types"]
+                    v.need_review_cate = arb["need_review_cate"]
+                    v.cards = arb["cards"]
                     v.is_low_level = arb["is_low_level"]
                     v.arbitrated = True
                     v.arbitrator_confidence = arb["confidence"]
@@ -1692,11 +1700,24 @@ def _fill_operation_verdict(out: dict, v) -> None:
         out["error"] = out.get("error", "裁判无输出")
         return
     out["task_type"] = v.task_type
-    out["correctness"] = v.correctness
+    out["correctness"] = "no_support" if v.correctness == "others" else v.correctness
+    out["judge_correctness"] = v.correctness
     out["total"] = round(v.total, 2) if v.total is not None else None
     out["rubric"] = {key: round(value, 2) for key, value in v.rubric.items()}
     out["rubric_reasons"] = v.rubric_reasons or {}
     out["issue_types"] = v.issue_types
+    out["need_review_cate"] = v.need_review_cate
+    out["cards"] = [card.model_dump(mode="json") for card in v.cards]
+    out["card_presence"] = "是" if v.cards else "否"
+    out["card_types"] = list(dict.fromkeys(card.observed_name or card.type for card in v.cards))
+    out["card_suitability"] = (
+        "nok" if any(card.suitability == "unsuitable" for card in v.cards)
+        else "" if any(card.suitability == "unclear" for card in v.cards)
+        else "ok" if v.cards else ""
+    )
+    out["card_suitability_reason"] = "；".join(
+        f"{card.observed_name or card.type}：{card.reason}" for card in v.cards if card.reason
+    )
     out["is_low_level"] = v.is_low_level
     out["execution_routes"] = v.execution_routes
     out["route_evidence"] = [item.model_dump(mode="json") for item in v.route_evidence]
@@ -1832,7 +1853,8 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
             group_id = str(group.get("group_id") or "")
             rows = [row for row in group_rows if str(row.get("group_id") or "") == group_id]
             judged = [row for row in rows if row.get("evaluation_status") == "done"]
-            totals = [row["total"] for row in judged if row.get("total") is not None]
+            decisive = [row for row in judged if row.get("correctness") in {"ok", "nok"}]
+            totals = [row["total"] for row in decisive if row.get("total") is not None]
             ok_count = sum(row.get("correctness") == "ok" for row in judged)
             group_summaries.append({
                 "group_id": group_id,
@@ -1845,7 +1867,7 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
                 "missing": sum(row.get("evaluation_status") == "missing_input" for row in rows),
                 "failed": sum(row.get("evaluation_status") == "error" for row in rows),
                 "ok_count": ok_count,
-                "completion_rate": round(ok_count / len(judged), 3) if judged else None,
+                "completion_rate": round(ok_count / len(decisive), 3) if decisive else None,
                 "mean_total": round(sum(totals) / len(totals), 2) if totals else None,
                 "correctness_dist": dict(collections.Counter(
                     row.get("correctness") for row in judged if row.get("correctness")
@@ -1871,8 +1893,9 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
     results = active_results(task.items, task.results)
     completed = [row for row in results if "error" not in row]
     judged = [row for row in completed if row.get("correctness") is not None]
+    decisive = [row for row in judged if row.get("correctness") in {"ok", "nok"}]
     ok_count = sum(row.get("correctness") == "ok" for row in judged)
-    totals = [row["total"] for row in judged if row.get("total") is not None]
+    totals = [row["total"] for row in decisive if row.get("total") is not None]
     scale = (
         cfg.domain_skills["operation"].rubrics[0].scale
         if cfg.domain_skills.get("operation")
@@ -1889,8 +1912,8 @@ def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
         "failed": len(results) - len(completed),
         "mode": task.mode,
         "ok_count": ok_count,
-        "problem_count": len(judged) - ok_count,
-        "completion_rate": round(ok_count / len(judged), 3) if judged else None,
+        "problem_count": sum(row.get("correctness") == "nok" for row in judged),
+        "completion_rate": round(ok_count / len(decisive), 3) if decisive else None,
         "mean_total": round(sum(totals) / len(totals), 2) if totals else None,
         "norm_mean": (
             round(sum(totals) / len(totals) / scale, 3)

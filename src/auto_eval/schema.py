@@ -114,6 +114,19 @@ class OperationRouteEvidence(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
+class OperationCard(BaseModel):
+    """录屏中与本次任务相关的一张结果卡及其可见依据。"""
+
+    type: str = "other"
+    observed_name: str = ""
+    visible_content: str = ""
+    target: str = ""
+    relation_to_query: Literal["direct", "supporting", "unrelated", "unclear"] = "unclear"
+    suitability: Literal["suitable", "unsuitable", "unclear"] = "unclear"
+    reason: str = ""
+    evidence_frames: list[int] = Field(default_factory=list)
+
+
 class OperationSingleScore(BaseModel):
     """任务类（录屏）单裁判评分，与问答类判定和错因字段解耦。"""
 
@@ -129,6 +142,8 @@ class OperationSingleScore(BaseModel):
     task_type: OperationTaskType | None = None
     correctness: OperationCorrectness
     issue_types: list[str] = Field(default_factory=list)
+    need_review_cate: list[str] = Field(default_factory=list)
+    cards: list[OperationCard] = Field(default_factory=list)
     is_low_level: LowLevel = "no"
     rationale: str = ""
     execution_routes: list[OperationRoute] = Field(default_factory=list)
@@ -144,8 +159,8 @@ class OperationSingleScore(BaseModel):
 
     @model_validator(mode="after")
     def require_issue_types_for_non_ok(self):
-        if self.correctness != "ok" and not self.issue_types:
-            raise ValueError(f"{self.correctness} 必须提供至少一个 issue_type")
+        if self.correctness != "ok" and not (self.issue_types or self.need_review_cate):
+            raise ValueError(f"{self.correctness} 必须提供问题类型或复核原因")
         return self
 
 
@@ -254,6 +269,8 @@ class OperationVerdict(BaseModel):
     task_type: OperationTaskType | None = None
     correctness: OperationCorrectness
     issue_types: list[str] = Field(default_factory=list)
+    need_review_cate: list[str] = Field(default_factory=list)
+    cards: list[OperationCard] = Field(default_factory=list)
     is_low_level: LowLevel = "no"
     rationale: str = ""
     execution_routes: list[OperationRoute] = Field(default_factory=list)
@@ -271,8 +288,8 @@ class OperationVerdict(BaseModel):
 
     @model_validator(mode="after")
     def require_issue_types_for_non_ok(self):
-        if self.correctness != "ok" and not self.issue_types:
-            raise ValueError(f"{self.correctness} 必须提供至少一个 issue_type")
+        if self.correctness != "ok" and not (self.issue_types or self.need_review_cate):
+            raise ValueError(f"{self.correctness} 必须提供问题类型或复核原因")
         return self
 
 

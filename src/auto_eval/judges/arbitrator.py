@@ -12,8 +12,11 @@ from ..expert_knowledge import render_expert_knowledge
 from .base import JudgeClient, JudgeOutputParseError
 from .operation_fields import (
     QUERY_ALIGNMENT_ISSUE,
+    collect_operation_output_issues,
     hoist_misnested_operation_fields,
+    normalize_operation_cards,
     normalize_operation_fields,
+    split_operation_issue_fields,
 )
 from .prompts import (
     ARBITRATOR_SYSTEM,
@@ -58,6 +61,8 @@ class Arbitrator:
                 "rubric": s.rubric,
                 "error_type": getattr(s, "error_type", None),
                 "issue_types": getattr(s, "issue_types", []),
+                "need_review_cate": getattr(s, "need_review_cate", []),
+                "cards": [card.model_dump(mode="json") for card in getattr(s, "cards", [])],
                 "is_low_level": getattr(s, "is_low_level", "no"),
                 "rationale": s.rationale,
                 "tool_trace": s.tool_trace,
@@ -104,14 +109,20 @@ class Arbitrator:
             task_type = str(data.get("task_type") or "").strip().lower()
             if task_type not in {"simple", "complex"}:
                 task_type = None
-            correctness, issue_types, is_low_level = normalize_operation_fields(
+            raw_correctness = str(data.get("correctness") or "").strip().lower()
+            if raw_correctness not in {"ok", "nok", "no_support", "others", "right", "wrong", "partial", "unclear"}:
+                raise ValueError(f"任务类仲裁返回非法 correctness：{raw_correctness!r}")
+            correctness, all_issues, is_low_level = normalize_operation_fields(
                 data.get("correctness"),
-                data.get("issue_types", data.get("error_type")),
+                collect_operation_output_issues(data),
                 data.get("is_low_level", "no"),
                 task_type,
                 policy.issue_types if policy else None,
             )
-            if QUERY_ALIGNMENT_ISSUE in issue_types:
+            issue_types, need_review_cate = split_operation_issue_fields(
+                all_issues, policy.review_category_names if policy else []
+            )
+            if QUERY_ALIGNMENT_ISSUE in need_review_cate:
                 rubric = {}
                 total = None
             return {
@@ -120,6 +131,11 @@ class Arbitrator:
                 "rubric": {k: round(float(v), 2) for k, v in rubric.items()},
                 "total": round(float(total), 2) if total is not None else None,
                 "issue_types": issue_types,
+                "need_review_cate": need_review_cate,
+                "cards": normalize_operation_cards(
+                    data.get("cards"),
+                    {card.key: card.name for card in getattr(self.expert_knowledge, "result_cards", [])},
+                ),
                 "is_low_level": is_low_level,
                 "confidence": confidence,
                 "rationale": data.get("rationale", ""),

@@ -286,7 +286,7 @@ def test_history_comparison_uses_one_baseline_for_multiple_batches() -> None:
         row["correctness"]: row["count"]
         for row in payload["groups"][0]["statistics"]["correctness_rows"]
     }
-    assert baseline_counts == {"ok": 1, "nok": 1, "no_support": 0, "others": 0}
+    assert baseline_counts == {"ok": 1, "nok": 1, "no_support": 0}
 
 
 def test_history_comparison_preserves_dataset_name_with_version_dot() -> None:
@@ -412,6 +412,7 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     assert workbook.sheetnames == [
         "对比概览",
         "Issue Type对比",
+        "需复核类别对比",
         "逐题横向对比",
     ]
     overview_values = list(workbook["对比概览"].values)
@@ -454,8 +455,10 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
         "实验组占比",
         "频次差值",
         "占比差值",
+        "对照组效果分母",
+        "实验组效果分母",
     ]
-    assert issue_sheet.auto_filter.ref.startswith("A1:J")
+    assert issue_sheet.auto_filter.ref.startswith("A1:L")
     assert issue_sheet.freeze_panes == "E2"
     assert issue_sheet.sheet_view.showGridLines is False
     assert [issue_sheet.cell(row=row, column=9).value for row in (2, 3)] == [-1, 1]
@@ -475,10 +478,10 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     assert "所有组共有" in detail_headers
     merged_ranges = {str(value) for value in detail_sheet.merged_cells.ranges}
     assert "A1:C1" in merged_ranges
-    assert "D1:V1" in merged_ranges
-    assert "W1:AO1" in merged_ranges
+    assert "D1:W1" in merged_ranges
+    assert "X1:AQ1" in merged_ranges
     assert detail_sheet.freeze_panes == "D3"
-    assert detail_sheet.auto_filter.ref.startswith("A2:AO")
+    assert detail_sheet.auto_filter.ref.startswith("A2:AQ")
     assert detail_sheet["A3"].border.left.style == "thin"
     assert detail_sheet["D3"].alignment.wrap_text is False
 

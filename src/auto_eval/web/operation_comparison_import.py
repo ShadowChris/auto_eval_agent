@@ -15,6 +15,7 @@ from ..analysis.operation_statistics import (
     OPERATION_CORRECTNESS,
     normalize_operation_issue_types,
 )
+from ..judges.operation_fields import LEGACY_REVIEW_CATEGORIES, split_operation_issue_fields
 
 
 SUPPORTED_SUFFIXES = {".jsonl", ".csv", ".xlsx", ".xls", ".xlsm"}
@@ -44,6 +45,7 @@ def import_operation_comparison_file(
         "query": "",
         "correctness": "",
         "issue_types": "",
+        "need_review_cate": "",
     }
     valid_count = 0
     for position, record in enumerate(records):
@@ -244,8 +246,14 @@ def _normalize_record(
         record,
         ("issue_types", "issue_type", "问题类型"),
     )
+    review_categories, review_key = _result_field(
+        evaluation, record, ("need_review_cate", "需复核类别"),
+    )
     error, _ = _result_field(evaluation, record, ("error", "错误"))
     correctness = str(correctness or "").strip().lower()
+    raw_correctness = correctness
+    if correctness == "others":
+        correctness = "no_support"
     warnings = []
     if correctness and correctness not in OPERATION_CORRECTNESS:
         warnings.append(f"correctness={correctness!r} 不在允许值中，按无效结果处理")
@@ -254,11 +262,19 @@ def _normalize_record(
         warnings.append("缺少 id，将尝试按唯一 Query 兜底对齐")
 
     result = dict(evaluation)
+    effect_issues, legacy_review = split_operation_issue_fields(
+        normalize_operation_issue_types(issue_types), LEGACY_REVIEW_CATEGORIES,
+    )
     result.update({
         "correctness": correctness,
-        "issue_types": normalize_operation_issue_types(issue_types),
+        "issue_types": effect_issues,
+        "need_review_cate": list(dict.fromkeys([
+            *normalize_operation_issue_types(review_categories), *legacy_review,
+        ])),
         "error": str(error or "").strip(),
     })
+    if raw_correctness == "others":
+        result["judge_correctness"] = raw_correctness
     export = _standard_export(record, evaluation, result)
     resolved_item_id = str(item_id or "").strip()
     export["id"] = resolved_item_id
@@ -281,6 +297,7 @@ def _normalize_record(
         "query": query_key,
         "correctness": correctness_key,
         "issue_types": issue_key,
+        "need_review_cate": review_key,
     }, warnings)
 
 
@@ -322,6 +339,7 @@ def _standard_export(
     export.update({
         "correctness": result.get("correctness") or "",
         "issue_types": result.get("issue_types") or [],
+        "need_review_cate": result.get("need_review_cate") or [],
         "error": result.get("error") or "",
     })
     return export

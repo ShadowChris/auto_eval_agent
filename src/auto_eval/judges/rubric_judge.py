@@ -18,8 +18,11 @@ logger = logging.getLogger("auto_eval.classify")
 from .base import JudgeClient, JudgeOutputParseError
 from .operation_fields import (
     QUERY_ALIGNMENT_ISSUE,
+    collect_operation_output_issues,
     hoist_misnested_operation_fields,
+    normalize_operation_cards,
     normalize_operation_fields,
+    split_operation_issue_fields,
 )
 from .prompts import (
     OPERATION_MULTI_USER,
@@ -100,6 +103,7 @@ def _operation_score_from_data(
     latency: int,
     run_idx: int = 0,
     analysis: str = "",
+    known_card_types: dict[str, str] | None = None,
 ) -> OperationSingleScore:
     """把单组或多组数组中的一个对象规范为同一个任务类结果模型。"""
     data = hoist_misnested_operation_fields(data)
@@ -118,14 +122,20 @@ def _operation_score_from_data(
         task_type = "simple"
     if task_type not in {"simple", "complex"}:
         task_type = None
-    correctness, issue_types, is_low_level = normalize_operation_fields(
+    raw_correctness = str(data.get("correctness") or "").strip().lower()
+    if raw_correctness not in {"ok", "nok", "no_support", "others", "right", "wrong", "partial", "unclear"}:
+        raise ValueError(f"任务类裁判返回非法 correctness：{raw_correctness!r}")
+    correctness, all_issues, is_low_level = normalize_operation_fields(
         data.get("correctness"),
-        data.get("issue_types", data.get("error_type")),
+        collect_operation_output_issues(data),
         data.get("is_low_level", "no"),
         task_type,
         policy.issue_types if policy else None,
     )
-    if QUERY_ALIGNMENT_ISSUE in issue_types:
+    issue_types, need_review_cate = split_operation_issue_fields(
+        all_issues, policy.review_category_names if policy else []
+    )
+    if QUERY_ALIGNMENT_ISSUE in need_review_cate:
         rubric = {}
         rubric_reasons = {}
         na_dimensions = [dim.name for dim in dims]
@@ -143,6 +153,11 @@ def _operation_score_from_data(
         task_type=task_type,
         correctness=correctness,
         issue_types=issue_types,
+        need_review_cate=need_review_cate,
+        cards=normalize_operation_cards(
+            data.get("cards"),
+            known_card_types or {},
+        ),
         is_low_level=is_low_level,
         rationale=data.get("rationale", ""),
         # 旧链路字段仅保留在 Schema 中兼容历史结果；当前主裁判不再生成它们。
@@ -316,6 +331,10 @@ class RubricJudge:
                 # 顶层 analysis 同时讨论多个实验组，不能用于推断某一组的
                 # task_type；组级 task_type 必须来自该组结构化输出。
                 analysis=str(rows[group_id].get("analysis") or ""),
+                known_card_types={
+                    card.key: card.name
+                    for card in getattr(self.expert_knowledge, "result_cards", [])
+                },
             )
             for group_id, group in expected.items()
         }
@@ -447,7 +466,21 @@ class RubricJudge:
 
         analysis = parse_analysis(reply.content)
         data = parse_json_loose(reply.content)
-        if data is None:
+        if eval_mode == "operation":
+            # Missing decisions cannot be invented by a text-only JSON repairer.
+            # Web may retry once using the same policy, inputs and visual evidence.
+            if isinstance(data, dict):
+                data = hoist_misnested_operation_fields(data)
+            raw_correctness = str(data.get("correctness") or "").strip().lower() if isinstance(data, dict) else ""
+            if raw_correctness not in {"ok", "nok", "no_support", "others", "right", "wrong", "partial", "unclear"}:
+                raise JudgeOutputParseError(
+                    "任务类裁判输出缺少有效 JSON 判定或 correctness",
+                    raw_output=reply.content,
+                    repair_output="",
+                    judge=self.client.cfg.name,
+                    model=self.client.model,
+                )
+        elif data is None:
             repaired = await self.client.repair_json(
                 reply.content,
                 label="裁判输出",
@@ -474,6 +507,10 @@ class RubricJudge:
                 latency=latency,
                 run_idx=run_idx,
                 analysis=analysis,
+                known_card_types={
+                    card.key: card.name
+                    for card in getattr(self.expert_knowledge, "result_cards", [])
+                },
             )
         rubric_raw = data.get("rubric") or {}
         rubric, rubric_reasons, na_dimensions = _flatten_rubric(rubric_raw, dim_names=[d.name for d in dims])
