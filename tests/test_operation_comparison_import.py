@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from auto_eval.web import server
+from auto_eval.web.history import _OPERATION_USER_RESULT_HEADERS
 from auto_eval.web.operation_comparison_import import (
     import_operation_comparison_file,
 )
@@ -192,7 +193,15 @@ def test_comparison_export_mixes_history_and_upload(monkeypatch) -> None:
             "case_id": "c1",
             "query": "打开蓝牙",
             "sessionid": "session-a",
-            "evaluation": {"correctness": "ok", "issue_types": []},
+            "attachment_path": "/data/query.png",
+            "video_url_domain": "https://video.example/case-1.mp4",
+            "录屏时长": 9.5,
+            "evaluation": {
+                "correctness": "ok",
+                "issue_types": [],
+                "rubric": {"操作完成度": 4, "步骤正确性": 3},
+                "rubric_reasons": {"操作完成度": "已完成"},
+            },
         }, ensure_ascii=False).encode("utf-8"),
     )
     monkeypatch.setattr(server, "get_live_task", lambda _task_id: None)
@@ -222,8 +231,24 @@ def test_comparison_export_mixes_history_and_upload(monkeypatch) -> None:
     header_rows = detail.iter_rows()
     group_headers = [cell.value for cell in next(header_rows)]
     field_headers = [cell.value for cell in next(header_rows)]
+    value_row = [cell.value for cell in next(header_rows)]
     assert "实验组A：实验" in group_headers
-    assert field_headers.count("sessionid") == 2
+    field_count = len(_OPERATION_USER_RESULT_HEADERS)
+    assert tuple(field_headers[3:3 + field_count]) == _OPERATION_USER_RESULT_HEADERS
+    assert tuple(field_headers[3 + field_count:3 + 2 * field_count]) == (
+        _OPERATION_USER_RESULT_HEADERS
+    )
+    uploaded_values = dict(zip(
+        _OPERATION_USER_RESULT_HEADERS,
+        value_row[3 + field_count:3 + 2 * field_count],
+    ))
+    assert "是否挂卡" in uploaded_values
+    assert "card_presence" not in uploaded_values
+    assert uploaded_values["session_id"] == "session-a"
+    assert uploaded_values["attachment_path"] == "/data/query.png"
+    assert uploaded_values["维度_操作完成度"] == 4
+    assert uploaded_values["video_url_domain"] == "https://video.example/case-1.mp4"
+    assert uploaded_values["录屏时长"] == 9.5
 
 
 def test_comparison_module_ui_is_parallel_workspace() -> None:
