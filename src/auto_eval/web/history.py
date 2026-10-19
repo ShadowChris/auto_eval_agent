@@ -43,6 +43,12 @@ from .dataset_revision import (
     batch_run_state,
     is_item_active,
 )
+from .operation_export_fields import (
+    OPERATION_RESULT_FIELD_LABELS as _OPERATION_CARD_LABELS,
+    OPERATION_USER_RESULT_COLUMNS as _OPERATION_USER_RESULT_COLUMNS,
+    OPERATION_USER_RESULT_HEADERS as _OPERATION_USER_RESULT_HEADERS,
+    operation_user_result_display_row as _operation_user_result_display_row,
+)
 
 
 HISTORY_DIR = RUNS_DIR / "web_history"
@@ -979,19 +985,23 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
             )
             rows["逐题结果"] = operation_result_rows
             rows = {
-                "评估结果": _operation_user_result_rows(
-                    operation_result_rows,
-                    snapshot.get("items") or [],
-                ),
+                "评估结果": [
+                    _operation_user_result_display_row(row)
+                    for row in _operation_user_result_rows(
+                        operation_result_rows,
+                        snapshot.get("items") or [],
+                    )
+                ],
                 **rows,
             }
     if mode == "operation":
-        for name in ("评估结果", "逐题结果"):
-            if name in rows:
-                rows[name] = [
-                    {_OPERATION_CARD_LABELS.get(key, key): value for key, value in row.items()}
-                    for row in rows[name]
-                ]
+        # “评估结果”已通过共享字段规范生成最终表头；兼容旧的完整
+        # “逐题结果”Sheet 时仍转换其中的挂卡字段名称。
+        if "逐题结果" in rows:
+            rows["逐题结果"] = [
+                {_OPERATION_CARD_LABELS.get(key, key): value for key, value in row.items()}
+                for row in rows["逐题结果"]
+            ]
     frame_rows = _frame_manifest_rows(
         snapshot,
         include_original_video=mode != "operation",
@@ -1175,47 +1185,6 @@ _OPERATION_EXPORT_COLUMNS = (
     "评估状态",
     "error",
     "video_prepare_warnings",
-)
-
-# 普通任务类 Excel 的首个 Sheet：只呈现用户最常用的输入、媒体与评估字段。
-_OPERATION_CARD_LABELS = {
-    "card_presence": "是否挂卡",
-    "card_types": "卡片类型",
-    "card_suitability": "卡片合适判断",
-    "card_suitability_reason": "卡片合适判断原因",
-}
-
-_OPERATION_USER_RESULT_COLUMNS = (
-    "数据集序号",
-    "item_id",
-    "index",
-    "session_id",
-    "query",
-    "context",
-    "attachment_path",
-    "attachment_url_domain",
-    "attachment_url_ip",
-    "answer",
-    "correctness",
-    "issue_types",
-    "need_review_cate",
-    "card_presence",
-    "card_types",
-    "card_suitability",
-    "card_suitability_reason",
-    "rationale",
-    "is_low_level",
-    "total",
-    "维度_操作完成度",
-    "理由_操作完成度",
-    "维度_步骤正确性",
-    "理由_步骤正确性",
-    "latency_s",
-    "分享链接",
-    "video_path",
-    "video_url_domain",
-    "video_url_ip",
-    "录屏时长",
 )
 
 _OPERATION_ROUTE_DISPLAY = {
@@ -2223,6 +2192,10 @@ def operation_comparison_batch(snapshot: dict) -> dict:
         items,
         dataset_name=str(normalized.get("dataset_name") or ""),
     )
+    user_result_rows = [
+        _operation_user_result_display_row(row)
+        for row in _operation_user_result_rows(export_rows, items)
+    ]
     aligned_by_index = {
         int(row["index"]): row
         for row in aligned
@@ -2231,6 +2204,11 @@ def operation_comparison_batch(snapshot: dict) -> dict:
     export_by_index = {
         int(row["数据集序号"]) - 1: row
         for row in export_rows
+        if str(row.get("数据集序号", "")).isdigit()
+    }
+    user_result_by_index = {
+        int(row["数据集序号"]) - 1: row
+        for row in user_result_rows
         if str(row.get("数据集序号", "")).isdigit()
     }
     rows = []
@@ -2243,6 +2221,9 @@ def operation_comparison_batch(snapshot: dict) -> dict:
             if "index" in source else item.get("index", "")
         )
         export_row = dict(export_by_index.get(position) or {})
+        # 对比导出的每个数据组与单数据组“评估结果”复用同一字段投影，
+        # 同时保留报告仍在使用的内部导出字段。
+        export_row.update(user_result_by_index.get(position) or {})
         export_row["index"] = match_index
         export_row["case_id"] = item.get("case_id") or source.get("case_id") or ""
         for key in ("video_url_domain", "video_url_ip"):
@@ -2944,28 +2925,9 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         for index in range(2, len(review_rows) + 2) for column in (5, 7)
     }
 
-    detail_fields = (
-        "id",
-        "item_id",
-        "index",
-        "序号",
-        "case_id",
-        "query",
-        "sessionid",
-        "answer",
-        "context",
-        "is_low_level",
-        "correctness",
-        "issue_types",
-        "need_review_cate",
-        "execution_routes",
-        "链路类型",
-        "rationale",
-        "分享链接",
-        "video_path",
-        "录屏URL",
-        "error",
-    )
+    # 每个数据组的字段与单数据组 Excel 的“评估结果”完全一致，避免两套
+    # 导出白名单随功能演进产生字段差异。
+    detail_fields = _OPERATION_USER_RESULT_HEADERS
     union_rows = []
     for row in payload.get("union_rows") or []:
         output = {

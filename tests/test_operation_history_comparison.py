@@ -6,6 +6,7 @@ import pytest
 
 from auto_eval.analysis.operation_comparison import compare_operation_batches
 from auto_eval.web import server
+from auto_eval.web.history import _OPERATION_USER_RESULT_HEADERS
 from auto_eval.web.server import OperationHistoryComparisonReq
 
 
@@ -388,6 +389,27 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
             {"index": 1, "correctness": "ok", "issue_types": []},
         ]),
     }
+    snapshots["a"]["items"][0]["source_data"] = {
+        "index": "simple_001",
+        "session_id": "session-a",
+        "attachment_path": "/data/query.png",
+        "attachment_url_domain": "https://assets.example/query.png",
+        "attachment_url_ip": "http://192.0.2.8/query.png",
+        "分享链接": "https://share.example/case-1",
+        "video_path": "/data/case-1.mp4",
+        "video_url_domain": "https://video.example/case-1.mp4",
+        "video_url_ip": "http://192.0.2.9/case-1.mp4",
+        "耗时": 12.5,
+    }
+    snapshots["a"]["results"][0].update({
+        "total": 7,
+        "rubric": {"操作完成度": 4, "步骤正确性": 3},
+        "rubric_reasons": {
+            "操作完成度": "状态已完成",
+            "步骤正确性": "路径正确",
+        },
+        "latency_s": 2.5,
+    })
     monkeypatch.setattr(server, "get_live_task", lambda _task_id: None)
     monkeypatch.setattr(server, "load_snapshot", lambda task_id: snapshots.get(task_id))
     request = OperationHistoryComparisonReq(
@@ -476,12 +498,28 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     assert detail_headers.count("index") == 2
     assert "correctness" in detail_headers
     assert "所有组共有" in detail_headers
+    field_count = len(_OPERATION_USER_RESULT_HEADERS)
+    assert tuple(detail_headers[3:3 + field_count]) == _OPERATION_USER_RESULT_HEADERS
+    assert tuple(detail_headers[3 + field_count:3 + 2 * field_count]) == (
+        _OPERATION_USER_RESULT_HEADERS
+    )
+    baseline_values = dict(zip(
+        _OPERATION_USER_RESULT_HEADERS,
+        [cell.value for cell in detail_sheet[3]][3:3 + field_count],
+    ))
+    assert "是否挂卡" in baseline_values
+    assert "card_presence" not in baseline_values
+    assert baseline_values["attachment_path"] == "/data/query.png"
+    assert baseline_values["维度_操作完成度"] == 4
+    assert baseline_values["理由_步骤正确性"] == "路径正确"
+    assert baseline_values["video_url_domain"] == "https://video.example/case-1.mp4"
+    assert baseline_values["录屏时长"] == 12.5
     merged_ranges = {str(value) for value in detail_sheet.merged_cells.ranges}
     assert "A1:C1" in merged_ranges
-    assert "D1:W1" in merged_ranges
-    assert "X1:AQ1" in merged_ranges
+    assert "D1:AG1" in merged_ranges
+    assert "AH1:BK1" in merged_ranges
     assert detail_sheet.freeze_panes == "D3"
-    assert detail_sheet.auto_filter.ref.startswith("A2:AQ")
+    assert detail_sheet.auto_filter.ref.startswith("A2:BK")
     assert detail_sheet["A3"].border.left.style == "thin"
     assert detail_sheet["D3"].alignment.wrap_text is False
 

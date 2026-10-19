@@ -16,10 +16,11 @@ from ..analysis.operation_statistics import (
     normalize_operation_issue_types,
 )
 from ..judges.operation_fields import LEGACY_REVIEW_CATEGORIES, split_operation_issue_fields
+from .operation_export_fields import operation_user_result_display_row
 
 
 SUPPORTED_SUFFIXES = {".jsonl", ".csv", ".xlsx", ".xls", ".xlsm"}
-PREFERRED_RESULT_SHEETS = ("逐题结果", "逐题-任务类")
+PREFERRED_RESULT_SHEETS = ("评估结果", "逐题结果", "逐题-任务类")
 
 
 def import_operation_comparison_file(
@@ -307,39 +308,80 @@ def _standard_export(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     aliases = {
+        "数据集序号": ("数据集序号",),
         "id": ("id", "item_id", "题号"),
+        "item_id": ("item_id", "id", "题号"),
         "index": ("index",),
         "序号": ("序号", "sequence"),
+        "session_id": ("session_id", "sessionid", "sessionId"),
         "sessionid": ("sessionid", "session_id", "sessionId"),
-        "answer": ("answer", "agent_statement", "回复内容"),
+        "query": ("query", "操作意图", "问题"),
         "context": ("context",),
+        "attachment_path": ("attachment_path",),
+        "attachment_url_domain": ("attachment_url_domain",),
+        "attachment_url_ip": ("attachment_url_ip",),
+        "answer": ("answer", "agent_statement", "回复内容"),
+        "need_review_cate": ("need_review_cate", "需复核类别"),
+        "card_presence": ("card_presence", "是否挂卡"),
+        "card_types": ("card_types", "卡片类型"),
+        "card_suitability": ("card_suitability", "卡片合适判断"),
+        "card_suitability_reason": (
+            "card_suitability_reason",
+            "卡片合适判断原因",
+        ),
+        "rationale": ("rationale",),
+        "is_low_level": ("is_low_level",),
+        "total": ("total",),
+        "维度_操作完成度": ("维度_操作完成度",),
+        "理由_操作完成度": ("理由_操作完成度",),
+        "维度_步骤正确性": ("维度_步骤正确性",),
+        "理由_步骤正确性": ("理由_步骤正确性",),
+        "latency_s": ("latency_s",),
         "分享链接": ("分享链接", "share_url", "share_link"),
         "video_path": ("video_path", "录屏项目相对路径"),
         "录屏URL": ("录屏URL", "录屏url", "video_url", "视频链接"),
         "video_url_domain": ("video_url_domain",),
         "video_url_ip": ("video_url_ip",),
+        "录屏时长": ("录屏时长", "耗时", "录屏时长（秒）", "duration"),
     }
     export = {}
     for output_key, candidates in aliases.items():
         value, _ = _field(record, candidates)
         export[output_key] = value
     for output_key in (
-        "is_low_level",
-        "execution_routes",
-        "链路类型",
+        "answer",
+        "card_presence",
+        "card_types",
+        "card_suitability",
+        "card_suitability_reason",
         "rationale",
-        "task_type",
-        "duration_s",
+        "is_low_level",
+        "total",
         "latency_s",
-        "rubric",
-        "rubric_reasons",
     ):
         value, _ = _result_field(evaluation, record, (output_key,))
+        if value not in (None, ""):
+            export[output_key] = value
+    for output_key in ("execution_routes", "链路类型", "task_type", "duration_s", "rubric", "rubric_reasons"):
+        value, _ = _result_field(evaluation, record, (output_key,))
         export[output_key] = value
+    rubric = export.get("rubric") if isinstance(export.get("rubric"), dict) else {}
+    rubric_reasons = (
+        export.get("rubric_reasons")
+        if isinstance(export.get("rubric_reasons"), dict)
+        else {}
+    )
+    export["维度_操作完成度"] = export["维度_操作完成度"] or rubric.get("操作完成度", "")
+    export["理由_操作完成度"] = export["理由_操作完成度"] or rubric_reasons.get("操作完成度", "")
+    export["维度_步骤正确性"] = export["维度_步骤正确性"] or rubric.get("步骤正确性", "")
+    export["理由_步骤正确性"] = export["理由_步骤正确性"] or rubric_reasons.get("步骤正确性", "")
     export.update({
         "correctness": result.get("correctness") or "",
         "issue_types": result.get("issue_types") or [],
         "need_review_cate": result.get("need_review_cate") or [],
         "error": result.get("error") or "",
     })
+    # 上传结果与历史批次共用单数据组“评估结果”的最终展示字段；额外保留
+    # 报告使用的兼容字段，不让 Excel 导出与 HTML 报告互相牵制。
+    export.update(operation_user_result_display_row(export))
     return export
