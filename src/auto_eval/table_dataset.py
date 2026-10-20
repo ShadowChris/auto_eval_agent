@@ -431,21 +431,21 @@ def _read_input(
                 keep_default_na=False,
                 dtype=object,
             ), sheet
-        workbook = pd.ExcelFile(input_path)
-        candidates = list(workbook.sheet_names)
-        if "合并数据" in candidates:
-            candidates.remove("合并数据")
-            candidates.insert(0, "合并数据")
-        for sheet_name in candidates:
-            frame = pd.read_excel(
-                workbook,
-                sheet_name=sheet_name,
-                keep_default_na=False,
-                dtype=object,
-            )
-            if len(frame.columns) and not frame.empty:
-                return frame, sheet_name
-        raise ValueError("Excel 中没有可导入的非空工作表")
+        with pd.ExcelFile(input_path) as workbook:
+            candidates = list(workbook.sheet_names)
+            if "合并数据" in candidates:
+                candidates.remove("合并数据")
+                candidates.insert(0, "合并数据")
+            for sheet_name in candidates:
+                frame = pd.read_excel(
+                    workbook,
+                    sheet_name=sheet_name,
+                    keep_default_na=False,
+                    dtype=object,
+                )
+                if len(frame.columns) and not frame.empty:
+                    return frame, sheet_name
+            raise ValueError("Excel 中没有可导入的非空工作表")
     raise ValueError(
         f"不支持的输入格式 {suffix or '<无扩展名>'}；仅支持 .xlsx/.xls/.xlsm/.csv"
     )
