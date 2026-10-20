@@ -18,7 +18,7 @@ async def test_operation_judge_passes_card_catalog_to_parser(
     config = load_config(Path(__file__).resolve().parents[1] / "config")
     client = fake_judge_cls(config.judges[1])
     assert not hasattr(client, "expert_knowledge")
-    card_types = ["calendar", "memo", "xiaoyi_memory", "unknown_new_card"]
+    card_types = ["calendar", "memo", "document", "unknown_new_card"]
     data = {
         "task_type": "simple", "correctness": "ok", "total": 5,
         "rubric": {"操作完成度": 5, "步骤正确性": 5},
@@ -29,7 +29,11 @@ async def test_operation_judge_passes_card_catalog_to_parser(
     }
 
     async def complete(system, user, **kwargs):
-        assert "xiaoyi_memory" in system
+        assert "document" in system
+        assert "小艺帮记保存确认中，蓝色“去查看”是有效保存链接" in system
+        assert "图片技能—导航类仅交付对应 App 页面" in system
+        assert "不限小艺页面" in system
+        assert "黑字判 nok / 任务结果错误" in system
         output = ({"results": [dict(data, group_id=key) for key in ("a", "b")]}
                   if multi_group else data)
         return JudgeReply(content=json.dumps(output, ensure_ascii=False))
@@ -49,8 +53,8 @@ async def test_operation_judge_passes_card_catalog_to_parser(
     for score in scores:
         assert score.correctness == "ok"
         assert [card.type for card in score.cards] == [
-            "calendar", "memo", "xiaoyi_memory", "other",
+            "calendar", "memo", "document", "other",
         ]
         assert [card.observed_name for card in score.cards] == [
-            "日程卡", "备忘录卡", "小艺帮记卡", "其他卡",
+            "日程卡", "备忘录卡", "文档卡", "其他卡",
         ]

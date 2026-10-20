@@ -45,7 +45,7 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     assert [dim.name for dim in operation.rubrics] == ["操作完成度", "步骤正确性"]
     assert [dim.weight for dim in operation.rubrics] == [0.7, 0.3]
     assert operation.operation_policy is not None
-    assert config.expert_knowledge["operation"].version == 9
+    assert config.expert_knowledge["operation"].version == 10
     assert config.expert_knowledge["operation"].categories
     assert operation.operation_policy.scope_rules
     assert operation.operation_policy.evidence_rules
@@ -92,7 +92,7 @@ def test_operation_result_separates_review_reasons_and_preserves_card_evidence()
             "issue_types": ["任务结果错误", "无关挂卡"],
             "need_review_cate": ["缺少前置条件"],
             "cards": [{
-                "type": "xiaoyi_memory",
+                "type": "memo",
                 "visible_content": "周六出发",
                 "target": "周六到点提醒",
                 "relation_to_query": "direct",
@@ -111,8 +111,8 @@ def test_operation_result_separates_review_reasons_and_preserves_card_evidence()
     )
     assert score.issue_types == ["任务结果错误", "无关挂卡"]
     assert score.need_review_cate == ["缺少前置条件"]
-    assert score.cards[0].observed_name == "小艺帮记卡"
-    assert score.cards[0].type == "xiaoyi_memory"
+    assert score.cards[0].observed_name == "备忘录卡"
+    assert score.cards[0].type == "memo"
     assert score.cards[0].evidence_frames == [8, 9]
 
     verdict = aggregate_operation_scores(
@@ -123,7 +123,7 @@ def test_operation_result_separates_review_reasons_and_preserves_card_evidence()
     _fill_operation_verdict(result, verdict)
     assert result["correctness"] == "nok"
     assert result["card_presence"] == "是"
-    assert result["card_types"] == ["小艺帮记卡"]
+    assert result["card_types"] == ["备忘录卡"]
     assert result["card_suitability"] == "nok"
 
 
@@ -652,7 +652,8 @@ def test_operation_prompt_distinguishes_empty_query_result_from_missing_action_o
 
     assert "区分“查询结果为空”和“动作缺少目标对象”" in prompt
     assert "未找到、无记录、未绑定、尚未创建" in prompt
-    assert "没有可恢复应用、目标文件、剪贴板内容或活动对象" in prompt
+    assert "没有目标文件、剪贴板内容或活动对象" in prompt
+    assert "恢复应用按应用管理页验收，不要求存在可恢复应用" in prompt
     assert "不能因为成功进入页面或展示空状态就判 ok" in prompt
     assert "仅文字声称“没有结果/找不到”而无查询证据时判 others" in prompt
     assert "不因为结果为空就额外要求用户创建、绑定或添加对象" in prompt
@@ -677,7 +678,8 @@ def test_operation_prompt_keeps_reply_omission_and_visual_conflict_separate() ->
     _, prompt = _operation_prompt()
 
     assert "属于回复不够完整，不等于回复与界面冲突" in prompt
-    assert "与可见状态相反的结果、对象或参数" in prompt
+    assert "须引用 agent 原句中的明确事实断言" in prompt
+    assert "问句包含明确错误前提时仍须核验" in prompt
 
 
 def test_operation_prompt_distinguishes_unverified_condition_from_false_condition() -> None:
@@ -722,7 +724,7 @@ def test_operation_prompt_keeps_action_task_open_while_waiting_for_user() -> Non
     assert "【逐目标状态】" in prompt
     assert "阻塞前是否已有足以独立导致失败的可见错误" in prompt
     assert "禁止把任务面板的步骤、“已完成”或“超时，任务终止”当成 agent 回复" in prompt
-    assert "必须引用冲突的具体 agent 自然语言回复" in prompt
+    assert "必须引用冲突原句" in prompt
 
 
 def test_operation_prompt_requires_blocker_evidence_gate_before_correctness() -> None:
@@ -765,8 +767,8 @@ def test_operation_prompt_follows_serial_execution_chain_and_requires_direct_pla
 def test_operation_prompt_distinguishes_action_preparation_from_core_trigger() -> None:
     _, prompt = _operation_prompt()
 
-    assert "不可省略的核心提交或触发动作" in prompt
-    assert "必须区分前置准备和核心动作执行" in prompt
+    assert "仅对验收终点要求实际提交、触发或状态生效的目标" in prompt
+    assert "区分前置准备和核心动作执行" in prompt
     assert "进入对应应用、跳转目标页面、找到目标对象" in prompt
     assert "不能证明核心动作已经执行" in prompt
     assert "目标专属的直接触发、执行中或执行完成反馈" in prompt

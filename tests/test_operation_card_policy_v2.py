@@ -50,8 +50,19 @@ def test_known_names_are_fixed_unknown_categories_are_short():
     ], catalog)
     assert [card.type for card in aliases] == ['huawei_video', 'image']
     short_name = normalize_operation_cards([dict(type='unknown', observed_name='小艺帮记')], catalog)
-    assert short_name[0].type == 'xiaoyi_memory'
-    assert short_name[0].observed_name == '小艺帮记卡'
+    assert short_name[0].type == 'other'  # No such product card in the current catalog.
+    assert short_name[0].observed_name == '小艺帮记'
+
+
+def test_removed_memory_card_does_not_rewrite_historical_results():
+    original = dict(mode='operation', items=[], results=[dict(
+        correctness='ok', card_presence='present', card_types=['小艺帮记卡'],
+        cards=[dict(type='xiaoyi_memory', observed_name='小艺帮记卡')],
+    )])
+    current = _with_operation_compat(original)
+    assert current['results'][0]['cards'] == original['results'][0]['cards']
+    assert current['results'][0]['card_types'] == ['小艺帮记卡']
+    assert original['results'][0]['card_presence'] == 'present'
 
 
 @pytest.mark.parametrize('raw', ['ok', 'nok', 'no_support', 'others'])

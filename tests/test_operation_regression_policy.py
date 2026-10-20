@@ -6,13 +6,14 @@ from auto_eval.expert_knowledge import render_expert_knowledge
 from auto_eval.judges.prompts import OPERATION_SYSTEM, RUBRIC_SYSTEM
 
 
-def _prompt() -> str:
+def _prompt(**options) -> str:
     config = load_config(Path(__file__).resolve().parents[1] / 'config')
     skill = config.domain_skills['operation']
     return OPERATION_SYSTEM.render(
         persona='终端用户', dims=skill.rubrics, scale=5,
         policy=skill.operation_policy,
         expert_knowledge_text=render_expert_knowledge(config.expert_knowledge['operation']),
+        **options,
     )
 
 
@@ -95,6 +96,107 @@ def test_operation_prompt_stays_compact_and_question_policy_stays_separate() -> 
     assert '默认值、历史搜索词、占位词、推荐词' not in RUBRIC_SYSTEM.render(
         persona='问答裁判', dims=[], scale=5,
     )
+
+
+def test_product_endpoints_refine_existing_policy_without_new_modules() -> None:
+    config = load_config(Path(__file__).resolve().parents[1] / 'config')
+    policy = config.domain_skills['operation'].operation_policy
+    assert 'product_spec_rules' not in type(policy).model_fields
+    assert 'product_acceptance_endpoints' not in {
+        category.key for category in config.expert_knowledge['operation'].categories
+    }
+    prompt = _prompt()
+    assert '结合原始意图与明确适用的产品规格确定验收终点' in policy.scope_rules[3]
+    assert '按任务范围规则确定验收终点' in policy.decision_order[2]
+    assert '页面交付例外仅限' not in prompt
+    assert '页面交付目标按到达验收并评分，不追加后续动作' not in prompt
+    assert '以目标应用的可操作页面交付' in prompt
+    assert '恢复应用仅交付应用管理页面' in prompt
+    assert '图片技能—导航类仅交付对应 App 页面' in prompt
+    assert '不凭“导航”一词套用' in prompt
+    assert '颜色不清且无独立错误判 others / 未展示可验证结果' in prompt
+    assert '纯文本不能证明颜色，链接不计挂卡' in prompt
+    assert '按已确定的验收终点判断' in policy.issue_types['应执行目标未执行'].description
+    assert '不包括已实证达到验收终点' in policy.issue_types['应执行目标未执行'].description
+    assert '按产品先验已交付页面' not in policy.issue_types['应执行目标未执行'].description
+    assert '黑字判 nok / 任务结果错误' in prompt
+    assert '保存确认' not in RUBRIC_SYSTEM.render(persona='问答裁判', dims=[], scale=5)
+
+
+def test_page_delivery_exception_preserves_other_goal_and_evidence_boundaries() -> None:
+    config = load_config(Path(__file__).resolve().parents[1] / 'config')
+    skill = config.domain_skills['operation']
+    for multi_group in (False, True):
+        prompt = OPERATION_SYSTEM.render(
+            persona='终端用户', dims=skill.rubrics, scale=5,
+            policy=skill.operation_policy,
+            expert_knowledge_text=render_expert_knowledge(config.expert_knowledge['operation']),
+            multi_group=multi_group,
+        )
+        assert '不将特定规格泛化到其他任务' in prompt
+        assert '仅对验收终点要求实际提交、触发或状态生效的目标' in prompt
+        # Ordinary entry requests remain valid; state changes and queries still need evidence.
+        assert '可以按打开、查看或展示该功能入口理解' in prompt
+        assert '必须观察实际状态满足要求' in prompt
+        assert '仅“已设置/已查询”等完成声明不证明实际执行' in prompt
+        assert '系统显示“√已完成”只表示本轮任务执行流程结束' in prompt
+        assert '页面仅显示“搜索中/加载中”不能证明查询完成' in prompt
+        # Narrowing the page exception does not change multi-goal or blocker handling.
+        assert '每个生效目标都必须有对应证据' in prompt
+        assert '通用建议替代缺少个人信息的具体答案' in prompt
+        assert '串行后续未开始目标不单独记漏项' in prompt
+
+
+def test_memory_confirmation_color_precedes_generic_missing_evidence() -> None:
+    for multi_group in (False, True):
+        prompt = _prompt(multi_group=multi_group)
+        assert '小艺帮记保存确认出现“去查看”时，先看录屏颜色' in prompt
+        assert '蓝字证明对应保存目标完成，不额外要求结果卡' in prompt
+        assert '黑字判 nok / 任务结果错误，不被缺卡或其他目标缺证覆盖' in prompt
+        assert '已辨黑字不得无新证据改称颜色不清' in prompt
+        assert '颜色不清且无独立错误判 others / 未展示可验证结果' in prompt
+        assert '不据此判复杂任务整体完成' in prompt
+        assert '纯文本不能证明颜色，链接不计挂卡' in prompt
+        assert '每个生效目标都必须有对应证据' in prompt
+
+
+def test_memory_result_state_is_checked_before_generic_missing_evidence() -> None:
+    config = load_config(Path(__file__).resolve().parents[1] / 'config')
+    policy = config.domain_skills['operation'].operation_policy
+    evidence = '\n'.join(policy.evidence_rules)
+    assert evidence.count('小艺帮记保存确认出现') == 1
+    assert evidence.index('小艺帮记保存确认出现') < evidence.index('只有泛化的“正在操作/已完成”')
+    assert '含保存确认、合格卡片' in policy.decision_order[4]
+    assert '按专家经验核验状态与原目标约束' in policy.decision_order[4]
+
+
+def test_verified_entry_completion_is_not_undone_by_returning() -> None:
+    for multi_group in (False, True):
+        prompt = _prompt(multi_group=multi_group)
+        assert '功能入口目标未曾实证到达' in prompt
+        assert '已达到验收终点且未被撤销，不因随后返回而改判未执行' in prompt
+        assert '仅对验收终点要求实际提交、触发或状态生效的目标' in prompt
+        assert '仅“已设置/已查询”等完成声明不证明实际执行' in prompt
+
+
+def test_reply_conflict_requires_explicit_claim_instead_of_inferred_denial() -> None:
+    config = load_config(Path(__file__).resolve().parents[1] / 'config')
+    policy = config.domain_skills['operation'].operation_policy
+    description = policy.issue_types['回复与界面不一致'].description
+    assert '明确事实断言与可见结果、对象或参数冲突' in description
+    assert '必须引用冲突原句，否则不得标记' in description
+    for multi_group in (False, True):
+        prompt = _prompt(multi_group=multi_group)
+        assert '不能把多余追问或未确认完成改写为否认已交付结果' in prompt
+        assert '问句包含明确错误前提时仍须核验' in prompt
+        assert '属于回复不够完整，不等于回复与界面冲突' in prompt
+        assert '系统步骤不属于回复' in prompt
+        assert '通用回复质量问题另记 issue，不改变执行根因' in prompt
+        # Do not turn this clarification into an unconditional OK or blocker exemption.
+        assert '不将特定规格泛化到其他任务' in prompt
+        assert '串行后续未开始目标不单独记漏项' in prompt
+        assert '录屏Query无法与输入Query一致核验' in prompt
+        assert '最终必须判 nok / 执行中断' in prompt
 
 
 def test_task_fact_summary_separates_results_claims_and_blocker_effects() -> None:

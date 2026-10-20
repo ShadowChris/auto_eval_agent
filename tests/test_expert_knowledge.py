@@ -30,7 +30,9 @@ def test_operation_expert_knowledge_loads_separately_from_policy() -> None:
     knowledge = config.expert_knowledge["operation"]
 
     assert knowledge.name == "任务类专家经验"
-    assert knowledge.version == 9
+    assert knowledge.version == 10
+    assert "xiaoyi_memory" not in {card.key for card in knowledge.result_cards}
+    assert "小艺帮记保存确认中，蓝色“去查看”是有效保存链接，黑字缺链接" in render_expert_knowledge(knowledge)
     assert any(
         "来电播报功能" in rule
         for category in knowledge.categories
