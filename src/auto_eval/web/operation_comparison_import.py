@@ -16,11 +16,25 @@ from ..analysis.operation_statistics import (
     normalize_operation_issue_types,
 )
 from ..judges.operation_fields import LEGACY_REVIEW_CATEGORIES, split_operation_issue_fields
-from .operation_export_fields import operation_user_result_display_row
+from .operation_export_fields import (
+    operation_result_identity_fields,
+    operation_user_result_display_row,
+)
 
 
 SUPPORTED_SUFFIXES = {".jsonl", ".csv", ".xlsx", ".xls", ".xlsm"}
 PREFERRED_RESULT_SHEETS = ("评估结果", "逐题结果", "逐题-任务类")
+REQUIRED_COMPARISON_FIELDS = {
+    "id": ("id", "item_id", "题号"),
+    "query": ("query", "操作意图", "问题"),
+    "correctness": ("correctness", "完成判定", "判定"),
+    "issue_types": ("issue_types", "issue_type", "问题类型"),
+    "rationale": ("rationale", "判定理由"),
+}
+COMPARISON_FIELD_ALIASES = {
+    **REQUIRED_COMPARISON_FIELDS,
+    "need_review_cate": ("need_review_cate", "需复核类别"),
+}
 
 
 def import_operation_comparison_file(
@@ -40,15 +54,7 @@ def import_operation_comparison_file(
         raise ValueError("文件中没有可导入的数据行")
     rows: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
-    mapping = {
-        "id": "",
-        "index": "",
-        "query": "",
-        "correctness": "",
-        "issue_types": "",
-        "need_review_cate": "",
-    }
-    valid_count = 0
+    mapping = {"index": "", **dict.fromkeys(COMPARISON_FIELD_ALIASES, "")}
     for position, record in enumerate(records):
         row, row_mapping, row_warnings = _normalize_record(record, position)
         rows.append(row)
@@ -57,25 +63,14 @@ def import_operation_comparison_file(
                 mapping[key] = value
         for warning in row_warnings:
             warnings.append({"row": position + 2, "message": warning})
-        result = row.get("result") or {}
-        if not result.get("error") and result.get("correctness") in OPERATION_CORRECTNESS:
-            valid_count += 1
-    if not mapping["correctness"] or not valid_count:
-        raise ValueError(
-            "未识别到有效 correctness；请上传系统逐题 JSONL/Excel，"
-            "或包含 ok/nok/no_support/others 判定的结果表"
-        )
-    id_rows: dict[str, list[int]] = {}
-    for position, row in enumerate(rows, start=2):
-        item_id = str(row.get("id") or "").strip()
-        if item_id:
-            id_rows.setdefault(item_id, []).append(position)
-    for item_id, row_numbers in id_rows.items():
-        if len(row_numbers) > 1:
-            warnings.append({
-                "row": row_numbers[0],
-                "message": f"id={item_id} 重复，重复数据不会参与自动对齐",
-            })
+    missing = [field for field in REQUIRED_COMPARISON_FIELDS if not mapping[field]]
+    if missing:
+        raise ValueError(f"缺少必需列：{'、'.join(missing)}；请上传包含所有必需字段的评估结果表")
+    warnings.extend(_exclude_duplicate_ids(rows))
+    valid_count = _valid_row_count(rows)
+    if not valid_count:
+        details = "；".join(warning["message"] for warning in warnings[:3])
+        raise ValueError(f"没有可参与对比的有效记录：{details or '所有记录均为评估失败'}")
 
     source_id = f"upload_{uuid.uuid4().hex[:12]}"
     return {
@@ -113,18 +108,22 @@ def validate_uploaded_comparison_source(source: dict[str, Any]) -> dict[str, Any
         if not isinstance(row, dict):
             raise ValueError(f"上传结果集第 {position + 1} 行格式无效")
         result = row.get("result") if isinstance(row.get("result"), dict) else {}
-        normalized_rows.append({
-            "position": position,
-            "id": str(row.get("id") or row.get("item_id") or "").strip(),
-            "index": row.get("index") if row.get("index") is not None else "",
-            "item_id": str(row.get("id") or row.get("item_id") or "").strip(),
-            "case_id": str(row.get("case_id") or ""),
-            "query": str(row.get("query") or ""),
-            "result": dict(result),
-            "export": dict(row.get("export") or {}),
-        })
+        exported = row.get("export") if isinstance(row.get("export"), dict) else {}
+        normalized, _, _ = _normalize_record({
+            **exported,
+            "id": row.get("id") or row.get("item_id") or "",
+            "index": row.get("index", ""),
+            "case_id": row.get("case_id", ""),
+            "query": row.get("query", ""),
+            "evaluation": dict(result),
+        }, position)
+        normalized_rows.append(normalized)
+    _exclude_duplicate_ids(normalized_rows)
+    if not _valid_row_count(normalized_rows):
+        raise ValueError("上传结果集没有可参与对比的有效记录")
     return {
         "task_id": source_id,
+        "source_type": "upload",
         "dataset_name": str(
             source.get("group_name") or source.get("dataset_name") or source_id
         ),
@@ -133,6 +132,31 @@ def validate_uploaded_comparison_source(source: dict[str, Any]) -> dict[str, Any
         "judge_model": "",
         "rows": normalized_rows,
     }
+
+
+def _valid_row_count(rows: list[dict[str, Any]]) -> int:
+    return sum(
+        not row["result"].get("error")
+        and row["result"].get("correctness") in OPERATION_CORRECTNESS
+        for row in rows
+    )
+
+
+def _exclude_duplicate_ids(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    positions: dict[str, list[int]] = {}
+    for position, row in enumerate(rows):
+        if row["id"]:
+            positions.setdefault(row["id"], []).append(position)
+    warnings = []
+    for item_id, indexes in positions.items():
+        if len(indexes) < 2:
+            continue
+        message = f"id={item_id} 重复，重复数据不会参与自动对齐"
+        warnings.append({"row": indexes[0] + 2, "message": message})
+        for index in indexes:
+            for key in ("result", "export"):
+                rows[index][key]["error"] = rows[index][key].get("error") or message
+    return warnings
 
 
 def _read_records(
@@ -161,7 +185,7 @@ def _read_records(
         last_error: Exception | None = None
         for encoding in ("utf-8-sig", "utf-8", "gb18030"):
             try:
-                dataframe = pd.read_csv(BytesIO(content), encoding=encoding)
+                dataframe = pd.read_csv(BytesIO(content), encoding=encoding, dtype=object)
                 break
             except UnicodeDecodeError as exc:
                 last_error = exc
@@ -176,7 +200,7 @@ def _read_records(
     )
     if sheet is None:
         return [], None
-    dataframe = pd.read_excel(workbook, sheet_name=sheet)
+    dataframe = pd.read_excel(workbook, sheet_name=sheet, dtype=object)
     return _dataframe_records(dataframe), sheet
 
 
@@ -233,34 +257,45 @@ def _normalize_record(
     evaluation = record.get("evaluation")
     if not isinstance(evaluation, dict):
         evaluation = {}
+    field_values = {}
+    field_mapping = {}
+    for field, aliases in COMPARISON_FIELD_ALIASES.items():
+        value, key = (
+            _field(record, aliases)
+            if field in {"id", "query"}
+            else _result_field(evaluation, record, aliases)
+        )
+        field_values[field] = value
+        field_mapping[field] = key
     match_index, index_key = _field(record, ("index",))
     case_id, _ = _field(record, ("case_id", "caseId", "case id"))
-    query, query_key = _field(record, ("query", "操作意图", "问题"))
-    item_id, item_id_key = _field(record, ("id", "item_id", "题号"))
-    correctness, correctness_key = _result_field(
-        evaluation,
-        record,
-        ("correctness", "完成判定", "判定"),
-    )
-    issue_types, issue_key = _result_field(
-        evaluation,
-        record,
-        ("issue_types", "issue_type", "问题类型"),
-    )
-    review_categories, review_key = _result_field(
-        evaluation, record, ("need_review_cate", "需复核类别"),
-    )
+    query = field_values["query"]
+    item_id = field_values["id"]
+    correctness = field_values["correctness"]
+    issue_types = field_values["issue_types"]
+    review_categories = field_values["need_review_cate"]
     error, _ = _result_field(evaluation, record, ("error", "错误"))
+    rationale = str(field_values["rationale"] or "").strip()
     correctness = str(correctness or "").strip().lower()
     raw_correctness = correctness
     if correctness == "others":
         correctness = "no_support"
-    warnings = []
-    if correctness and correctness not in OPERATION_CORRECTNESS:
-        warnings.append(f"correctness={correctness!r} 不在允许值中，按无效结果处理")
-        correctness = ""
-    if not str(item_id or "").strip():
-        warnings.append("缺少 id，将尝试按唯一 Query 兜底对齐")
+    problems = []
+    missing = [field for field in REQUIRED_COMPARISON_FIELDS if not field_mapping[field]]
+    if missing:
+        problems.append(f"缺少必需字段：{'、'.join(missing)}")
+    for field, value in (("id", item_id), ("query", query)):
+        if value is None or not str(value).strip():
+            problems.append(f"{field} 不能为空")
+    # 系统原生失败记录没有评分和判定理由，但需保留其行用于追溯。
+    if not error:
+        if correctness not in OPERATION_CORRECTNESS:
+            problems.append("correctness 必须是 ok、nok 或 no_support")
+        if not rationale:
+            problems.append("rationale 不能为空")
+    warnings = ["；".join(problems)] if problems else []
+    if problems:
+        error = f"导入校验失败：{'；'.join(problems)}"
 
     result = dict(evaluation)
     effect_issues, legacy_review = split_operation_issue_fields(
@@ -272,12 +307,13 @@ def _normalize_record(
         "need_review_cate": list(dict.fromkeys([
             *normalize_operation_issue_types(review_categories), *legacy_review,
         ])),
+        "rationale": rationale,
         "error": str(error or "").strip(),
     })
     if raw_correctness == "others":
         result["judge_correctness"] = raw_correctness
     export = _standard_export(record, evaluation, result)
-    resolved_item_id = str(item_id or "").strip()
+    resolved_item_id = str(item_id if item_id is not None else "").strip()
     export["id"] = resolved_item_id
     export["index"] = match_index
     export["item_id"] = resolved_item_id
@@ -293,12 +329,8 @@ def _normalize_record(
         "result": result,
         "export": export,
     }, {
-        "id": item_id_key,
         "index": index_key,
-        "query": query_key,
-        "correctness": correctness_key,
-        "issue_types": issue_key,
-        "need_review_cate": review_key,
+        **field_mapping,
     }, warnings)
 
 
@@ -379,8 +411,14 @@ def _standard_export(
         "correctness": result.get("correctness") or "",
         "issue_types": result.get("issue_types") or [],
         "need_review_cate": result.get("need_review_cate") or [],
+        "rationale": result.get("rationale") or "",
         "error": result.get("error") or "",
     })
+    identities = operation_result_identity_fields(record, export.get("id", ""))
+    # Excel/CSV 已有展开列时直接读取，JSONL 则从原始 metadata 读取。
+    if "metadata.id" in record:
+        identities["metadata.id"] = record["metadata.id"]
+    export.update(identities)
     # 上传结果与历史批次共用单数据组“评估结果”的最终展示字段；额外保留
     # 报告使用的兼容字段，不让 Excel 导出与 HTML 报告互相牵制。
     export.update(operation_user_result_display_row(export))

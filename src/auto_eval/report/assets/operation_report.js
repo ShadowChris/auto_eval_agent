@@ -110,7 +110,7 @@
       if (!payload || disposed) return;
       const isCompare = comparison(), stats = payload.statistics;
       const subtitle = isCompare
-        ? payload.groups.map(g => `${esc(g.group_label)}：${esc(g.group_name)}`).join(" · ")
+        ? payload.groups.map(g => `${esc(g.group_label)}：${esc(g.group_name)} <span class="or-source-tag${g.source_type === "upload" ? " upload" : ""}">${esc(g.source_label || "原生评估")}</span>`).join(" · ")
         : esc(payload.dataset_name || payload.task_id);
       root.innerHTML = `
         <div class="or-heading"><div><div class="or-name">${isCompare ? "任务类对比报告" : "任务类统计报告"}</div><div class="or-muted">${subtitle}</div></div>

@@ -10,6 +10,8 @@
 .operation-report section{margin:0}
 .operation-report p{margin:0}
 .operation-report .or-muted{color:var(--or-muted);font-size:12px}
+.operation-report .or-source-tag{display:inline-block;padding:1px 7px;border-radius:999px;background:#eef2ff;color:#4338ca;font-size:12px;white-space:nowrap}
+.operation-report .or-source-tag.upload{background:#ecfdf5;color:#047857}
 .operation-report .or-heading,.operation-report .or-row,.operation-report .or-panel-heading,.operation-report .or-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .operation-report .or-name{font-weight:600;font-size:16px;overflow-wrap:anywhere}
 .operation-report .or-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}

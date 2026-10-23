@@ -245,6 +245,8 @@ def _group_statistics(
     )
     return {
         "task_id": batch["task_id"],
+        "source_type": "upload" if batch.get("source_type") == "upload" else "history",
+        "source_label": "上传结果" if batch.get("source_type") == "upload" else "原生评估",
         "dataset_name": batch.get("dataset_name") or "",
         "group_name": _batch_name(batch),
         "group_label": batch.get("group_label") or "",

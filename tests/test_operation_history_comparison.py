@@ -516,10 +516,10 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     assert baseline_values["录屏时长"] == 12.5
     merged_ranges = {str(value) for value in detail_sheet.merged_cells.ranges}
     assert "A1:C1" in merged_ranges
-    assert "D1:AG1" in merged_ranges
-    assert "AH1:BK1" in merged_ranges
+    assert "D1:AI1" in merged_ranges
+    assert "AJ1:BO1" in merged_ranges
     assert detail_sheet.freeze_panes == "D3"
-    assert detail_sheet.auto_filter.ref.startswith("A2:BK")
+    assert detail_sheet.auto_filter.ref.startswith("A2:BO")
     assert detail_sheet["A3"].border.left.style == "thin"
     assert detail_sheet["D3"].alignment.wrap_text is False
 

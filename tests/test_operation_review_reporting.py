@@ -20,6 +20,7 @@ def test_import_preserves_review_categories(format: str, nested: bool) -> None:
     evaluation = {
         "correctness": "no_support", "issue_types": "内部过程信息泄露",
         "need_review_cate": "待用户澄清；待用户澄清；缺少前置条件",
+        "rationale": "缺少必要信息",
     }
     record = {"id": "a", "query": "查询信息"}
     if nested:
@@ -47,6 +48,7 @@ def test_import_legacy_others_moves_review_without_losing_effect_issue() -> None
     source = import_operation_comparison_file("legacy.jsonl", json.dumps({
         "id": "a", "query": "查询信息", "correctness": "others",
         "issue_types": ["环境或算力异常", "内部过程信息泄露"],
+        "need_review_cate": [], "rationale": "环境异常",
     }, ensure_ascii=False).encode())
     result = source["rows"][0]["result"]
     assert source["summary"]["valid_count"] == 1

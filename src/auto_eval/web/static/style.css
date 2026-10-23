@@ -327,6 +327,7 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
 .comparison-source-order-actions { display: flex; gap: 6px; margin-left: auto; }
 .comparison-source-order-actions + .btn-danger { margin-left: 0; }
 .comparison-source-kind { padding: 2px 7px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 12px; }
+.comparison-source-kind.upload { background: #ecfdf5; color: #047857; }
 .comparison-source-name { display: grid; grid-template-columns: auto minmax(220px, 620px) auto auto; align-items: center; justify-content: start; gap: 8px; margin-bottom: 8px; }
 .comparison-source-name-label { color: #64748b; font-size: 13px; }
 .comparison-source-name-value { min-width: 220px; max-width: 620px; overflow-wrap: anywhere; }

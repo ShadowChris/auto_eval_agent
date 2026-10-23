@@ -106,6 +106,8 @@ def test_import_comparison_preserves_video_sites(format: str) -> None:
     record = {
         "id": "item_001", "index": "simple_001", "query": "打开蓝牙", "correctness": "nok",
         "issue_types": "任务结果错误",
+        "need_review_cate": "",
+        "rationale": "结果与目标不符",
         "video_url_domain": "https://video.example.test/one",
         "video_url_ip": "http://192.0.2.2:8000/one",
     }

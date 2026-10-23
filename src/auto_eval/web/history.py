@@ -47,6 +47,7 @@ from .operation_export_fields import (
     OPERATION_RESULT_FIELD_LABELS as _OPERATION_CARD_LABELS,
     OPERATION_USER_RESULT_COLUMNS as _OPERATION_USER_RESULT_COLUMNS,
     OPERATION_USER_RESULT_HEADERS as _OPERATION_USER_RESULT_HEADERS,
+    operation_result_identity_fields,
     operation_user_result_display_row as _operation_user_result_display_row,
 )
 
@@ -1372,6 +1373,7 @@ def _operation_user_result_rows(
 
         values = {
             "数据集序号": result.get("数据集序号", position + 1),
+            **operation_result_identity_fields(source, item.get("id", "")),
             "item_id": result.get("item_id") or item.get("id") or f"q{position}",
             "index": _first_export_value(result.get("index"), source.get("index")),
             "session_id": _first_export_value(
@@ -1765,6 +1767,7 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
         source = _source_data_for_item(item)
         row: dict[str, Any] = {
             "数据集序号": index + 1,
+            **operation_result_identity_fields(source, item.get("id") or f"q{index}"),
             "评估分段": item.get("evaluation_segment_no") or 1,
             "分段来源数据集": (
                 item.get("evaluation_source_dataset")
@@ -1775,7 +1778,6 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
             "数据版本": int(item.get("dataset_revision") or 1),
             "来源批次ID": item.get("dataset_source_batch_id") or "",
             "source_line": item.get("source_line") or index + 1,
-            "id": item.get("id") or f"q{index}",
             "query": item.get("query") or item.get("question") or "",
         }
         for key, value in source.items():
@@ -2245,6 +2247,7 @@ def operation_comparison_batch(snapshot: dict) -> dict:
     backend = _judge_backend_summary(normalized)
     return {
         "task_id": normalized.get("task_id") or "",
+        "source_type": "history",
         "dataset_name": normalized.get("dataset_name") or "",
         "created_at": normalized.get("created_at"),
         "judge_provider": backend["judge_provider"],
@@ -2804,7 +2807,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         ["全组共同 Case", payload.get("all_groups_common_matched_count", 0)],
         ["全组共同有效 Case", payload.get("all_groups_common_valid_count", 0)],
         [],
-        ["组别", "数据集", "task_id", "原始数据量", "共有有效数据量", "ok", "nok", "no_support", "OK率", "NOK率", "率分母"],
+        ["组别", "数据集", "task_id", "原始数据量", "共有有效数据量", "ok", "nok", "no_support", "OK率", "NOK率", "率分母", "来源"],
     ]
     for group in groups:
         statistics = group.get("statistics") or {}
@@ -2824,6 +2827,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             _display_percent(statistics.get("ok_rate")),
             _display_percent(statistics.get("nok_rate")),
             statistics.get("rate_denominator", 0),
+            group.get("source_label") or "原生评估",
         ])
     group_header_row = 6
     group_data_start = group_header_row + 1
