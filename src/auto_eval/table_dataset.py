@@ -2,15 +2,16 @@
 
 核心字段映射：
 
-* id: 优先使用 ``<input_prefix>_<index>``；输入表没有 ``index`` 列时使用
-  ``<input_prefix>_<序号>``，例如 ``0730众测_simple_001``。
+* id: 优先复用每行非空的 ``id``；为空或没有该列时，使用
+  ``<input_prefix>_<index>``，输入表没有 ``index`` 列时使用
+  ``<input_prefix>_<序号>``；均不可用时以源表行号兜底并警告。
 * 序号: 保留源表序号，例如 ``simple_001``。
 * query/context/answer/task_start_time/task_end_time: 沿用原任务类转换规则。
 * video_path: 输入表有 ``video_path`` 列时直接复用；否则按
   ``<video_prefix>/[文件路径]/<原文件名>`` 构造，其中“文件路径”可选。
 * 原表列全部保留：标准关键字段位于前面，其余输入列按原列顺序平铺追加到
   每条 JSON 对象末尾；被系统生成值占用的同名原始列使用 ``_1``、``_2``
-  后缀保存，例如原始 ``id`` 保存为 ``id_1``。
+  后缀保存；直接复用的 ``id`` 不重复生成副本。
 
 默认 context 地点为“浙江省杭州市滨江区滨康路101号”，可通过
 ``--current-location`` 修改。
@@ -485,11 +486,12 @@ def convert_table(
     missing_columns = sorted(required - set(df.columns))
     if missing_columns:
         raise ValueError(f"输入表格缺少必需列：{', '.join(missing_columns)}")
+    has_id_column = "id" in df.columns
     has_index_column = INDEX_COLUMN in df.columns
     has_sequence_column = SEQUENCE_COLUMN in df.columns
-    if not has_index_column and not has_sequence_column:
+    if not has_id_column and not has_index_column and not has_sequence_column:
         raise ValueError(
-            f"输入表格必须至少包含 {INDEX_COLUMN} 或 {SEQUENCE_COLUMN} 列"
+            f"输入表格必须至少包含 id、{INDEX_COLUMN} 或 {SEQUENCE_COLUMN} 列"
         )
 
     rows: list[dict[str, Any]] = []
@@ -529,16 +531,21 @@ def convert_table(
             _normalize_identifier(row.get(SEQUENCE_COLUMN))
             if has_sequence_column else ""
         )
-        id_source_column = INDEX_COLUMN if has_index_column else SEQUENCE_COLUMN
+        id_source_column = (
+            INDEX_COLUMN if has_index_column
+            else SEQUENCE_COLUMN if has_sequence_column else "id"
+        )
         id_suffix = _normalize_identifier(row.get(id_source_column))
-        if not id_suffix:
-            id_suffix = f"excel_row_{source_row:04d}"
-            row_warnings.append(f"missing_{id_source_column}")
-        item_id = f"{prefix}_{id_suffix}"
+        item_id = _normalize_identifier(row.get("id"))
+        if not item_id:
+            if not id_suffix:
+                id_suffix = f"excel_row_{source_row:04d}"
+                row_warnings.append(f"missing_{id_source_column}")
+            item_id = f"{prefix}_{id_suffix}"
         if item_id in used_ids:
             first_row = used_ids[item_id]
             raise ValueError(
-                f"生成 id 重复：{item_id}，首次出现在第 {first_row} 行，"
+                f"输入或生成的 id 重复：{item_id}，首次出现在第 {first_row} 行，"
                 f"再次出现在第 {source_row} 行"
             )
         used_ids[item_id] = source_row
@@ -640,8 +647,9 @@ def convert_table(
 
         # 标准关键字段保持在前面；其余原表字段按原列顺序追加。
         # 含义一致且直接采用的标准列不重复；若系统生成值占用了原始列名，
-        # 则以 id_1、id_2 这样的数字后缀保留原始值，避免静默丢列。
+        # 则以 _1、_2 这样的数字后缀保留原始值，避免静默丢列。
         direct_source_columns = {
+            "id",
             QUERY_COLUMN,
             *(column for column in (INDEX_COLUMN, SEQUENCE_COLUMN) if column in df.columns),
             *(column for column in direct_standard_columns if column in df.columns),
@@ -706,7 +714,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--input-prefix",
-        help="生成 id 的前缀，例如 0730众测；默认使用输入文件名",
+        help="id 为空时生成题号的前缀，例如 0730众测；默认使用输入文件名",
     )
     parser.add_argument(
         "--video-prefix",

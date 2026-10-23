@@ -260,7 +260,7 @@ def test_index_can_build_id_without_sequence_column(tmp_path: Path):
     assert "序号" not in exported
 
 
-def test_generated_standard_field_keeps_raw_collision_with_numbered_suffix(
+def test_explicit_id_is_reused_without_renaming_numbered_source_columns(
     tmp_path: Path,
 ):
     video = tmp_path / "direct.mp4"
@@ -277,9 +277,9 @@ def test_generated_standard_field_keeps_raw_collision_with_numbered_suffix(
     result = convert_table(source, input_prefix="V1", project_root=tmp_path)
 
     exported = json.loads(result.output_path.read_text(encoding="utf-8"))
-    assert exported["id"] == "V1_simple_001"
-    assert exported["id_1"] == "raw-id"
-    assert exported["id_2"] == "already-numbered"
+    assert exported["id"] == "raw-id"
+    assert exported["id_1"] == "already-numbered"
+    assert "id_2" not in exported
 
 
 def test_auto_sheet_prefers_merged_data(tmp_path: Path):
@@ -307,6 +307,78 @@ def test_auto_sheet_prefers_merged_data(tmp_path: Path):
 
     assert result.selected_sheet == "合并数据"
     assert result.rows[0]["query"] == "打开设置"
+
+
+@pytest.mark.parametrize("suffix", [".csv", ".xlsx"])
+def test_nonempty_id_takes_priority_and_empty_id_uses_legacy_fallback(
+    tmp_path: Path, suffix: str,
+):
+    source = tmp_path / f"cases{suffix}"
+    frame = pd.DataFrame([
+        {"id": "  001  ", "index": "same", "query": "打开设置"},
+        {"id": "002", "index": "same", "query": "关闭设置"},
+        {"id": "", "index": "case_003", "query": "打开蓝牙"},
+        {"id": "   ", "index": "", "query": "关闭蓝牙"},
+    ])
+    if suffix == ".xlsx":
+        frame.to_excel(source, index=False)
+    else:
+        frame.to_csv(source, index=False, encoding="utf-8-sig")
+
+    result = convert_table(source, input_prefix="V1", project_root=tmp_path)
+
+    assert [row["id"] for row in result.rows] == [
+        "001", "002", "V1_case_003", "V1_excel_row_0005",
+    ]
+    assert all("id_1" not in row for row in result.rows)
+    assert "missing_index" not in result.warnings[0]["问题"]
+    assert "missing_index" in result.warnings[-1]["问题"]
+
+
+@pytest.mark.parametrize("raw_id", ["001", 42, 0])
+def test_id_only_table_does_not_require_index_or_sequence(
+    tmp_path: Path, raw_id: str | int,
+):
+    source = tmp_path / "cases.xlsx"
+    pd.DataFrame([{"id": raw_id, "query": "打开设置"}]).to_excel(source, index=False)
+
+    result = convert_table(source, input_prefix="V1", project_root=tmp_path)
+
+    assert result.rows[0]["id"] == str(raw_id)
+    assert "missing_id" not in result.warnings[0]["问题"]
+
+
+def test_blank_id_falls_back_to_sequence_or_source_row(tmp_path: Path):
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([{"id": "", "序号": "simple_001", "query": "打开设置"}]).to_csv(
+        source, index=False,
+    )
+    result = convert_table(source, input_prefix="V1", project_root=tmp_path)
+    assert result.rows[0]["id"] == "V1_simple_001"
+
+    pd.DataFrame([{"id": "", "query": "打开设置"}]).to_csv(source, index=False)
+    result = convert_table(source, input_prefix="V1", project_root=tmp_path)
+    assert result.rows[0]["id"] == "V1_excel_row_0002"
+    assert "missing_id" in result.warnings[0]["问题"]
+
+
+@pytest.mark.parametrize("second_id", ["  duplicate  ", ""])
+def test_duplicate_reused_or_generated_ids_are_rejected(
+    tmp_path: Path, second_id: str,
+):
+    source = tmp_path / "cases.csv"
+    pd.DataFrame([
+        {"id": "duplicate", "index": "first", "query": "打开设置"},
+        {"id": second_id, "index": "second", "query": "关闭设置"},
+    ]).to_csv(source, index=False)
+    # Empty IDs can also collide with an explicitly supplied generated-style ID.
+    if not second_id:
+        frame = pd.read_csv(source, keep_default_na=False)
+        frame.loc[0, "id"] = "V1_second"
+        frame.to_csv(source, index=False)
+
+    with pytest.raises(ValueError, match="id 重复.*第 2 行.*第 3 行"):
+        convert_table(source, input_prefix="V1", project_root=tmp_path)
 
 
 def test_windows_gb18030_csv_is_detected_automatically(tmp_path: Path):
