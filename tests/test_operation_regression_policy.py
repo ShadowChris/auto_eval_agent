@@ -28,9 +28,9 @@ def test_operation_policy_checks_ui_semantics_before_result_mapping() -> None:
 def test_operation_policy_does_not_invent_blockers_from_prerequisites() -> None:
     prompt = _prompt()
     assert '不能凭泛化失败自述推断该条件实际缺失' in prompt
-    assert '默认支持范围不得扩大为所有第三方应用能力' in prompt
+    assert '第三方业务也默认具备执行能力' in prompt
     assert '后续尚未开始的目标属于串行中断后果' in prompt
-    assert 'A.用户必须补充的信息或动作' in prompt
+    assert 'A.本次确实缺少的条件' in prompt
     assert '只有 A/B/C 成立且 D 为否' in prompt
 
 
@@ -74,16 +74,16 @@ def test_final_conclusion_rechecks_the_evidence_instead_of_washing_errors() -> N
     prompt = _prompt()
     assert '助手回答区域重复出现同一自述仍是单一声明' in prompt
     assert '缺少最终结果是阻塞后果' in prompt
-    assert '随后仍声称已经完成不是阻塞的必然后果' in prompt
+    assert '与已知状态相冲突的完成声明则保留，不被阻塞覆盖' in prompt
     assert '系统内置信息、联系人等应用不属于第三方业务应用' in prompt
     assert '不能让结论与已经摘录的事实相矛盾' in prompt
 
 
-def test_delivered_result_audit_precedes_blocker_and_quality_uses_bound_source() -> None:
+def test_blocker_context_precedes_candidate_error_audit_and_quality_uses_bound_source() -> None:
     prompt = _prompt()
-    assert prompt.index('4. 【已交付结果与卡片验收】') < prompt.index('5. 【阻塞资格表】')
-    assert '错卡替代必需结果不属于“尚未交付”' in prompt
-    assert '先锁定非空 answer，否则使用末段最终视觉回答' in prompt
+    assert prompt.index('4. 【阻塞资格表】') < prompt.index('5. 【已交付结果与卡片验收】')
+    assert '真正错误保留，不能被阻塞覆盖' in prompt
+    assert '锁定非空 answer，否则使用末段最终视觉回答' in prompt
     assert '必须引用该来源的泄露原句' in prompt
     assert '面向用户的产品、服务或协议名称本身不是内部调用过程' in prompt
 
@@ -107,7 +107,7 @@ def test_product_endpoints_refine_existing_policy_without_new_modules() -> None:
     }
     prompt = _prompt()
     assert '结合原始意图与明确适用的产品规格确定验收终点' in policy.scope_rules[3]
-    assert '按任务范围规则确定验收终点' in policy.decision_order[2]
+    assert '各目标验收终点及必要输入' in policy.decision_order[1]
     assert '页面交付例外仅限' not in prompt
     assert '页面交付目标按到达验收并评分，不追加后续动作' not in prompt
     assert '以目标应用的可操作页面交付' in prompt
@@ -144,7 +144,7 @@ def test_page_delivery_exception_preserves_other_goal_and_evidence_boundaries() 
         # Narrowing the page exception does not change multi-goal or blocker handling.
         assert '每个生效目标都必须有对应证据' in prompt
         assert '通用建议替代缺少个人信息的具体答案' in prompt
-        assert '串行后续未开始目标不单独记漏项' in prompt
+        assert '必要且未解除的用户阻塞使尚未开始目标按串行待续' in prompt
 
 
 def test_memory_confirmation_color_precedes_generic_missing_evidence() -> None:
@@ -166,8 +166,8 @@ def test_memory_result_state_is_checked_before_generic_missing_evidence() -> Non
     evidence = '\n'.join(policy.evidence_rules)
     assert evidence.count('小艺帮记保存确认出现') == 1
     assert evidence.index('小艺帮记保存确认出现') < evidence.index('只有泛化的“正在操作/已完成”')
-    assert '含保存确认、合格卡片' in policy.decision_order[4]
-    assert '按专家经验核验状态与原目标约束' in policy.decision_order[4]
+    assert '实际操作或已交付内容、直接证据' in policy.decision_order[4]
+    assert '根据 Query、可信背景和适用产品先验' in policy.decision_order[1]
 
 
 def test_verified_entry_completion_is_not_undone_by_returning() -> None:
@@ -194,7 +194,7 @@ def test_reply_conflict_requires_explicit_claim_instead_of_inferred_denial() -> 
         assert '通用回复质量问题另记 issue，不改变执行根因' in prompt
         # Do not turn this clarification into an unconditional OK or blocker exemption.
         assert '不将特定规格泛化到其他任务' in prompt
-        assert '串行后续未开始目标不单独记漏项' in prompt
+        assert '必要且未解除的用户阻塞使尚未开始目标按串行待续' in prompt
         assert '录屏Query无法与输入Query一致核验' in prompt
         assert '最终必须判 nok / 执行中断' in prompt
 
@@ -204,10 +204,10 @@ def test_task_fact_summary_separates_results_claims_and_blocker_effects() -> Non
     assert '目标与约束 | 实际业务结果及来源 | Agent 声明 | 系统步骤信息' in prompt
     assert '已交付正文/方案进入结果栏，完成声明只入声明栏' in prompt
     assert '正文不能证明操作已执行，但可直接验收内容约束' in prompt
-    assert 'D.引用上一步已发生的问题，不重新判断或删除' in prompt
+    assert '候选若仅是阻塞后果、未知条件或来源误判须撤销' in prompt
     assert '筛选范围或偏好不等于已选定唯一对象' in prompt
     assert '内容还不完整、其他动作尚待授权' in prompt
-    assert '不从“页面已经打开、理论上能做、query 中排在前面”推断' in prompt
+    assert '仅因其他目标未展示结果，不能反推阻塞前已经漏做' in prompt
     assert 'complex_106' not in prompt
     assert 'goal_state_rules' not in prompt
 
@@ -220,7 +220,7 @@ def test_underspecified_settings_use_direct_entry_without_expanding_goal() -> No
     assert '不能仅因缺少精确数值而降格为打开页面' in prompt
     assert '上一级或错误页面不算到达' in prompt
     assert '不能仅凭页面有开启按钮就增加启用目标' in prompt
-    assert '先记录验收方式（功能入口、状态变化、查询结果或内容交付）' in prompt
+    assert '验收方式（功能入口、状态变化、查询结果或内容交付）' in prompt
     assert '不按“设置”“可以”“能否”等单个词判动作' in prompt
 
 
@@ -244,8 +244,8 @@ def test_decision_priority_precedes_details_without_case_specific_rules() -> Non
     assert prompt.index('【判定顺序】') < prompt.index('【任务范围】')
     assert '不能用部分完成加有效阻塞判 ok' in prompt
     assert '不能用仅有文字声明和流程已完成判本机状态查询 ok' in prompt
-    assert '输出前反查 ok' in prompt and '输出前反查 nok' in prompt
-    assert '输出前反查 no_support / others' in prompt
+    assert '候选执行问题核验' in prompt and '整体映射' in prompt
+    assert '其余临时异常、证据不足或输入异常判 others' in prompt
     assert 'complex_106' not in prompt and '设置项1600条-0524' not in prompt
 
 
@@ -253,13 +253,13 @@ def test_blocked_serial_targets_are_not_logically_independent_errors() -> None:
     prompt = _prompt()
     assert '不是“逻辑上可独立完成的目标尚未开始”' in prompt
     assert '不因其他目标理论上可独立执行而判 nok' in prompt
-    assert '不能只写另一个目标本来可独立完成' in prompt
-    assert '只有实际错操作、错误交付、明确失败' in prompt
+    assert '其他目标理论上可独立完成不证明已经漏做' in prompt
+    assert '已有实际错操作、错误交付、明确失败' in prompt
 
 
 def test_card_claims_cannot_supply_missing_capabilities_or_result_qualification() -> None:
     prompt = _prompt()
     assert 'agent 的文字承诺不能补足卡片未证明的额外能力或动作' in prompt
     assert '原生APP页面与设置弹窗只作为操作证据' in prompt
-    assert 'cards 中替代必需结果的 direct/unsuitable' in prompt
-    assert '整体不能同时解释为纯阻塞' in prompt
+    assert '替代必需结果的错卡是已交付错误' in prompt
+    assert '错误交付不能与纯阻塞结论并存' in prompt

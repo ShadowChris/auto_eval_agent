@@ -30,7 +30,7 @@ def test_operation_expert_knowledge_loads_separately_from_policy() -> None:
     knowledge = config.expert_knowledge["operation"]
 
     assert knowledge.name == "任务类专家经验"
-    assert knowledge.version == 10
+    assert knowledge.version == 11
     assert "xiaoyi_memory" not in {card.key for card in knowledge.result_cards}
     assert "小艺帮记保存确认中，蓝色“去查看”是有效保存链接，黑字缺链接" in render_expert_knowledge(knowledge)
     assert any(
@@ -49,7 +49,7 @@ def test_operation_expert_knowledge_loads_separately_from_policy() -> None:
         for rule in category.rules
     )
     assert any(
-        "常规系统设置、设备操控及系统内置应用的常规管理任务默认" in rule
+        "评测集中的所有 Query 默认具备对应执行能力" in rule
         for category in knowledge.categories
         for rule in category.rules
     )

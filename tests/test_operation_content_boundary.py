@@ -31,12 +31,12 @@ def test_content_delivery_and_action_claims_have_separate_sources(multi_group):
 def test_direct_constraint_conflict_is_not_external_fact_checking():
     prompt = operation_prompt()
     assert '不核查外部真实性' in prompt
-    assert '所有任务先验收已给出的回答/方案' in prompt
+    assert '已给出的回答/方案也须验收' in prompt
     assert '本机状态查询的答复也要检查' in prompt
     assert '可直接核对的约束冲突是任务结果错误' in prompt
     assert '也不能降为轻微质量问题或证据不足' in prompt
     assert '一个平台替代多平台比较' in prompt
-    assert prompt.index('4. 【已交付结果与卡片验收】') < prompt.index('5. 【阻塞资格表】')
+    assert prompt.index('4. 【阻塞资格表】') < prompt.index('5. 【已交付结果与卡片验收】')
 
 
 def test_fact_review_only_covers_explicit_acceptance_requirements():
@@ -64,7 +64,7 @@ def test_review_scope_does_not_replace_visual_action_evidence_or_card_scope():
 def test_operation_boundary_does_not_enter_question_prompt_or_grow_a_new_field():
     question = RUBRIC_SYSTEM.render(persona='问答裁判', dims=[], scale=5)
     assert '关键事实待核验' not in question
-    assert '所有任务先验收已给出的回答/方案' not in question
+    assert '已给出的回答/方案也须验收' not in question
     prompt = operation_prompt()
     assert len(prompt) < 22500
     assert '"need_review_cate"' in prompt
