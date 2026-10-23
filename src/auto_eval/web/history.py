@@ -2996,6 +2996,11 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         overview_merges.append(f"A{row_index}:R{row_index}")
 
     sheets: list[tuple[str, str]] = [
+        ("逐题横向对比", _operation_comparison_detail_sheet(
+            groups,
+            union_rows,
+            detail_fields,
+        )),
         ("对比概览", _matrix_sheet_xml(
             overview,
             widths=[22, 46, 22, 14, 16, 12, 12, 12, 14, 14, 14, 12, 14, 14, 14, 14, 14, 18],
@@ -3018,11 +3023,6 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             widths=[30, 18, 32, 16, 16, 16, 16, 18, 20],
             row_styles={1: 2}, cell_styles=review_styles, freeze_rows=1,
             auto_filter_ref=f"A1:I{len(review_rows) + 1}", hide_gridlines=True,
-        )),
-        ("逐题横向对比", _operation_comparison_detail_sheet(
-            groups,
-            union_rows,
-            detail_fields,
         )),
     ]
     return _build_xlsx_xml_sheets(sheets)
@@ -3068,6 +3068,17 @@ def _operation_comparison_issue_sheet(rows: list[dict[str, Any]]) -> str:
     )
 
 
+# 每组两行表头使用同色系深浅色；顺序对应对照组和最多四个实验组。
+_OPERATION_COMPARISON_HEADER_PALETTE = (
+    ("FFBFDBFE", "FFEFF6FF"),  # 蓝
+    ("FFFDE68A", "FFFFFBEB"),  # 黄
+    ("FFDDD6FE", "FFF5F3FF"),  # 紫
+    ("FFFBCFE8", "FFFDF2F8"),  # 粉
+    ("FF99F6E4", "FFF0FDFA"),  # 青
+)
+_OPERATION_COMPARISON_HEADER_STYLE_START = 16
+
+
 def _operation_comparison_detail_sheet(
     groups: list[dict[str, Any]],
     rows: list[dict[str, Any]],
@@ -3100,8 +3111,9 @@ def _operation_comparison_detail_sheet(
         "error": 36,
     }
     merge_refs = ["A1:C1"]
+    cell_styles: dict[tuple[int, int], int] = {}
     column_index = len(common_headers) + 1
-    for group in groups:
+    for group_index, group in enumerate(groups):
         label = group.get("group_label") or "结果组"
         dataset_name = _comparison_dataset_display_name(
             group.get("group_name") or group.get("task_id") or "未命名数据集"
@@ -3111,6 +3123,12 @@ def _operation_comparison_detail_sheet(
         widths.extend(field_widths.get(field, 18) for field in detail_fields)
         end_column = column_index + len(detail_fields) - 1
         merge_refs.append(f"{_col(column_index)}1:{_col(end_column)}1")
+        style_start = _OPERATION_COMPARISON_HEADER_STYLE_START + (
+            group_index % len(_OPERATION_COMPARISON_HEADER_PALETTE)
+        ) * 2
+        for column in range(column_index, end_column + 1):
+            cell_styles[(1, column)] = style_start
+            cell_styles[(2, column)] = style_start + 1
         column_index = end_column + 1
 
     table = [group_header, field_header]
@@ -3126,6 +3144,7 @@ def _operation_comparison_detail_sheet(
         table,
         widths=widths,
         row_styles={1: 8, 2: 15},
+        cell_styles=cell_styles,
         default_style=14,
         merge_refs=merge_refs,
         row_heights={1: 28, 2: 28},
@@ -3252,6 +3271,22 @@ def _workbook_rels(sheet_count: int) -> str:
 
 
 def _styles_xml() -> str:
+    header_colors = [
+        color for pair in _OPERATION_COMPARISON_HEADER_PALETTE for color in pair
+    ]
+    header_fills = "".join(
+        '<fill><patternFill patternType="solid">'
+        f'<fgColor rgb="{color}"/><bgColor indexed="64"/>'
+        '</patternFill></fill>'
+        for color in header_colors
+    )
+    # 追加样式以保留现有工作表使用的 0～15 号样式及原有填充编号。
+    header_styles = "".join(
+        f'<xf numFmtId="0" fontId="1" fillId="{10 + index}" borderId="1" '
+        'xfId="0" applyAlignment="1"><alignment horizontal="center" '
+        'vertical="center" wrapText="0"/></xf>'
+        for index in range(len(header_colors))
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
@@ -3268,7 +3303,7 @@ def _styles_xml() -> str:
         '<font><b/><color rgb="FF991B1B"/><sz val="11"/><name val="Calibri"/></font>'
         '<font><color rgb="FF64748B"/><sz val="11"/><name val="Calibri"/></font>'
         '</fonts>'
-        '<fills count="10">'
+        f'<fills count="{10 + len(header_colors)}">'
         '<fill><patternFill patternType="none"/></fill>'
         '<fill><patternFill patternType="gray125"/></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FF2563EB"/><bgColor indexed="64"/></patternFill></fill>'
@@ -3279,13 +3314,14 @@ def _styles_xml() -> str:
         '<fill><patternFill patternType="solid"><fgColor rgb="FFF1F5F9"/><bgColor indexed="64"/></patternFill></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FF1E3A8A"/><bgColor indexed="64"/></patternFill></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FFEFF6FF"/><bgColor indexed="64"/></patternFill></fill>'
+        f'{header_fills}'
         '</fills>'
         '<borders count="2">'
         '<border><left/><right/><top/><bottom/><diagonal/></border>'
         '<border><left style="thin"><color rgb="FFCBD5E1"/></left><right style="thin"><color rgb="FFCBD5E1"/></right><top style="thin"><color rgb="FFCBD5E1"/></top><bottom style="thin"><color rgb="FFCBD5E1"/></bottom><diagonal/></border>'
         '</borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        '<cellXfs count="16">'
+        f'<cellXfs count="{_OPERATION_COMPARISON_HEADER_STYLE_START + len(header_colors)}">'
         '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
         '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/>'
         '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'
@@ -3302,6 +3338,7 @@ def _styles_xml() -> str:
         '<xf numFmtId="165" fontId="6" fillId="7" borderId="1" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
         '<xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="0"/></xf>'
         '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="0"/></xf>'
+        f'{header_styles}'
         '</cellXfs>'
         '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
         '</styleSheet>'

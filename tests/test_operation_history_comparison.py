@@ -6,7 +6,7 @@ import pytest
 
 from auto_eval.analysis.operation_comparison import compare_operation_batches
 from auto_eval.web import server
-from auto_eval.web.history import _OPERATION_USER_RESULT_HEADERS
+from auto_eval.web.history import _OPERATION_USER_RESULT_HEADERS, build_operation_comparison_xlsx
 from auto_eval.web.server import OperationHistoryComparisonReq
 
 
@@ -432,10 +432,10 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     openpyxl = pytest.importorskip("openpyxl")
     workbook = openpyxl.load_workbook(BytesIO(response.body), data_only=True)
     assert workbook.sheetnames == [
+        "逐题横向对比",
         "对比概览",
         "Issue Type对比",
         "需复核类别对比",
-        "逐题横向对比",
     ]
     overview_values = list(workbook["对比概览"].values)
     assert overview_values[5][:5] == (
@@ -522,6 +522,36 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     assert detail_sheet.auto_filter.ref.startswith("A2:BO")
     assert detail_sheet["A3"].border.left.style == "thin"
     assert detail_sheet["D3"].alignment.wrap_text is False
+
+
+def test_comparison_excel_uses_distinct_headers_for_all_five_groups() -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    batches = [
+        _batch(str(index), f"group-{index}", [
+            _row(0, "打开蓝牙", "ok", case_id="same"),
+        ])
+        for index in range(5)
+    ]
+    payload = compare_operation_batches(batches, baseline_task_id="0", include_union_rows=True)
+    workbook = openpyxl.load_workbook(BytesIO(build_operation_comparison_xlsx(payload)))
+    assert workbook.active.title == "逐题横向对比"
+    sheet = workbook.worksheets[0]
+    field_count = len(_OPERATION_USER_RESULT_HEADERS)
+    title_colors, field_colors = set(), set()
+    for index in range(5):
+        first_column = 4 + index * field_count
+        title_cell = sheet.cell(1, first_column)
+        title_colors.add(title_cell.fill.fgColor.rgb)
+        fields = [sheet.cell(2, column) for column in range(first_column, first_column + field_count)]
+        group_colors = {cell.fill.fgColor.rgb for cell in fields}
+        assert len(group_colors) == 1
+        field_colors.update(group_colors)
+        assert title_cell.fill.fgColor.rgb not in group_colors
+        assert title_cell.font.bold is True
+        assert all(cell.font.bold and not cell.alignment.wrap_text for cell in fields)
+        assert sheet.cell(3, first_column).fill.fgColor.rgb == "FFFFFFFF"
+    assert len(title_colors) == len(field_colors) == 5
+    assert sheet.freeze_panes == "D3"
 
 
 def test_history_comparison_api_rejects_unfinished_or_multi_group(monkeypatch) -> None:

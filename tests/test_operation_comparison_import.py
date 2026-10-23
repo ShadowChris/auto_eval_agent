@@ -352,7 +352,7 @@ def test_comparison_export_mixes_history_and_upload(monkeypatch) -> None:
     response = server.api_operation_comparison_export(request)
     workbook = load_workbook(BytesIO(response.body), read_only=True)
 
-    assert workbook.sheetnames == ["对比概览", "Issue Type对比", "需复核类别对比", "逐题横向对比"]
+    assert workbook.sheetnames == ["逐题横向对比", "对比概览", "Issue Type对比", "需复核类别对比"]
     assert workbook["对比概览"]["L6"].value == "来源"
     assert workbook["对比概览"]["L7"].value == "原生评估"
     assert workbook["对比概览"]["L8"].value == "上传结果"
