@@ -6,7 +6,7 @@ import pytest
 
 from auto_eval.analysis.operation_comparison import compare_operation_batches
 from auto_eval.web import server
-from auto_eval.web.history import _OPERATION_USER_RESULT_HEADERS
+from auto_eval.web.history import _OPERATION_USER_RESULT_HEADERS, build_operation_comparison_xlsx
 from auto_eval.web.server import OperationHistoryComparisonReq
 
 
@@ -432,10 +432,11 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     openpyxl = pytest.importorskip("openpyxl")
     workbook = openpyxl.load_workbook(BytesIO(response.body), data_only=True)
     assert workbook.sheetnames == [
+        "逐题横向对比",
+        "数据集明细",
         "对比概览",
         "Issue Type对比",
         "需复核类别对比",
-        "逐题横向对比",
     ]
     overview_values = list(workbook["对比概览"].values)
     assert overview_values[5][:5] == (
@@ -499,13 +500,13 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     assert "correctness" in detail_headers
     assert "所有组共有" in detail_headers
     field_count = len(_OPERATION_USER_RESULT_HEADERS)
-    assert tuple(detail_headers[3:3 + field_count]) == _OPERATION_USER_RESULT_HEADERS
-    assert tuple(detail_headers[3 + field_count:3 + 2 * field_count]) == (
+    assert tuple(detail_headers[4:4 + field_count]) == _OPERATION_USER_RESULT_HEADERS
+    assert tuple(detail_headers[4 + field_count:4 + 2 * field_count]) == (
         _OPERATION_USER_RESULT_HEADERS
     )
     baseline_values = dict(zip(
         _OPERATION_USER_RESULT_HEADERS,
-        [cell.value for cell in detail_sheet[3]][3:3 + field_count],
+        [cell.value for cell in detail_sheet[3]][4:4 + field_count],
     ))
     assert "是否挂卡" in baseline_values
     assert "card_presence" not in baseline_values
@@ -515,13 +516,43 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     assert baseline_values["video_url_domain"] == "https://video.example/case-1.mp4"
     assert baseline_values["录屏时长"] == 12.5
     merged_ranges = {str(value) for value in detail_sheet.merged_cells.ranges}
-    assert "A1:C1" in merged_ranges
-    assert "D1:AG1" in merged_ranges
-    assert "AH1:BK1" in merged_ranges
-    assert detail_sheet.freeze_panes == "D3"
-    assert detail_sheet.auto_filter.ref.startswith("A2:BK")
+    assert "A1:D1" in merged_ranges
+    assert "E1:AJ1" in merged_ranges
+    assert "AK1:BP1" in merged_ranges
+    assert detail_sheet.freeze_panes == "E3"
+    assert detail_sheet.auto_filter.ref.startswith("A2:BP")
     assert detail_sheet["A3"].border.left.style == "thin"
     assert detail_sheet["D3"].alignment.wrap_text is False
+
+
+def test_comparison_excel_uses_distinct_headers_for_all_five_groups() -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    batches = [
+        _batch(str(index), f"group-{index}", [
+            _row(0, "打开蓝牙", "ok", case_id="same"),
+        ])
+        for index in range(5)
+    ]
+    payload = compare_operation_batches(batches, baseline_task_id="0", include_union_rows=True)
+    workbook = openpyxl.load_workbook(BytesIO(build_operation_comparison_xlsx(payload)))
+    assert workbook.active.title == "逐题横向对比"
+    sheet = workbook.worksheets[0]
+    field_count = len(_OPERATION_USER_RESULT_HEADERS)
+    title_colors, field_colors = set(), set()
+    for index in range(5):
+        first_column = 5 + index * field_count
+        title_cell = sheet.cell(1, first_column)
+        title_colors.add(title_cell.fill.fgColor.rgb)
+        fields = [sheet.cell(2, column) for column in range(first_column, first_column + field_count)]
+        group_colors = {cell.fill.fgColor.rgb for cell in fields}
+        assert len(group_colors) == 1
+        field_colors.update(group_colors)
+        assert title_cell.fill.fgColor.rgb not in group_colors
+        assert title_cell.font.bold is True
+        assert all(cell.font.bold and not cell.alignment.wrap_text for cell in fields)
+        assert sheet.cell(3, first_column).fill.fgColor.rgb == "FFFFFFFF"
+    assert len(title_colors) == len(field_colors) == 5
+    assert sheet.freeze_panes == "E3"
 
 
 def test_history_comparison_api_rejects_unfinished_or_multi_group(monkeypatch) -> None:

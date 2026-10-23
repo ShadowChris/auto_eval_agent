@@ -47,6 +47,7 @@ from .operation_export_fields import (
     OPERATION_RESULT_FIELD_LABELS as _OPERATION_CARD_LABELS,
     OPERATION_USER_RESULT_COLUMNS as _OPERATION_USER_RESULT_COLUMNS,
     OPERATION_USER_RESULT_HEADERS as _OPERATION_USER_RESULT_HEADERS,
+    operation_result_identity_fields,
     operation_user_result_display_row as _operation_user_result_display_row,
 )
 
@@ -1372,6 +1373,7 @@ def _operation_user_result_rows(
 
         values = {
             "数据集序号": result.get("数据集序号", position + 1),
+            **operation_result_identity_fields(source, item.get("id", "")),
             "item_id": result.get("item_id") or item.get("id") or f"q{position}",
             "index": _first_export_value(result.get("index"), source.get("index")),
             "session_id": _first_export_value(
@@ -1765,6 +1767,7 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
         source = _source_data_for_item(item)
         row: dict[str, Any] = {
             "数据集序号": index + 1,
+            **operation_result_identity_fields(source, item.get("id") or f"q{index}"),
             "评估分段": item.get("evaluation_segment_no") or 1,
             "分段来源数据集": (
                 item.get("evaluation_source_dataset")
@@ -1775,7 +1778,6 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
             "数据版本": int(item.get("dataset_revision") or 1),
             "来源批次ID": item.get("dataset_source_batch_id") or "",
             "source_line": item.get("source_line") or index + 1,
-            "id": item.get("id") or f"q{index}",
             "query": item.get("query") or item.get("question") or "",
         }
         for key, value in source.items():
@@ -2177,7 +2179,7 @@ def operation_statistics_payload(snapshot: dict) -> dict:
     }
 
 
-def operation_comparison_batch(snapshot: dict) -> dict:
+def operation_comparison_batch(snapshot: dict, *, include_source_data: bool = False) -> dict:
     """将普通任务类历史快照转换为批次对比所需的紧凑输入。"""
     if snapshot.get("mode") != "operation":
         raise ValueError("仅任务类历史支持批次对比")
@@ -2232,7 +2234,7 @@ def operation_comparison_batch(snapshot: dict) -> dict:
             if source.get(video_url_key):
                 export_row["录屏URL"] = source[video_url_key]
                 break
-        rows.append({
+        comparison_row = {
             "position": position,
             "index": match_index,
             "id": str(item.get("id") or "").strip(),
@@ -2241,10 +2243,22 @@ def operation_comparison_batch(snapshot: dict) -> dict:
             "query": item.get("query") or item.get("question") or "",
             "result": aligned_by_index.get(position) or {},
             "export": export_row,
-        })
+            "input_data": {
+                key: source[key]
+                for key in ("context", "query_images", "query_image_path", "attachment_path")
+                if key in source
+            },
+        }
+        for key in ("context", "query_images"):
+            if key in item:
+                comparison_row["input_data"].setdefault(key, item[key])
+        if include_source_data:
+            comparison_row["source_data"] = source
+        rows.append(comparison_row)
     backend = _judge_backend_summary(normalized)
     return {
         "task_id": normalized.get("task_id") or "",
+        "source_type": "history",
         "dataset_name": normalized.get("dataset_name") or "",
         "created_at": normalized.get("created_at"),
         "judge_provider": backend["judge_provider"],
@@ -2804,7 +2818,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         ["全组共同 Case", payload.get("all_groups_common_matched_count", 0)],
         ["全组共同有效 Case", payload.get("all_groups_common_valid_count", 0)],
         [],
-        ["组别", "数据集", "task_id", "原始数据量", "共有有效数据量", "ok", "nok", "no_support", "OK率", "NOK率", "率分母"],
+        ["组别", "数据集", "task_id", "原始数据量", "共有有效数据量", "ok", "nok", "no_support", "OK率", "NOK率", "率分母", "来源"],
     ]
     for group in groups:
         statistics = group.get("statistics") or {}
@@ -2824,6 +2838,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             _display_percent(statistics.get("ok_rate")),
             _display_percent(statistics.get("nok_rate")),
             statistics.get("rate_denominator", 0),
+            group.get("source_label") or "原生评估",
         ])
     group_header_row = 6
     group_data_start = group_header_row + 1
@@ -2929,8 +2944,9 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
     # 导出白名单随功能演进产生字段差异。
     detail_fields = _OPERATION_USER_RESULT_HEADERS
     union_rows = []
-    for row in payload.get("union_rows") or []:
+    for position, row in enumerate(payload.get("union_rows") or [], start=1):
         output = {
+            "对比序号": row.get("comparison_index", position),
             "匹配键": row.get("match_key") or "",
             "存在组数": row.get("present_group_count", 0),
             "所有组共有": "是" if row.get("all_groups_present") else "否",
@@ -2992,6 +3008,12 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         overview_merges.append(f"A{row_index}:R{row_index}")
 
     sheets: list[tuple[str, str]] = [
+        ("逐题横向对比", _operation_comparison_detail_sheet(
+            groups,
+            union_rows,
+            detail_fields,
+        )),
+        ("数据集明细", _operation_comparison_dataset_sheet(payload)),
         ("对比概览", _matrix_sheet_xml(
             overview,
             widths=[22, 46, 22, 14, 16, 12, 12, 12, 14, 14, 14, 12, 14, 14, 14, 14, 14, 18],
@@ -3015,13 +3037,61 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             row_styles={1: 2}, cell_styles=review_styles, freeze_rows=1,
             auto_filter_ref=f"A1:I{len(review_rows) + 1}", hide_gridlines=True,
         )),
-        ("逐题横向对比", _operation_comparison_detail_sheet(
-            groups,
-            union_rows,
-            detail_fields,
-        )),
     ]
     return _build_xlsx_xml_sheets(sheets)
+
+
+def _operation_comparison_dataset_sheet(payload: dict[str, Any]) -> str:
+    """一题一行的共享原始明细，与横向结果使用相同的序号和数据起始行。"""
+    groups = {group["task_id"]: group for group in payload.get("groups") or []}
+    rows = []
+    for position, entry in enumerate(payload.get("union_rows") or [], start=1):
+        source = dict(entry.get("source_data") or {})
+        group = groups.get(entry.get("source_task_id"), {})
+        identities = operation_result_identity_fields(source)
+        row = {
+            "对比序号": entry.get("comparison_index", position),
+            "匹配键": entry.get("match_key") or "",
+            "id": identities["id"],
+            "metadata.id": source.get("metadata.id", identities["metadata.id"]),
+            "query": source.get("query", ""),
+            "明细来源组": group.get("group_label", ""),
+            "明细来源数据集": group.get("group_name", ""),
+            "共享输入差异": "；".join(entry.get("input_mismatches") or []),
+        }
+        # 除已置前的原始标识列外，保留原始字段；与追溯列冲突时加数字后缀。
+        occupied = set(row) | set(source)
+        for key, value in source.items():
+            if key in {"id", "metadata.id", "query"}:
+                continue
+            target = key
+            if target in row:
+                suffix = 1
+                while f"{key}_{suffix}" in occupied:
+                    suffix += 1
+                target = f"{key}_{suffix}"
+            row[target] = value
+            occupied.add(target)
+        rows.append(row)
+    headers = list(dict.fromkeys(key for row in rows for key in row)) or [
+        "对比序号", "匹配键", "id", "metadata.id", "query",
+        "明细来源组", "明细来源数据集", "共享输入差异",
+    ]
+    table = [
+        ["共享数据集明细：优先使用对照组原始数据；与逐题横向对比逐行对应"] + [""] * (len(headers) - 1),
+        headers,
+        *[[row.get(header, "") for header in headers] for row in rows],
+    ]
+    return _matrix_sheet_xml(
+        table,
+        widths=[_width(header) for header in headers],
+        row_styles={1: 8, 2: 15},
+        merge_refs=[f"A1:{_col(len(headers))}1"],
+        row_heights={1: 28, 2: 28},
+        auto_filter_ref=f"A2:{_col(len(headers))}{len(table)}",
+        freeze_rows=2,
+        freeze_columns=2,
+    )
 
 
 def _operation_comparison_issue_sheet(rows: list[dict[str, Any]]) -> str:
@@ -3064,16 +3134,27 @@ def _operation_comparison_issue_sheet(rows: list[dict[str, Any]]) -> str:
     )
 
 
+# 每组两行表头使用同色系深浅色；顺序对应对照组和最多四个实验组。
+_OPERATION_COMPARISON_HEADER_PALETTE = (
+    ("FFBFDBFE", "FFEFF6FF"),  # 蓝
+    ("FFFDE68A", "FFFFFBEB"),  # 黄
+    ("FFDDD6FE", "FFF5F3FF"),  # 紫
+    ("FFFBCFE8", "FFFDF2F8"),  # 粉
+    ("FF99F6E4", "FFF0FDFA"),  # 青
+)
+_OPERATION_COMPARISON_HEADER_STYLE_START = 16
+
+
 def _operation_comparison_detail_sheet(
     groups: list[dict[str, Any]],
     rows: list[dict[str, Any]],
     detail_fields: tuple[str, ...],
 ) -> str:
     """生成按数据集合并分组的双层表头逐题对比表。"""
-    common_headers = ["匹配键", "存在组数", "所有组共有"]
-    group_header = ["公共字段", "", ""]
+    common_headers = ["对比序号", "匹配键", "存在组数", "所有组共有"]
+    group_header = ["公共字段", "", "", ""]
     field_header = list(common_headers)
-    widths = [28, 12, 14]
+    widths = [12, 28, 12, 14]
     field_widths = {
         "item_id": 20,
         "index": 16,
@@ -3095,9 +3176,10 @@ def _operation_comparison_detail_sheet(
         "录屏URL": 24,
         "error": 36,
     }
-    merge_refs = ["A1:C1"]
+    merge_refs = ["A1:D1"]
+    cell_styles: dict[tuple[int, int], int] = {}
     column_index = len(common_headers) + 1
-    for group in groups:
+    for group_index, group in enumerate(groups):
         label = group.get("group_label") or "结果组"
         dataset_name = _comparison_dataset_display_name(
             group.get("group_name") or group.get("task_id") or "未命名数据集"
@@ -3107,6 +3189,12 @@ def _operation_comparison_detail_sheet(
         widths.extend(field_widths.get(field, 18) for field in detail_fields)
         end_column = column_index + len(detail_fields) - 1
         merge_refs.append(f"{_col(column_index)}1:{_col(end_column)}1")
+        style_start = _OPERATION_COMPARISON_HEADER_STYLE_START + (
+            group_index % len(_OPERATION_COMPARISON_HEADER_PALETTE)
+        ) * 2
+        for column in range(column_index, end_column + 1):
+            cell_styles[(1, column)] = style_start
+            cell_styles[(2, column)] = style_start + 1
         column_index = end_column + 1
 
     table = [group_header, field_header]
@@ -3122,12 +3210,13 @@ def _operation_comparison_detail_sheet(
         table,
         widths=widths,
         row_styles={1: 8, 2: 15},
+        cell_styles=cell_styles,
         default_style=14,
         merge_refs=merge_refs,
         row_heights={1: 28, 2: 28},
         auto_filter_ref=f"A2:{last_column}{len(table)}",
         freeze_rows=2,
-        freeze_columns=3,
+        freeze_columns=len(common_headers),
         hide_gridlines=True,
     )
 
@@ -3248,6 +3337,22 @@ def _workbook_rels(sheet_count: int) -> str:
 
 
 def _styles_xml() -> str:
+    header_colors = [
+        color for pair in _OPERATION_COMPARISON_HEADER_PALETTE for color in pair
+    ]
+    header_fills = "".join(
+        '<fill><patternFill patternType="solid">'
+        f'<fgColor rgb="{color}"/><bgColor indexed="64"/>'
+        '</patternFill></fill>'
+        for color in header_colors
+    )
+    # 追加样式以保留现有工作表使用的 0～15 号样式及原有填充编号。
+    header_styles = "".join(
+        f'<xf numFmtId="0" fontId="1" fillId="{10 + index}" borderId="1" '
+        'xfId="0" applyAlignment="1"><alignment horizontal="center" '
+        'vertical="center" wrapText="0"/></xf>'
+        for index in range(len(header_colors))
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
@@ -3264,7 +3369,7 @@ def _styles_xml() -> str:
         '<font><b/><color rgb="FF991B1B"/><sz val="11"/><name val="Calibri"/></font>'
         '<font><color rgb="FF64748B"/><sz val="11"/><name val="Calibri"/></font>'
         '</fonts>'
-        '<fills count="10">'
+        f'<fills count="{10 + len(header_colors)}">'
         '<fill><patternFill patternType="none"/></fill>'
         '<fill><patternFill patternType="gray125"/></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FF2563EB"/><bgColor indexed="64"/></patternFill></fill>'
@@ -3275,13 +3380,14 @@ def _styles_xml() -> str:
         '<fill><patternFill patternType="solid"><fgColor rgb="FFF1F5F9"/><bgColor indexed="64"/></patternFill></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FF1E3A8A"/><bgColor indexed="64"/></patternFill></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FFEFF6FF"/><bgColor indexed="64"/></patternFill></fill>'
+        f'{header_fills}'
         '</fills>'
         '<borders count="2">'
         '<border><left/><right/><top/><bottom/><diagonal/></border>'
         '<border><left style="thin"><color rgb="FFCBD5E1"/></left><right style="thin"><color rgb="FFCBD5E1"/></right><top style="thin"><color rgb="FFCBD5E1"/></top><bottom style="thin"><color rgb="FFCBD5E1"/></bottom><diagonal/></border>'
         '</borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        '<cellXfs count="16">'
+        f'<cellXfs count="{_OPERATION_COMPARISON_HEADER_STYLE_START + len(header_colors)}">'
         '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
         '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/>'
         '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'
@@ -3298,6 +3404,7 @@ def _styles_xml() -> str:
         '<xf numFmtId="165" fontId="6" fillId="7" borderId="1" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
         '<xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="0"/></xf>'
         '<xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="0"/></xf>'
+        f'{header_styles}'
         '</cellXfs>'
         '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
         '</styleSheet>'

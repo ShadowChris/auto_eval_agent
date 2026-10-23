@@ -13,6 +13,7 @@ from .operation_statistics import (
     summarize_operation_results,
 )
 from ..judges.operation_fields import LEGACY_REVIEW_CATEGORIES, split_operation_issue_fields
+from .operation_source import comparison_source_data, shared_input_differences
 
 
 OK_RATE_CLOSE_THRESHOLD = 0.01
@@ -115,6 +116,10 @@ def compare_operation_batches(
             warning.get("type") == "id_conflict"
             for warning in alignment_warnings
         ),
+        "input_mismatch": sum(
+            warning.get("type") == "input_mismatch"
+            for warning in alignment_warnings
+        ),
     }
 
     valid_common_positions = [
@@ -189,8 +194,14 @@ def compare_operation_batches(
 
 
 def _normalized_batches(batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """统计和报告共享旧字段兼容，只修改内存副本。"""
-    batches = copy.deepcopy(batches)
+    """兼容转换只修改结果副本，较大的原始输入与导出记录保持只读共享。"""
+    batches = [
+        {**batch, "rows": [
+            {**row, "result": copy.deepcopy(row.get("result") or {})}
+            for row in batch.get("rows") or []
+        ]}
+        for batch in batches
+    ]
     for batch in batches:
         for row in batch.get("rows") or []:
             result = row.get("result") or {}
@@ -245,6 +256,8 @@ def _group_statistics(
     )
     return {
         "task_id": batch["task_id"],
+        "source_type": "upload" if batch.get("source_type") == "upload" else "history",
+        "source_label": "上传结果" if batch.get("source_type") == "upload" else "原生评估",
         "dataset_name": batch.get("dataset_name") or "",
         "group_name": _batch_name(batch),
         "group_label": batch.get("group_label") or "",
@@ -531,6 +544,20 @@ def _compare_pair(
     baseline_rows = list(baseline.get("rows") or [])
     target_rows = list(target.get("rows") or [])
     matches, alignment_warnings = _match_rows(baseline_rows, target_rows)
+    for match in matches:
+        left = baseline_rows[match["baseline_index"]]
+        right = target_rows[match["target_index"]]
+        differences = shared_input_differences(left, right)
+        if differences:
+            alignment_warnings.append({
+                "type": "input_mismatch",
+                "id": _row_item_id(left),
+                "fields": differences,
+                "message": (
+                    f"id={_row_item_id(left) or left.get('query', '')} 的共享输入"
+                    f" {'、'.join(differences)} 不一致，请核对；当前统计口径未自动排除该条"
+                ),
+            })
     match_map = {
         int(match["baseline_index"]): int(match["target_index"])
         for match in matches
@@ -683,6 +710,10 @@ def _compare_pair(
                 warning.get("type") == "id_conflict"
                 for warning in alignment_warnings
             ),
+            "input_mismatch": sum(
+                warning.get("type") == "input_mismatch"
+                for warning in alignment_warnings
+            ),
         },
         "alignment_warnings": alignment_warnings,
         "conclusion": conclusion,
@@ -761,6 +792,7 @@ def _build_union_rows(batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "representative": row,
             "has_baseline": True,
             "group_rows": {baseline["task_id"]: _row_export(row)},
+            "source_rows": {baseline["task_id"]: row},
         }
         for row in baseline_rows
     ]
@@ -775,6 +807,7 @@ def _build_union_rows(batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
             entries[baseline_index]["group_rows"][target["task_id"]] = _row_export(
                 target_rows[target_index]
             )
+            entries[baseline_index]["source_rows"][target["task_id"]] = target_rows[target_index]
         for index, row in enumerate(target_rows):
             if index in matched_target:
                 continue
@@ -785,16 +818,33 @@ def _build_union_rows(batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "representative": row,
                     "has_baseline": False,
                     "group_rows": {},
+                    "source_rows": {},
                 }
                 entries.append(entry)
             entry["group_rows"][target["task_id"]] = _row_export(row)
+            entry["source_rows"][target["task_id"]] = row
     group_count = len(batches)
-    return [
-        {
+    group_labels = {batch["task_id"]: batch["group_label"] for batch in batches}
+    rows = []
+    for comparison_index, entry in enumerate(entries, start=1):
+        source_task_id = next(iter(entry["source_rows"]))
+        representative = entry["representative"]
+        source_data = dict(comparison_source_data(representative))
+        source_data.setdefault("id", _row_item_id(representative))
+        source_data.setdefault("query", representative.get("query") or "")
+        differences = []
+        for task_id, row in entry["source_rows"].items():
+            fields = shared_input_differences(representative, row)
+            if fields:
+                differences.append(f"{group_labels[task_id]}：{'、'.join(fields)}")
+        rows.append({
+            "comparison_index": comparison_index,
             "match_key": entry["match_key"],
             "present_group_count": len(entry["group_rows"]),
             "all_groups_present": len(entry["group_rows"]) == group_count,
             "group_rows": entry["group_rows"],
-        }
-        for entry in entries
-    ]
+            "source_task_id": source_task_id,
+            "source_data": source_data,
+            "input_mismatches": differences,
+        })
+    return rows

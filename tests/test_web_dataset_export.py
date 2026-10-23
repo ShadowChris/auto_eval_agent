@@ -1,6 +1,7 @@
 import json
 import zipfile
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -148,6 +149,8 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
     assert list(user_results[0]) == [history._OPERATION_CARD_LABELS.get(key, key) for key in history._OPERATION_USER_RESULT_COLUMNS]
     assert list(user_results[0]) == [
         "数据集序号",
+        "id",
+        "metadata.id",
         "item_id",
         "index",
         "session_id",
@@ -179,6 +182,8 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
         "录屏时长",
     ]
     assert user_results[0]["session_id"] == "session-001"
+    assert user_results[0]["id"] == "op_1"
+    assert user_results[0]["metadata.id"] == ""
     assert user_results[0]["context"] == "设置页已打开"
     assert user_results[0]["attachment_path"] == "/datasets/images/one.png"
     assert user_results[0]["attachment_url_domain"] == "https://image.example.test/one.png"
@@ -197,6 +202,7 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
 
     dataset = sheets["数据集明细"]
     assert len(dataset) == 3
+    assert list(dataset[0])[:3] == ["数据集序号", "id", "metadata.id"]
     assert dataset[0]["分享链接"] == "https://example.test/1"
     assert dataset[0]["custom_field"] == "kept"
     assert dataset[0]["录屏项目相对路径"] == "data/videos/one.mp4"
@@ -318,6 +324,59 @@ def test_operation_export_outer_fields_override_metadata(tmp_path: Path):
     )
 
 
+@pytest.mark.parametrize("metadata_id", ["business-001", "op_1", 0, None])
+@pytest.mark.parametrize("parse_input", [False, True])
+def test_operation_export_preserves_both_ids(
+    tmp_path: Path, metadata_id, parse_input: bool,
+) -> None:
+    from auto_eval.web.parse_input import parse_jsonl
+
+    snapshot = _snapshot(tmp_path)
+    source = snapshot["items"][0]["source_data"]
+    source["metadata"] = {"id": metadata_id}
+    source["id_1"] = "existing-original-column"
+    if parse_input:
+        items, errors = parse_jsonl(json.dumps(source, ensure_ascii=False), "operation")
+        assert not errors
+        snapshot["items"][0] = items[0]
+
+    sheets = history.export_rows(snapshot)
+    for name in ("评估结果", "数据集明细"):
+        row = sheets[name][0]
+        assert list(row)[:3] == ["数据集序号", "id", "metadata.id"]
+        assert row["id"] == "op_1"
+        assert row["metadata.id"] == metadata_id
+    assert sheets["数据集明细"][0]["id_1"] == "existing-original-column"
+    assert sheets["评估结果"][0]["item_id"] == "op_1"
+    batch_row = history.operation_comparison_batch(snapshot)["rows"][0]
+    assert batch_row["id"] == "op_1"
+    assert batch_row["export"]["metadata.id"] == metadata_id
+    jsonl_row = history.jsonl_export_rows(snapshot)[0]
+    assert jsonl_row["id"] == "op_1"
+    assert jsonl_row["metadata"]["id"] == metadata_id
+
+
+def test_operation_xlsx_keeps_both_ids_and_comparison_reimport(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    from auto_eval.web.operation_comparison_import import import_operation_comparison_file
+
+    snapshot = _snapshot(tmp_path)
+    snapshot["items"][0]["source_data"]["metadata"] = {"id": "business-001"}
+    content = history.build_xlsx(snapshot)
+    workbook = openpyxl.load_workbook(BytesIO(content), data_only=True)
+    for name in ("评估结果", "数据集明细"):
+        sheet = workbook[name]
+        assert [sheet.cell(1, column).value for column in (1, 2, 3)] == [
+            "数据集序号", "id", "metadata.id",
+        ]
+        assert sheet["B2"].value == "op_1"
+        assert sheet["C2"].value == "business-001"
+
+    imported = import_operation_comparison_file("results.xlsx", content)
+    assert imported["rows"][0]["id"] == "op_1"
+    assert imported["rows"][0]["export"]["metadata.id"] == "business-001"
+
+
 def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
     openpyxl = pytest.importorskip("openpyxl")
     snapshot = _snapshot(tmp_path)
@@ -329,7 +388,7 @@ def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
     assert workbook.sheetnames[0] == "评估结果"
     result_sheet = workbook["评估结果"]
     assert result_sheet.freeze_panes is None
-    assert result_sheet.auto_filter.ref == "A1:AD4"
+    assert result_sheet.auto_filter.ref == "A1:AF4"
     assert result_sheet.sheet_view.showGridLines is None
     assert result_sheet["A1"].fill.patternType is None
     assert result_sheet["A1"].alignment.wrap_text is None

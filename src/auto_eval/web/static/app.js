@@ -2983,7 +2983,7 @@ createApp({
           dataset_name: item.dataset_name || item.task_id,
           group_name: item.dataset_name || item.task_id,
           rows: [],
-          mapping: { id: "历史快照", index: "历史快照（如有）", query: "历史快照", correctness: "历史结果", issue_types: "历史结果", need_review_cate: "历史结果（如有）" },
+          mapping: { id: "历史快照", index: "历史快照（如有）", query: "历史快照", correctness: "历史结果", issue_types: "历史结果", need_review_cate: "历史结果（如有）", rationale: "历史结果" },
           warnings: [],
           summary: {
             format: "历史任务",

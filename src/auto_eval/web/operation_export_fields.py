@@ -16,6 +16,8 @@ OPERATION_RESULT_FIELD_LABELS = {
 
 OPERATION_USER_RESULT_COLUMNS = (
     "数据集序号",
+    "id",
+    "metadata.id",
     "item_id",
     "index",
     "session_id",
@@ -51,6 +53,18 @@ OPERATION_USER_RESULT_HEADERS = tuple(
     OPERATION_RESULT_FIELD_LABELS.get(field, field)
     for field in OPERATION_USER_RESULT_COLUMNS
 )
+
+
+def operation_result_identity_fields(
+    source: dict[str, Any], item_id: Any = "",
+) -> dict[str, Any]:
+    """分别展示输入 id 与 metadata.id，保留两者的原始值。"""
+    metadata = source.get("metadata")
+    metadata_id = metadata.get("id", "") if isinstance(metadata, dict) else ""
+    return {
+        "id": source.get("id", item_id),
+        "metadata.id": metadata_id,
+    }
 
 
 def operation_user_result_display_row(row: dict[str, Any]) -> dict[str, Any]:
