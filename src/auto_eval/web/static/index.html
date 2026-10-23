@@ -1265,6 +1265,55 @@
       </div>
     </div>
 
+    <details class="comparison-history-picker comparison-upload-history" open>
+      <summary>上传结果集历史（{{ comparisonUploadsTotal }} 份）</summary>
+      <div class="comparison-history-picker-actions">
+        <button @click="loadComparisonUploads()" :disabled="comparisonUploadsLoading || !!comparisonUploadBusy">{{ comparisonUploadsLoading ? '加载中…' : '刷新上传历史' }}</button>
+        <span class="hint">上传成功后自动保存，刷新或重启服务后可再次选择；从当前对比移除不会删除历史。</span>
+      </div>
+      <p v-if="comparisonUploadsError" class="run-error">{{ comparisonUploadsError }}</p>
+      <div class="table-scroll" v-if="comparisonUploads.length">
+        <table class="grid auto-table comparison-upload-history-table">
+          <thead><tr><th>上传时间</th><th>数据集名称</th><th>总条数</th><th>有效</th><th>异常</th><th>操作</th><th>备注</th></tr></thead>
+          <tbody>
+            <tr v-for="upload in comparisonUploads" :key="upload.source_id">
+              <td>{{ formatTime(upload.created_at) }}</td>
+              <td>
+                <input v-if="upload._editing" v-model="upload._nameDraft" maxlength="500" aria-label="上传结果集名称">
+                <strong v-else>{{ upload.group_name }}</strong>
+                <div class="history-task-id">原文件：{{ upload.filename }}</div>
+                <div class="history-task-id">{{ upload.source_id }}</div>
+              </td>
+              <td>{{ upload.summary.raw_count }}</td><td>{{ upload.summary.valid_count }}</td><td>{{ upload.summary.invalid_count }}</td>
+              <td class="comparison-upload-actions">
+                <button class="history-text-link" @click="addComparisonUpload(upload)" :disabled="isComparisonUploadAdded(upload.source_id) || comparisonSources.length>=5 || !!comparisonUploadBusy || historyComparisonLoading">{{ isComparisonUploadAdded(upload.source_id) ? '已添加' : '添加到对比' }}</button>
+                <button v-if="!upload._editing" class="history-text-link" @click="editComparisonUpload(upload)" :disabled="!!comparisonUploadBusy || historyComparisonLoading">编辑</button>
+                <button v-if="!upload._editing" class="history-text-link" @click="deleteComparisonUpload(upload)" :disabled="!!comparisonUploadBusy || historyComparisonLoading">删除历史</button>
+              </td>
+              <td class="history-note-cell">
+                <div v-if="upload._editing" class="history-note-editor">
+                  <textarea v-model="upload._noteDraft" maxlength="10000" rows="3" aria-label="上传结果集备注"></textarea>
+                  <button class="history-text-link" @click="saveComparisonUpload(upload)" :disabled="!!comparisonUploadBusy">保存</button>
+                  <button class="history-text-link" @click="upload._editing=false" :disabled="!!comparisonUploadBusy">取消</button>
+                </div>
+                <span v-else class="history-note-text">{{ upload.note || '未备注' }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p v-else-if="!comparisonUploadsLoading" class="hint">暂无上传历史。上传评估结果集后会自动留档。</p>
+      <div class="pagination" v-if="comparisonUploadsTotal">
+        <span>共 {{ comparisonUploadsTotal }} 份</span>
+        <select v-model.number="comparisonUploadsPageSize" @change="loadComparisonUploads(1)" :disabled="comparisonUploadsLoading" aria-label="上传历史每页条数">
+          <option :value="10">10条/页</option><option :value="20">20条/页</option><option :value="50">50条/页</option>
+        </select>
+        <button @click="loadComparisonUploads(comparisonUploadsPage-1)" :disabled="comparisonUploadsPage<=1 || comparisonUploadsLoading">上一页</button>
+        <span>{{ comparisonUploadsPage }} / {{ comparisonUploadsPageCount }}</span>
+        <button @click="loadComparisonUploads(comparisonUploadsPage+1)" :disabled="comparisonUploadsPage>=comparisonUploadsPageCount || comparisonUploadsLoading">下一页</button>
+      </div>
+    </details>
+
     <details class="comparison-history-picker">
       <summary>从任务类历史记录选择（已选 {{ comparisonSelectedCount }} 条）</summary>
       <div class="comparison-history-picker-actions">
@@ -1300,13 +1349,13 @@
             <button @click="moveComparisonSource(index,-1)" :disabled="index===0 || historyComparisonLoading" title="上移结果集">↑ 上移</button>
             <button @click="moveComparisonSource(index,1)" :disabled="index===comparisonSources.length-1 || historyComparisonLoading" title="下移结果集">↓ 下移</button>
           </div>
-          <button class="btn-danger" @click="removeComparisonSource(source.source_id)">删除</button>
+          <button class="btn-danger" @click="removeComparisonSource(source.source_id)">移除</button>
         </div>
         <div class="comparison-source-name">
           <span class="comparison-source-name-label">数据集名称</span>
           <template v-if="source._editingName">
             <input v-model="source._comparisonNameDraft" placeholder="数据集名称" @keyup.enter="saveComparisonSourceName(source)" @keyup.escape="cancelComparisonSourceNameEdit(source)">
-            <button class="history-text-link" @click="saveComparisonSourceName(source)">保存</button>
+            <button class="history-text-link" @click="saveComparisonSourceName(source)" :disabled="!!comparisonUploadBusy">保存</button>
             <button class="history-text-link" @click="cancelComparisonSourceNameEdit(source)">取消</button>
           </template>
           <template v-else>
@@ -1331,7 +1380,7 @@
           <span>need_review_cate：{{ source.mapping?.need_review_cate || '未提供（可选）' }}</span>
           <span>rationale：{{ source.mapping?.rationale || '未识别' }}</span>
         </div>
-        <details v-if="source.warnings?.length"><summary>导入警告（{{ source.warnings.length }}）</summary><div class="comparison-warning-list"><div v-for="warning in source.warnings.slice(0,20)" :key="source.source_id+'-'+warning.row+'-'+warning.message">第 {{ warning.row }} 行：{{ warning.message }}</div><div v-if="source.warnings.length>20">另有 {{ source.warnings.length-20 }} 条</div></div></details>
+        <details v-if="source.warnings?.length"><summary>导入警告（{{ source.summary?.warning_count ?? source.warnings.length }}）</summary><div class="comparison-warning-list"><div v-for="warning in source.warnings.slice(0,20)" :key="source.source_id+'-'+warning.row+'-'+warning.message">第 {{ warning.row }} 行：{{ warning.message }}</div><div v-if="(source.summary?.warning_count ?? source.warnings.length)>20">另有 {{ (source.summary?.warning_count ?? source.warnings.length)-20 }} 条</div></div></details>
       </article>
     </div>
     <div v-else class="comparison-empty">请从历史记录添加任务，或上传已评估结果集。</div>

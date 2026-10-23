@@ -195,6 +195,15 @@ createApp({
     const comparisonControlSourceId = ref("");
     const comparisonImporting = ref(false);
     const comparisonImportError = ref("");
+    const comparisonUploads = ref([]);
+    const comparisonUploadsPage = ref(1);
+    const comparisonUploadsPageSize = ref(10);
+    const comparisonUploadsTotal = ref(0);
+    const comparisonUploadsPageCount = ref(1);
+    const comparisonUploadsLoading = ref(false);
+    const comparisonUploadsError = ref("");
+    const comparisonUploadBusy = ref("");
+    let comparisonUploadsRequest = 0;
     const historyComparison = ref(null);
     const historyComparisonLoading = ref(false);
     const historyComparisonError = ref("");
@@ -211,6 +220,7 @@ createApp({
         (source) => source.source_id === comparisonControlSourceId.value,
       )
       && !comparisonImporting.value
+      && !comparisonUploadBusy.value
       && !historyComparisonLoading.value
     ));
     const loadingHistory = ref(false);
@@ -1504,8 +1514,9 @@ createApp({
       if (key === "operation" && mode.value !== "operation") {
         switchMode("operation");
       }
-      if (key === "comparison" && !historyItems.value.length) {
-        loadHistory();
+      if (key === "comparison") {
+        if (!historyItems.value.length) loadHistory();
+        loadComparisonUploads();
       }
     }
 
@@ -3003,6 +3014,101 @@ createApp({
       workspacePage.value = "evaluation";
       taskModule.value = "comparison";
       if (!historyItems.value.length) await loadHistory();
+      await loadComparisonUploads();
+    }
+
+    async function comparisonUploadRequest(url, options = {}) {
+      const response = await fetch(url, options);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || `HTTP ${response.status}`));
+      }
+      return data;
+    }
+
+    async function loadComparisonUploads(page = comparisonUploadsPage.value) {
+      const request = ++comparisonUploadsRequest;
+      comparisonUploadsLoading.value = true;
+      comparisonUploadsError.value = "";
+      try {
+        const data = await comparisonUploadRequest(`/api/operation/comparison/uploads?page=${page}&page_size=${comparisonUploadsPageSize.value}`);
+        if (request !== comparisonUploadsRequest) return;
+        comparisonUploads.value = data.items;
+        comparisonUploadsPage.value = data.page;
+        comparisonUploadsPageCount.value = data.page_count;
+        comparisonUploadsTotal.value = data.total;
+      } catch (error) {
+        if (request === comparisonUploadsRequest) comparisonUploadsError.value = error.message;
+      } finally {
+        if (request === comparisonUploadsRequest) comparisonUploadsLoading.value = false;
+      }
+    }
+
+    function isComparisonUploadAdded(sourceId) {
+      return comparisonSources.value.some((source) => source.source_id === sourceId);
+    }
+
+    async function addComparisonUpload(item) {
+      if (comparisonSources.value.length >= 5 || isComparisonUploadAdded(item.source_id)) return;
+      comparisonUploadBusy.value = item.source_id;
+      comparisonUploadsError.value = "";
+      try {
+        const source = await comparisonUploadRequest(`/api/operation/comparison/uploads/${item.source_id}`);
+        if (comparisonSources.value.length >= 5 || isComparisonUploadAdded(item.source_id)) return;
+        comparisonSources.value.push(source);
+        syncComparisonControl();
+        historyComparison.value = null;
+      } catch (error) {
+        comparisonUploadsError.value = error.message;
+      } finally {
+        comparisonUploadBusy.value = "";
+      }
+    }
+
+    function editComparisonUpload(item) {
+      item._nameDraft = item.group_name;
+      item._noteDraft = item.note || "";
+      item._editing = true;
+    }
+
+    async function updateComparisonUpload(sourceId, changes) {
+      const saved = await comparisonUploadRequest(`/api/operation/comparison/uploads/${sourceId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(changes),
+      });
+      const selected = comparisonSources.value.find((source) => source.source_id === sourceId);
+      if (selected) Object.assign(selected, saved);
+      const item = comparisonUploads.value.find((source) => source.source_id === sourceId);
+      if (item) Object.assign(item, saved, { _editing: false });
+      historyComparison.value = null;
+      return saved;
+    }
+
+    async function saveComparisonUpload(item) {
+      comparisonUploadBusy.value = item.source_id;
+      comparisonUploadsError.value = "";
+      try {
+        await updateComparisonUpload(item.source_id, { group_name: item._nameDraft, note: item._noteDraft });
+      } catch (error) {
+        comparisonUploadsError.value = error.message;
+      } finally {
+        comparisonUploadBusy.value = "";
+      }
+    }
+
+    async function deleteComparisonUpload(item) {
+      if (!confirm(`确认删除上传结果集「${item.group_name}」？仅删除上传存档，不影响原生批跑历史；当前对比中的该结果集也会移除。`)) return;
+      comparisonUploadBusy.value = item.source_id;
+      comparisonUploadsError.value = "";
+      try {
+        await comparisonUploadRequest(`/api/operation/comparison/uploads/${item.source_id}`, { method: "DELETE" });
+        if (isComparisonUploadAdded(item.source_id)) removeComparisonSource(item.source_id);
+        await loadComparisonUploads();
+      } catch (error) {
+        comparisonUploadsError.value = error.message;
+      } finally {
+        comparisonUploadBusy.value = "";
+      }
     }
 
     async function openComparisonFromHistory() {
@@ -3019,15 +3125,20 @@ createApp({
       try {
         const body = new FormData();
         body.append("file", file);
-        const response = await fetch("/api/operation/comparison/import", {
+        const response = await fetch("/api/operation/comparison/import?compact=true", {
           method: "POST",
           body,
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-        comparisonSources.value.push(data);
+        if (comparisonSources.value.length < 5) {
+          comparisonSources.value.push(data);
+        } else {
+          comparisonImportError.value = "上传已保存到历史，当前已满 5 组，请移除一组后再添加。";
+        }
         syncComparisonControl();
         historyComparison.value = null;
+        await loadComparisonUploads(1);
       } catch (error) {
         comparisonImportError.value = error?.message || "评估结果集导入失败";
       } finally {
@@ -3064,10 +3175,23 @@ createApp({
       source._editingName = true;
     }
 
-    function saveComparisonSourceName(source) {
-      source.group_name = String(source._comparisonNameDraft || "").trim()
+    async function saveComparisonSourceName(source) {
+      const name = String(source._comparisonNameDraft || "").trim()
         || source.dataset_name
         || source.source_id;
+      if (source.stored) {
+        comparisonUploadBusy.value = source.source_id;
+        comparisonImportError.value = "";
+        try {
+          await updateComparisonUpload(source.source_id, { group_name: name });
+        } catch (error) {
+          comparisonImportError.value = error.message;
+          return;
+        } finally {
+          comparisonUploadBusy.value = "";
+        }
+      }
+      source.group_name = name;
       source._editingName = false;
       historyComparison.value = null;
       historyComparisonError.value = "";
@@ -3102,7 +3226,8 @@ createApp({
           task_id: source.task_id || "",
           dataset_name: source.dataset_name || "",
           group_name: source.group_name || "",
-          rows: source.source_type === "upload" ? (source.rows || []) : [],
+          stored: !!source.stored,
+          rows: source.source_type === "upload" && !source.stored ? (source.rows || []) : [],
         })),
         control_source_id: comparisonSources.value[0]?.source_id || "",
       };
@@ -3911,6 +4036,9 @@ createApp({
       comparisonSelectedItems, comparisonSelectedList, comparisonSelectedCount,
       comparisonBaselineTaskId, comparisonSources, comparisonControlSourceId,
       comparisonImporting, comparisonImportError, comparisonCanGenerate,
+      comparisonUploads, comparisonUploadsPage, comparisonUploadsPageSize,
+      comparisonUploadsTotal, comparisonUploadsPageCount, comparisonUploadsLoading,
+      comparisonUploadsError, comparisonUploadBusy,
       historyComparison, historyComparisonLoading, historyComparisonError,
       historyPage, historyPageSize, historyPageCount, historyJumpPage,
       datasetMaintenance, datasetMaintenanceLoading, datasetMaintenanceError,
@@ -3949,6 +4077,8 @@ createApp({
       canCompareHistoryItem, isHistoryComparisonSelected, toggleHistoryComparisonItem,
       clearHistoryComparisonSelection, addSelectedHistoryComparisonSources,
       openComparisonPage, openComparisonFromHistory, onComparisonResultFile,
+      loadComparisonUploads, addComparisonUpload, isComparisonUploadAdded,
+      editComparisonUpload, saveComparisonUpload, deleteComparisonUpload,
       removeComparisonSource, moveComparisonSource, clearComparisonSources,
       beginComparisonSourceNameEdit, saveComparisonSourceName,
       cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,

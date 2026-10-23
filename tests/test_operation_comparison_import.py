@@ -20,6 +20,13 @@ from auto_eval.web.server import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_comparison_uploads(tmp_path, monkeypatch):
+    from auto_eval.web.comparison_uploads import ComparisonUploadStore
+
+    monkeypatch.setattr(server, "comparison_upload_store", ComparisonUploadStore(tmp_path / "uploads"))
+
+
 def test_import_comparison_jsonl_reads_nested_evaluation() -> None:
     content = "\n".join([
         json.dumps({
@@ -390,6 +397,9 @@ def test_comparison_module_ui_is_parallel_workspace() -> None:
     assert "taskModule==='comparison'" in html
     assert "上传评估结果集" in html
     assert "加入对比分析" in html
-    assert 'fetch("/api/operation/comparison/import"' in js
+    assert 'fetch("/api/operation/comparison/import?compact=true"' in js
+    assert "上传结果集历史" in html
+    assert "删除历史" in html
+    assert "stored: !!source.stored" in js
     assert 'fetch("/api/operation/comparison/analyze"' in js
     assert "/api/operation/comparison/export?format=" in js
