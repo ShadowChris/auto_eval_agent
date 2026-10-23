@@ -352,7 +352,7 @@ def test_comparison_export_mixes_history_and_upload(monkeypatch) -> None:
     response = server.api_operation_comparison_export(request)
     workbook = load_workbook(BytesIO(response.body), read_only=True)
 
-    assert workbook.sheetnames == ["逐题横向对比", "对比概览", "Issue Type对比", "需复核类别对比"]
+    assert workbook.sheetnames == ["逐题横向对比", "数据集明细", "对比概览", "Issue Type对比", "需复核类别对比"]
     assert workbook["对比概览"]["L6"].value == "来源"
     assert workbook["对比概览"]["L7"].value == "原生评估"
     assert workbook["对比概览"]["L8"].value == "上传结果"
@@ -363,13 +363,13 @@ def test_comparison_export_mixes_history_and_upload(monkeypatch) -> None:
     value_row = [cell.value for cell in next(header_rows)]
     assert "实验组A：实验" in group_headers
     field_count = len(_OPERATION_USER_RESULT_HEADERS)
-    assert tuple(field_headers[3:3 + field_count]) == _OPERATION_USER_RESULT_HEADERS
-    assert tuple(field_headers[3 + field_count:3 + 2 * field_count]) == (
+    assert tuple(field_headers[4:4 + field_count]) == _OPERATION_USER_RESULT_HEADERS
+    assert tuple(field_headers[4 + field_count:4 + 2 * field_count]) == (
         _OPERATION_USER_RESULT_HEADERS
     )
     uploaded_values = dict(zip(
         _OPERATION_USER_RESULT_HEADERS,
-        value_row[3 + field_count:3 + 2 * field_count],
+        value_row[4 + field_count:4 + 2 * field_count],
     ))
     assert "是否挂卡" in uploaded_values
     assert "card_presence" not in uploaded_values

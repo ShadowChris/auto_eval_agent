@@ -2186,7 +2186,7 @@ def _operation_history_comparison_payload(
         if data.get("status") != "done":
             raise HTTPException(409, f"只能对比已完成任务：{task_id}")
         try:
-            batches.append(operation_comparison_batch(data))
+            batches.append(operation_comparison_batch(data, include_source_data=include_union_rows))
         except ValueError as exc:
             raise HTTPException(409, f"{task_id}：{exc}") from exc
     try:
@@ -2259,7 +2259,7 @@ def _operation_comparison_analysis_payload(
             if data.get("status") != "done":
                 raise HTTPException(409, f"只能使用已完成任务：{task_id}")
             try:
-                batch = operation_comparison_batch(data)
+                batch = operation_comparison_batch(data, include_source_data=include_union_rows)
             except ValueError as exc:
                 raise HTTPException(409, f"{task_id}：{exc}") from exc
             batch["task_id"] = source.source_id.strip()

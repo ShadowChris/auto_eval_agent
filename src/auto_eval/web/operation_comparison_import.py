@@ -11,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..analysis.operation_comparison import _match_rows
 from ..analysis.operation_statistics import (
     OPERATION_CORRECTNESS,
     normalize_operation_issue_types,
@@ -49,7 +50,7 @@ def import_operation_comparison_file(
     if not content:
         raise ValueError("评估结果文件为空")
 
-    records, sheet = _read_records(content, suffix)
+    records, sheet, dataset_records = _read_records(content, suffix)
     if not records:
         raise ValueError("文件中没有可导入的数据行")
     rows: list[dict[str, Any]] = []
@@ -66,6 +67,8 @@ def import_operation_comparison_file(
     missing = [field for field in REQUIRED_COMPARISON_FIELDS if not mapping[field]]
     if missing:
         raise ValueError(f"缺少必需列：{'、'.join(missing)}；请上传包含所有必需字段的评估结果表")
+    if dataset_records is not None:
+        warnings.extend(_attach_dataset_sources(rows, records, dataset_records))
     warnings.extend(_exclude_duplicate_ids(rows))
     valid_count = _valid_row_count(rows)
     if not valid_count:
@@ -117,6 +120,10 @@ def validate_uploaded_comparison_source(source: dict[str, Any]) -> dict[str, Any
             "query": row.get("query", ""),
             "evaluation": dict(result),
         }, position)
+        source_data = row.get("source_data", exported)
+        if not isinstance(source_data, dict):
+            raise ValueError(f"上传结果集第 {position + 1} 行 source_data 必须是对象")
+        normalized["source_data"] = dict(source_data)
         normalized_rows.append(normalized)
     _exclude_duplicate_ids(normalized_rows)
     if not _valid_row_count(normalized_rows):
@@ -162,7 +169,7 @@ def _exclude_duplicate_ids(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _read_records(
     content: bytes,
     suffix: str,
-) -> tuple[list[dict[str, Any]], str | int | None]:
+) -> tuple[list[dict[str, Any]], str | int | None, list[dict[str, Any]] | None]:
     if suffix == ".jsonl":
         try:
             text = content.decode("utf-8-sig")
@@ -179,7 +186,7 @@ def _read_records(
             if not isinstance(value, dict):
                 raise ValueError(f"JSONL 第 {line_number} 行必须是对象")
             records.append(value)
-        return records, None
+        return records, None, None
     if suffix == ".csv":
         dataframe = None
         last_error: Exception | None = None
@@ -191,7 +198,7 @@ def _read_records(
                 last_error = exc
         if dataframe is None:
             raise ValueError("CSV 编码无法识别，请使用 UTF-8 或 GB18030") from last_error
-        return _dataframe_records(dataframe), None
+        return _dataframe_records(dataframe), None, None
 
     workbook = pd.ExcelFile(BytesIO(content))
     sheet = next(
@@ -199,9 +206,42 @@ def _read_records(
         workbook.sheet_names[0] if workbook.sheet_names else None,
     )
     if sheet is None:
-        return [], None
+        return [], None, None
     dataframe = pd.read_excel(workbook, sheet_name=sheet, dtype=object)
-    return _dataframe_records(dataframe), sheet
+    dataset_records = None
+    if sheet != "数据集明细" and "数据集明细" in workbook.sheet_names:
+        dataset_records = _dataframe_records(pd.read_excel(
+            workbook, sheet_name="数据集明细", dtype=object,
+        ))
+    return _dataframe_records(dataframe), sheet, dataset_records
+
+
+def _attach_dataset_sources(
+    rows: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+    dataset_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """按现有 ID/Query 规则关联完整 Excel 的原始明细，不按行号猜测。"""
+    dataset_rows = []
+    for record in dataset_records:
+        item_id, _ = _field(record, REQUIRED_COMPARISON_FIELDS["id"])
+        query, _ = _field(record, REQUIRED_COMPARISON_FIELDS["query"])
+        dataset_rows.append({
+            "id": str(item_id if item_id is not None else "").strip(), "query": query,
+        })
+    matches, _ = _match_rows(rows, dataset_rows)
+    matched_positions = set()
+    for match in matches:
+        position = match["baseline_index"]
+        matched_positions.add(position)
+        # 原始明细优先，同时保留评估结果表独有的输入列和标签。
+        rows[position]["source_data"] = {
+            **records[position], **dataset_records[match["target_index"]],
+        }
+    return [
+        {"row": position + 2, "message": "数据集明细无法唯一关联，已保留评估结果行的原始字段"}
+        for position in range(len(rows)) if position not in matched_positions
+    ]
 
 
 def _dataframe_records(dataframe: pd.DataFrame) -> list[dict[str, Any]]:
@@ -328,6 +368,7 @@ def _normalize_record(
         "query": str(query or "").strip(),
         "result": result,
         "export": export,
+        "source_data": dict(record),
     }, {
         "index": index_key,
         **field_mapping,

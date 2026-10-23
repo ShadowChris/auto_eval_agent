@@ -2179,7 +2179,7 @@ def operation_statistics_payload(snapshot: dict) -> dict:
     }
 
 
-def operation_comparison_batch(snapshot: dict) -> dict:
+def operation_comparison_batch(snapshot: dict, *, include_source_data: bool = False) -> dict:
     """将普通任务类历史快照转换为批次对比所需的紧凑输入。"""
     if snapshot.get("mode") != "operation":
         raise ValueError("仅任务类历史支持批次对比")
@@ -2234,7 +2234,7 @@ def operation_comparison_batch(snapshot: dict) -> dict:
             if source.get(video_url_key):
                 export_row["录屏URL"] = source[video_url_key]
                 break
-        rows.append({
+        comparison_row = {
             "position": position,
             "index": match_index,
             "id": str(item.get("id") or "").strip(),
@@ -2243,7 +2243,18 @@ def operation_comparison_batch(snapshot: dict) -> dict:
             "query": item.get("query") or item.get("question") or "",
             "result": aligned_by_index.get(position) or {},
             "export": export_row,
-        })
+            "input_data": {
+                key: source[key]
+                for key in ("context", "query_images", "query_image_path", "attachment_path")
+                if key in source
+            },
+        }
+        for key in ("context", "query_images"):
+            if key in item:
+                comparison_row["input_data"].setdefault(key, item[key])
+        if include_source_data:
+            comparison_row["source_data"] = source
+        rows.append(comparison_row)
     backend = _judge_backend_summary(normalized)
     return {
         "task_id": normalized.get("task_id") or "",
@@ -2933,8 +2944,9 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
     # 导出白名单随功能演进产生字段差异。
     detail_fields = _OPERATION_USER_RESULT_HEADERS
     union_rows = []
-    for row in payload.get("union_rows") or []:
+    for position, row in enumerate(payload.get("union_rows") or [], start=1):
         output = {
+            "对比序号": row.get("comparison_index", position),
             "匹配键": row.get("match_key") or "",
             "存在组数": row.get("present_group_count", 0),
             "所有组共有": "是" if row.get("all_groups_present") else "否",
@@ -3001,6 +3013,7 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
             union_rows,
             detail_fields,
         )),
+        ("数据集明细", _operation_comparison_dataset_sheet(payload)),
         ("对比概览", _matrix_sheet_xml(
             overview,
             widths=[22, 46, 22, 14, 16, 12, 12, 12, 14, 14, 14, 12, 14, 14, 14, 14, 14, 18],
@@ -3026,6 +3039,59 @@ def build_operation_comparison_xlsx(payload: dict) -> bytes:
         )),
     ]
     return _build_xlsx_xml_sheets(sheets)
+
+
+def _operation_comparison_dataset_sheet(payload: dict[str, Any]) -> str:
+    """一题一行的共享原始明细，与横向结果使用相同的序号和数据起始行。"""
+    groups = {group["task_id"]: group for group in payload.get("groups") or []}
+    rows = []
+    for position, entry in enumerate(payload.get("union_rows") or [], start=1):
+        source = dict(entry.get("source_data") or {})
+        group = groups.get(entry.get("source_task_id"), {})
+        identities = operation_result_identity_fields(source)
+        row = {
+            "对比序号": entry.get("comparison_index", position),
+            "匹配键": entry.get("match_key") or "",
+            "id": identities["id"],
+            "metadata.id": source.get("metadata.id", identities["metadata.id"]),
+            "query": source.get("query", ""),
+            "明细来源组": group.get("group_label", ""),
+            "明细来源数据集": group.get("group_name", ""),
+            "共享输入差异": "；".join(entry.get("input_mismatches") or []),
+        }
+        # 除已置前的原始标识列外，保留原始字段；与追溯列冲突时加数字后缀。
+        occupied = set(row) | set(source)
+        for key, value in source.items():
+            if key in {"id", "metadata.id", "query"}:
+                continue
+            target = key
+            if target in row:
+                suffix = 1
+                while f"{key}_{suffix}" in occupied:
+                    suffix += 1
+                target = f"{key}_{suffix}"
+            row[target] = value
+            occupied.add(target)
+        rows.append(row)
+    headers = list(dict.fromkeys(key for row in rows for key in row)) or [
+        "对比序号", "匹配键", "id", "metadata.id", "query",
+        "明细来源组", "明细来源数据集", "共享输入差异",
+    ]
+    table = [
+        ["共享数据集明细：优先使用对照组原始数据；与逐题横向对比逐行对应"] + [""] * (len(headers) - 1),
+        headers,
+        *[[row.get(header, "") for header in headers] for row in rows],
+    ]
+    return _matrix_sheet_xml(
+        table,
+        widths=[_width(header) for header in headers],
+        row_styles={1: 8, 2: 15},
+        merge_refs=[f"A1:{_col(len(headers))}1"],
+        row_heights={1: 28, 2: 28},
+        auto_filter_ref=f"A2:{_col(len(headers))}{len(table)}",
+        freeze_rows=2,
+        freeze_columns=2,
+    )
 
 
 def _operation_comparison_issue_sheet(rows: list[dict[str, Any]]) -> str:
@@ -3085,10 +3151,10 @@ def _operation_comparison_detail_sheet(
     detail_fields: tuple[str, ...],
 ) -> str:
     """生成按数据集合并分组的双层表头逐题对比表。"""
-    common_headers = ["匹配键", "存在组数", "所有组共有"]
-    group_header = ["公共字段", "", ""]
+    common_headers = ["对比序号", "匹配键", "存在组数", "所有组共有"]
+    group_header = ["公共字段", "", "", ""]
     field_header = list(common_headers)
-    widths = [28, 12, 14]
+    widths = [12, 28, 12, 14]
     field_widths = {
         "item_id": 20,
         "index": 16,
@@ -3110,7 +3176,7 @@ def _operation_comparison_detail_sheet(
         "录屏URL": 24,
         "error": 36,
     }
-    merge_refs = ["A1:C1"]
+    merge_refs = ["A1:D1"]
     cell_styles: dict[tuple[int, int], int] = {}
     column_index = len(common_headers) + 1
     for group_index, group in enumerate(groups):
@@ -3150,7 +3216,7 @@ def _operation_comparison_detail_sheet(
         row_heights={1: 28, 2: 28},
         auto_filter_ref=f"A2:{last_column}{len(table)}",
         freeze_rows=2,
-        freeze_columns=3,
+        freeze_columns=len(common_headers),
         hide_gridlines=True,
     )
 
