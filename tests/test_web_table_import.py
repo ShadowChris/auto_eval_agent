@@ -50,12 +50,13 @@ def test_import_xlsx_maps_operation_fields_and_preserves_source_columns():
     assert payload["summary"]["imported_rows"] == 1
     assert payload["summary"]["missing_video_rows"] == 1
     item = payload["items"][0]
-    assert item["id"] == "0824-result_simple_001"
+    assert item["id"] == "raw-id"
     assert item["query"] == "打开设置"
     assert item["context"] == "交互发生时间：2026-08-25 10:00:00；交互发生位置：杭州市滨江区"
     assert item["answer"] == "已打开设置"
     assert item["video_path"] == "__missing_video__"
-    assert item["source_data"]["id_1"] == "raw-id"
+    assert item["source_data"]["id"] == "raw-id"
+    assert "id_1" not in item["source_data"]
     assert item["source_data"]["分享链接"] == "https://example.test/case/1"
     assert item["source_data"]["自定义列"] == "原始值"
 
@@ -70,3 +71,17 @@ def test_import_csv_rejects_missing_identifier_columns():
 
     assert response.status_code == 422
     assert "index 或 序号" in response.json()["detail"]
+
+
+def test_import_csv_reuses_id_without_index_or_sequence():
+    content = "id,query,video_path\n001,打开设置,__missing_video__\n".encode("utf-8")
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/operation/import-table",
+            files={"file": ("cases.csv", content, "text/csv")},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"][0]["id"] == "001"
+    assert '"id": "001"' in payload["jsonl"]
