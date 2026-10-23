@@ -313,10 +313,16 @@ table.grid tbody tr:nth-child(even) { background: #fafbfc; }
 .comparison-page-topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .comparison-page-topbar h2 { margin: 0 0 4px; }
 .comparison-page-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.comparison-page-actions .op-upload-btn { white-space: nowrap; }
 .comparison-history-picker { margin: 10px 0 14px; padding: 10px 12px; border: 1px solid #dbeafe; border-radius: 9px; background: #f8fbff; }
 .comparison-history-picker > summary { cursor: pointer; font-weight: 650; color: #334155; }
 .comparison-history-picker-actions { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
 .comparison-history-table td:nth-child(3) { min-width: 320px; white-space: normal; }
+.comparison-upload-history-table td:nth-child(2) { min-width: 240px; max-width: 420px; white-space: normal; overflow-wrap: anywhere; }
+.comparison-upload-history-table input { width: 100%; box-sizing: border-box; }
+.comparison-upload-actions { min-width: 180px; }
+.comparison-upload-actions .history-text-link { margin-right: 8px; }
+.comparison-upload-history-table .history-text-link { padding: 0; border: 0; background: transparent; }
 .comparison-source-list { display: grid; gap: 10px; margin: 12px 0; }
 .comparison-source-card { padding: 12px; border: 1px solid #dbe3ee; border-radius: 9px; background: #fff; }
 .comparison-source-card.control { border-color: #818cf8; box-shadow: inset 3px 0 #6366f1; }

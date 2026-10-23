@@ -20,7 +20,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Query
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from ..analysis.operation_comparison import compare_operation_batches
 from ..analysis.operation_report import build_comparison_report, build_single_report
@@ -86,6 +87,7 @@ from .operation_media import (
     resolve_operation_video_path,
 )
 from .operation_groups import align_operation_groups
+from .comparison_uploads import ComparisonUploadStore
 from .operation_comparison_import import (
     SUPPORTED_SUFFIXES as COMPARISON_IMPORT_SUFFIXES,
     import_operation_comparison_file,
@@ -146,6 +148,7 @@ load_dotenv(BASE_DIR / ".env", override=True)  # 注入 .env 的 key；以 .env 
 app = FastAPI(title="auto_eval 评估台")
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 _state: dict = {}
+comparison_upload_store = ComparisonUploadStore(RUNS_DIR / "comparison_uploads")
 
 
 @app.on_event("startup")
@@ -223,6 +226,12 @@ class OperationComparisonSourceReq(BaseModel):
     dataset_name: str = ""
     group_name: str = ""
     rows: list[dict] = Field(default_factory=list)
+    stored: bool = False
+
+
+class ComparisonUploadUpdateReq(BaseModel):
+    group_name: str | None = Field(default=None, max_length=500)
+    note: str | None = Field(default=None, max_length=10000)
 
 
 class OperationComparisonAnalyzeReq(BaseModel):
@@ -1155,7 +1164,9 @@ async def api_import_operation_table(file: UploadFile = File(...)):
 
 
 @app.post("/api/operation/comparison/import")
-async def api_import_operation_comparison(file: UploadFile = File(...)):
+async def api_import_operation_comparison(
+    file: UploadFile = File(...), compact: bool = False,
+) -> dict:
     """导入已评估的任务类结果集，供独立对比分析使用。"""
     filename = Path(file.filename or "comparison_results").name
     suffix = Path(filename).suffix.lower()
@@ -1165,9 +1176,52 @@ async def api_import_operation_comparison(file: UploadFile = File(...)):
     if len(content) > _MAX_TABLE_DATASET_BYTES:
         raise HTTPException(413, "评估结果文件超过 100MB 限制")
     try:
-        return import_operation_comparison_file(filename, content)
+        source = await run_in_threadpool(import_operation_comparison_file, filename, content)
+        summary = await run_in_threadpool(comparison_upload_store.save, source)
+        # 旧 API 默认仍返回逐题数据；Web 使用 compact，只保留可复用的引用。
+        return summary if compact else {**source, **summary, "warnings": source["warnings"]}
     except (ImportError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/operation/comparison/uploads")
+def api_list_comparison_uploads(
+    page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=50),
+) -> dict:
+    return comparison_upload_store.list_page(page, page_size)
+
+
+@app.get("/api/operation/comparison/uploads/{source_id}")
+def api_get_comparison_upload(source_id: str) -> dict:
+    try:
+        return comparison_upload_store.summary(source_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "上传结果集不存在或已删除") from exc
+
+
+@app.patch("/api/operation/comparison/uploads/{source_id}")
+def api_update_comparison_upload(source_id: str, request: ComparisonUploadUpdateReq) -> dict:
+    try:
+        return comparison_upload_store.update(
+            source_id, group_name=request.group_name, note=request.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "上传结果集不存在或已删除") from exc
+
+
+@app.delete("/api/operation/comparison/uploads/{source_id}")
+def api_delete_comparison_upload(source_id: str) -> dict:
+    try:
+        comparison_upload_store.delete(source_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "上传结果集不存在或已删除") from exc
+    return {"deleted": True}
 
 
 @app.post("/api/operation/groups/align")
@@ -2265,9 +2319,15 @@ def _operation_comparison_analysis_payload(
             batch["task_id"] = source.source_id.strip()
         else:
             try:
-                batch = validate_uploaded_comparison_source(
-                    source.model_dump(mode="python")
-                )
+                if source.stored or not source.rows:
+                    batch = comparison_upload_store.load(source.source_id.strip())
+                    batch["dataset_name"] = batch.get("group_name") or batch["dataset_name"]
+                else:
+                    batch = validate_uploaded_comparison_source(
+                        source.model_dump(mode="python")
+                    )
+            except FileNotFoundError as exc:
+                raise HTTPException(404, "上传结果集不存在或已删除，请重新选择或上传") from exc
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
         if source.group_name.strip():
