@@ -89,6 +89,7 @@ from .operation_media import (
 )
 from .operation_groups import align_operation_groups
 from .comparison_uploads import ComparisonUploadStore
+from .frame_preview import create_frame_preview_router
 from .remote_video import cleanup_stale_video_downloads, is_remote_video_url
 from .operation_comparison_import import (
     SUPPORTED_SUFFIXES as COMPARISON_IMPORT_SUFFIXES,
@@ -126,7 +127,7 @@ STATIC_VERSION_TOKEN = "__STATIC_ASSET_VERSION__"
 def _static_asset_version() -> str:
     """按前端资源内容生成短版本号，发布新文件后自动改变 URL。"""
     digest = hashlib.sha256()
-    for name in ("app.js", "style.css"):
+    for name in ("app.js", "style.css", "frame_preview.js"):
         digest.update((STATIC_DIR / name).read_bytes())
     for name in ("operation_report.js", "operation_report.css"):
         digest.update((OPERATION_REPORT_ASSETS / name).read_bytes())
@@ -3201,6 +3202,14 @@ def index():
             "Pragma": "no-cache",
         },
     )
+
+
+def _frame_preview_snapshot(task_id: str) -> dict | None:
+    task = get_live_task(task_id)
+    return task_to_snapshot(task) if task else load_snapshot(task_id)
+
+
+app.include_router(create_frame_preview_router(_frame_preview_snapshot))
 
 
 app.mount(

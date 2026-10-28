@@ -1121,7 +1121,7 @@
                 :style="frozenResultColumnStyle(c,columnIndex)"
               >{{ c.label }}</th>
               <th v-if="isVideoMode">原视频</th>
-              <th v-if="isVideoMode">抽帧结果（ZIP）</th>
+              <th v-if="isVideoMode">抽帧结果</th>
               <th v-if="isVideoMode">轨迹数据（JSON）</th>
               <th>操作</th>
             </tr>
@@ -1192,6 +1192,7 @@
                   </div>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
+                  <frame-preview :task-id="taskId" :item-index="Number(r.index)"></frame-preview>
                   <a v-if="itemArtifactUrl(r, 'frames_zip')" :href="itemArtifactUrl(r, 'frames_zip')" class="row-export-link">下载</a>
                   <span v-else>—</span>
                 </td>

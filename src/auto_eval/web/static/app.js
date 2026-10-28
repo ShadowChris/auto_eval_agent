@@ -1,8 +1,10 @@
 import { createApp, ref, computed, watch, onMounted, onUnmounted, nextTick } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
+import { FramePreview } from "./frame_preview.js";
 import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 
 createApp({
   components: {
+    FramePreview,
     OperationReport: {
       props: ["taskId", "revision", "report"],
       setup(props) {
