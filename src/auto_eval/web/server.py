@@ -51,7 +51,7 @@ from .runner import (
     spawn_background,
 )
 from . import scheduler
-from .scheduler import MODEL_LIMITER, PIPELINE_LIMITER
+from .scheduler import EVAL_SCHEDULER, MODEL_LIMITER, PIPELINE_LIMITER
 from .tasks import (
     TASKS,
     get_task,
@@ -74,10 +74,16 @@ _state: dict = {}
 
 
 @app.on_event("startup")
-def _load():
+async def _load():
     _state["cfg"] = load_config(CONFIG_DIR)
     # 全局并发/单题超时/裁判；文件缺失或损坏回退默认
     scheduler.load_persisted_settings()
+    EVAL_SCHEDULER.start()
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    await EVAL_SCHEDULER.stop()
 
 
 def cfg():
@@ -392,16 +398,33 @@ async def api_eval(req: EvalReq):
         req.options,
         dataset_name=req.dataset_name.strip(),
     )
-    task.active_runs += 1  # R1：提交时同步 pin（spawn 之前，无 await 间隙），消除启动延迟窗口内被 DELETE/LRU 淘汰的竞态
+    # 全量评测进单消费者 FIFO 队列：一次跑一张表，多张排队。enqueue 内部同步 pin
+    # （active_runs += 1），run_eval 的 finally 负责解除，与既有 pin 契约一致。
+    queue_position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_eval)
+    return {
+        "task_id": task.id,
+        "status": "queued",
+        "queue_position": queue_position,
+    }
 
-    async def _start_later():
-        # 先把 task_id 响应给前端，再启动可能较重的评估任务；
-        # 避免后台裁判/工具调用抢占事件循环，导致 /api/eval 本身迟迟不返回。
-        await asyncio.sleep(0.05)
-        await run_eval(task, app_cfg)
 
-    spawn_background(_start_later())
-    return {"task_id": task.id}
+@app.get("/api/queue")
+async def api_queue() -> dict:
+    """查看当前全量/重跑任务及 FIFO 等待队列。"""
+    return EVAL_SCHEDULER.snapshot()
+
+
+@app.delete("/api/queue/{task_id}")
+async def api_queue_cancel(task_id: str) -> dict:
+    """取消仍在等待队列中的任务（未开跑）；运行中或不存在时分别 409/404。"""
+    task_id = _validate_param_id(task_id, "task_id")
+    task = EVAL_SCHEDULER.cancel(task_id)
+    if task is not None:
+        return {"task_id": task.id, "status": "cancelled"}
+    running = EVAL_SCHEDULER.snapshot().get("running")
+    if running and running.get("task_id") == task_id:
+        raise HTTPException(409, "任务已经开始运行，不能按排队任务取消")
+    raise HTTPException(404, "排队任务不存在")
 
 
 def _control_task(task_id: str):
@@ -448,6 +471,9 @@ async def api_eval_resume(task_id: str):
 async def api_eval_stop(task_id: str):
     """停止：终态。未评估条目落「评测已停止」，已完成结果保留，任务转 error。"""
     task = _control_task(task_id)
+    if task.status == "queued":
+        # 还没开跑的排队任务：直接从队列移除，避免等它被弹出后再走 EvalStopped。
+        EVAL_SCHEDULER.cancel(task.id)
     task.stop()
     # 唤醒暂停等待者；停止过程由各评测路径将剩余条目标记后收敛到 error 终态
     await task.publish("control", {"paused": False, "stopped": True})
@@ -545,29 +571,42 @@ async def api_eval_rerun(req: RerunReq):
 
     batches = build_rerun_batches(task, req.indexes)
     # 同步重置所选条目的逐题进度（清上一轮终态、回落 pending 并即时 fanout），
-    # 须在 spawn 批次之前做：之后连接的 SSE 订阅者回放到的就是 pending 态。
+    # 须在入队之前做：之后连接的 SSE 订阅者回放到的就是 pending 态。
     reset_item_progress(task, sorted({i for rb in batches for i, _ in rb.batch}))
     app_cfg = cfg()
-    # R1：循环体内同步 pin（无 await 间隙），与 api_eval_items 同模式
-    for rb in batches:
-        task.active_runs += 1
+    # 重跑不改整体终态：任务在排队期由 enqueue 置为 queued；真正开跑时把
+    # 终态(done/error)还原，让 manage_status=False 的更新批按既有语义收敛
+    # （error 全愈 → heal 成 done，否则维持），R4 才发终态事件。
+    prior_status = task.status if task.status in {"done", "error"} else "done"
 
-        async def _start_later(rb=rb):
-            # 先把受理结果响应出去，再启动可能较重的重评
-            await asyncio.sleep(0.05)
-            await run_update_batch(
-                task,
-                app_cfg,
+    async def run_rerun_job(parent: Task, _cfg: object) -> None:
+        # 整次重跑 = 一个队列 job（FIFO 原子，不被其它任务插队夹隔）；组间仍用
+        # gather 并发，保留每组一个更新批的总结链/连坐失败语义。
+        # 队列 pin（enqueue 加的 +1）只在排队期保护任务；开跑时先去掉，让下面
+        # 每组自己的 pin 主导 run_update_batch 的 R4 空闲判定（最后一组结束时
+        # active_runs→0 才发终态 done/error 并 retire），避免提前发终态。
+        parent.status = prior_status  # 还原排队前的终态
+        parent.active_runs = max(0, parent.active_runs - 1)
+        for rb in batches:
+            parent.active_runs += 1  # 每组 pin（由该组 run_update_batch 的 finally 释放）
+        await asyncio.gather(*[
+            run_update_batch(
+                parent,
+                _cfg,
                 rb.batch,
-                options=task.options,
+                options=parent.options,
                 manage_status=False,
                 initial_summary=rb.initial_summary,
                 initial_turn=rb.initial_turn,
             )
+            for rb in batches
+        ], return_exceptions=True)
 
-        spawn_background(_start_later())
+    queue_position = EVAL_SCHEDULER.enqueue(task, app_cfg, run_rerun_job, kind="retry")
     return {
         "task_id": task.id,
+        "status": "queued",
+        "queue_position": queue_position,
         "batches": [
             {
                 "group": rb.group,

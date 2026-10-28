@@ -162,12 +162,14 @@ createApp({
       }));
     });
 
-    const progressRows = computed(() =>
-      items.value.map((item, index) => {
+    const progressRows = computed(() => {
+      // 先建一次 index→result 映射，避免每行 results.find()（O(N²)）
+      const byIndex = new Map(results.value.map((entry) => [entry.index, entry]));
+      return items.value.map((item, index) => {
         // 快照（历史加载）的 item_progress/progress_events 键是字符串（str(idx)），
         // 实时事件是数字键——双键回落，历史任务的逐题进度不再全部显示「排队中」
         const current = itemProgress.value[index] || itemProgress.value[String(index)] || {};
-        const result = results.value.find((entry) => entry.index === index);
+        const result = byIndex.get(index);
         const events = progressEvents.value[index] || progressEvents.value[String(index)] || [];
         const startedAt = Number(current.started_at || 0);
         const finishedAt = Number(current.finished_at || 0);
@@ -193,8 +195,8 @@ createApp({
           events,
           latestEvents: events.slice(-2),
         };
-      })
-    );
+      });
+    });
     const progressPageCount = computed(() => Math.max(1, Math.ceil(progressRows.value.length / pageSize)));
     const pagedProgressRows = computed(() => {
       const page = Math.min(progressPage.value, progressPageCount.value);
@@ -323,7 +325,10 @@ createApp({
       return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
 
-    function scrollProgressLog(event) {
+    const logOpenByIndex = ref({}); // index → 该行日志 details 是否展开；收起时不渲染全部事件
+    function scrollProgressLog(index, event) {
+      // 开合状态存外部 ref（progressRows 每次重算会重建 row 对象，不能存 row 上）
+      logOpenByIndex.value = { ...logOpenByIndex.value, [index]: !!event.currentTarget.open };
       if (!event.currentTarget.open) return;
       nextTick(() => {
         const panel = event.currentTarget.querySelector(".progress-log-scroll");
@@ -540,30 +545,26 @@ createApp({
       ];
     });
 
+    // 固定默认列宽：放弃每次按 200 采样自适应（每条 SSE result 都重算一整张表），
+    // 改静态度表查列宽（O(1)）。长内容截断由 .cell-clamp + hover 气泡兜底。
+    const COLUMN_DEFAULT_WIDTHS = {
+      item_id: 130,
+      query: 240,
+      context: 240,
+      category_display: 110,
+      answer_text: 260,
+      card_presence: 92, card_count: 92, card_types: 120, card_contents: 240,
+      superlink_presence: 92, superlink_count: 92, superlink_texts: 240,
+      card_suitability: 110, card_suitability_reason: 220,
+      needs_review: 100, review_reason: 200, problem_solved: 110, problem_solved_reason: 240,
+      answer_issues: 260, factual_conflict: 110, factual_conflict_detail: 220,
+      rationale: 300, latency_s: 92,
+      relevance: 100, safety: 100, content_quality: 110, need_closure: 100,
+      personalization: 100, has_conflict: 100,
+    };
+    const DEFAULT_COL_WIDTH = 160;
     function columnWidth(c) {
-      const compact = [
-        "latency_s", "card_presence", "card_count", "superlink_presence",
-        "superlink_count", "needs_review", "problem_solved",
-      ].includes(c.key);
-      const textColumn = ["query", "context", "answer_text", "rationale", "answer_issues", "problem_solved_reason", "factual_conflict_detail"].includes(c.key);
-      let minWidth = compact ? 80 : textColumn ? 150 : 96;
-      let maxWidth = compact ? 120 : c.key === "rationale" ? 380 : textColumn ? 320 : 200;
-      if (c.key === "item_id") {
-        minWidth = 110;
-        maxWidth = 160;
-      }
-      const visualLength = (value) => Array.from(String(value ?? "")).reduce(
-        (sum, char) => sum + (char.charCodeAt(0) > 255 ? 2 : 1),
-        0,
-      );
-      const sampleLengths = skillResults.value
-        .slice(0, 200)
-        .map((result) => visualLength(cell(result, c)))
-        .sort((a, b) => a - b);
-      const representativeIndex = Math.max(0, Math.ceil(sampleLengths.length * 0.8) - 1);
-      const representativeLength = sampleLengths[representativeIndex] || 1;
-      const desired = (Math.max(visualLength(c.label), representativeLength) * 7) + 28;
-      return Math.max(minWidth, Math.min(maxWidth, desired));
+      return COLUMN_DEFAULT_WIDTHS[c.key] ?? DEFAULT_COL_WIDTH;
     }
 
     const resultTableWidth = computed(
@@ -1600,8 +1601,10 @@ createApp({
       // 重跑/全量跑中途打开历史（active_runs>0）需重连 SSE 继续跟进：
       // status 已是终态但仍有活动批 = 重跑进行中（重跑条目已被后端重置为
       // pending，重连回放即重跑态）；status 仍 running/pending = 全量跑。
-      if ((d.active_runs || 0) > 0 || d.status === "running" || d.status === "pending") {
-        rerunMode.value = d.status !== "running" && d.status !== "pending";
+      if ((d.active_runs || 0) > 0 || d.status === "running" || d.status === "pending" || d.status === "queued") {
+        // 排队(单消费者 FIFO)中的全量评测也视为进行中：重连 SSE 跟进；一旦被
+        // worker 弹出 status 即转 running，rerunMode 据此自然回流，不把排队当重跑。
+        rerunMode.value = d.status !== "running" && d.status !== "pending" && d.status !== "queued";
         if (rerunMode.value) {
           const pendingCount = Object.values(d.item_progress || {}).filter(
             (p) => p && p.status === "pending"
@@ -1651,12 +1654,15 @@ createApp({
     onMounted(async () => {
       let queueStatsTicks = 0;
       progressClockTimer = window.setInterval(() => {
-        clockNow.value = Date.now();
-        // 评估运行中低频刷新全局队列状态（运行/排队计数）
-        queueStatsTicks += 1;
-        if (running.value && queueStatsTicks >= 5) {
-          queueStatsTicks = 0;
-          refreshQueueStats();
+        // 仅在运行中推进时钟/刷新队列；空闲时不写 clockNow，避免拖着整张进度表每秒重算
+        if (running.value) {
+          clockNow.value = Date.now();
+          // 评估运行中低频刷新全局队列状态（运行/排队计数）
+          queueStatsTicks += 1;
+          if (queueStatsTicks >= 5) {
+            queueStatsTicks = 0;
+            refreshQueueStats();
+          }
         }
       }, 1000);
       const r = await fetch("/api/config");
@@ -1702,7 +1708,7 @@ createApp({
       selectSkill, resetResultPage, changePage,
       changeProgressPage, changeOpPage, changeHistoryPage, changeResultPageSize, paginationPages, setTablePage, jumpTablePage,
       progressStageClass, progressDisplay, progressStageLabel, progressStatusClass,
-      progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog,
+      progressMeta, formatProgressEventTime, progressEventMeta, progressEventMessage, scrollProgressLog, logOpenByIndex,
       formatProgressElapsed, shortRequestId, copyRequestId,
       rerunSelection, rerunSubmitting, rerunMode, toggleRerunIndex, failedRerunIndexes,
       selectAllFailedRerun, clearRerunSelection, submitRerun,

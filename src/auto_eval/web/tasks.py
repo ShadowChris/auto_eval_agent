@@ -27,7 +27,7 @@ class Task:
     session_name: str = ""
     dataset_name: str = ""
     note: str = ""
-    status: str = "pending"  # pending | running | done | error
+    status: str = "pending"  # pending | queued | running | done | error | cancelled
     results: list[dict] = field(default_factory=list)
     item_progress: dict[str, dict] = field(default_factory=dict)
     progress_events: dict[str, list[dict]] = field(default_factory=dict)
@@ -214,7 +214,8 @@ def _task_from_snapshot(snapshot: dict, task_id: str) -> Task:
     """从磁盘快照构建 Task 对象（含 pending/running→error 的中断修正）。"""
     status = snapshot.get("status") or "done"
     error = snapshot.get("error")
-    if status in {"pending", "running"}:
+    # queued/取消排队也是一种“没跑完”态：重启后内存队列不在，一律按服务中断回载。
+    if status in {"pending", "queued", "running", "cancelled"}:
         status = "error"
         error = error or "服务中断，已保留中断前完成的评估结果"
     return Task(

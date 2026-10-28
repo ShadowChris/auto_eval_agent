@@ -270,9 +270,9 @@
                   <span class="status-dot"></span>{{ progressStageLabel(row) }}
                 </span>
                 <span v-if="progressMeta(row)" class="progress-meta">{{ progressMeta(row) }}</span>
-                <details v-if="row.events.length > 2" class="progress-log-details" @toggle="scrollProgressLog">
+                <details v-if="row.events.length > 2" class="progress-log-details" @toggle="scrollProgressLog(row.index, $event)">
                   <summary>日志 {{ row.events.length }}</summary>
-                  <div class="progress-log-scroll">
+                  <div v-if="logOpenByIndex[row.index]" class="progress-log-scroll">
                     <div
                       v-for="event in row.events"
                       :key="event._key"

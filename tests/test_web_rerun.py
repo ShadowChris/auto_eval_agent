@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from auto_eval.config import load_config
 from auto_eval.web import runner, server
 from auto_eval.web.history import snapshot_payload
-from auto_eval.web.scheduler import ResizableLimiter
+from auto_eval.web.scheduler import EVAL_SCHEDULER, ResizableLimiter
 from auto_eval.web.tasks import TASKS, Task, upsert_result_by_index
 
 from test_web_scheduler import _patch_runner, _reset_scheduler_globals
@@ -55,6 +55,17 @@ def _result(idx: int, item: dict, *, error: str | None = None, turn_summary: str
     if turn_summary is not None:
         res["turn_summary"] = turn_summary
     return res
+
+
+async def _wait_queue_idle(timeout: float = 5.0) -> None:
+    """等待单消费者 FIFO 队列处理完（重跑现在走 EVAL_SCHEDULER，不再走 _BACKGROUND_TASKS）。"""
+    async def _idle() -> None:
+        while True:
+            snap = EVAL_SCHEDULER.snapshot()
+            if not snap["running"] and not snap["queued"]:
+                return
+            await asyncio.sleep(0.005)
+    await asyncio.wait_for(_idle(), timeout)
 
 
 def _drain_events(q: asyncio.Queue) -> list[dict]:
@@ -403,7 +414,7 @@ async def test_rerun_endpoint_resets_progress_and_counts_batch_scope(monkeypatch
             assert task.item_progress[str(idx)]["status"] == "pending"
             assert task.item_progress[str(idx)]["message"] == "排队中（重跑）"
             assert [e["sequence"] for e in task.progress_events[str(idx)]] == [1]
-        await asyncio.gather(*list(runner._BACKGROUND_TASKS))
+        await _wait_queue_idle()
         # result 事件：批内口径 1/2 → 2/2，带 batch 标记
         result_payloads = [e["data"] for e in _drain_events(q) if e["event"] == "result"]
         assert result_payloads == [
@@ -513,7 +524,7 @@ async def test_rerun_endpoint_end_to_end(monkeypatch):
         assert groups["g1"]["initial_turn"] == 1
         assert groups["standalone:2"]["indexes"] == [2]
         # 等待 spawn_background 的批完成
-        await asyncio.gather(*list(runner._BACKGROUND_TASKS))
+        await _wait_queue_idle()
         assert sorted(calls) == [1, 2]
         # 旧 error 行按 index 原位覆盖，未评估条目拿到结果，整体保持输入顺序
         assert [r["index"] for r in task.results] == [0, 1, 2]
