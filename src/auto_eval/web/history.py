@@ -493,7 +493,9 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
             "evaluation_segment_no", "evaluation_source_dataset",
         }
         items = [
-            {key: value for key, value in item.items() if key in item_fields}
+            {key: value for key, value in item.items() if key in item_fields or (
+                key == "video_path" and str(value).lower().startswith(("http://", "https://"))
+            )}
             for item in items
         ]
         # 历史恢复页只需要每题最近两条进度摘要；完整日志仍保留在快照中。
@@ -1727,6 +1729,8 @@ def _project_relative_path(
     """把项目内路径转为稳定的 POSIX 相对路径；项目外路径返回空。"""
     if value is None or str(value).strip() == "":
         return ""
+    if str(value).strip().lower().startswith(("http://", "https://")):
+        return ""
     path = Path(str(value)).expanduser()
     if not path.is_absolute():
         return path.as_posix()
@@ -2620,9 +2624,11 @@ def write_frames_zip(
 
             if metadata:
                 exported_metadata = dict(metadata)
-                exported_metadata["video"] = _project_relative_path(
-                    item.get("video_path"),
-                    project_root,
+                video_reference = str(item.get("video_path") or "")
+                exported_metadata["video"] = (
+                    video_reference
+                    if video_reference.lower().startswith(("http://", "https://"))
+                    else _project_relative_path(video_reference, project_root)
                 )
                 zf.writestr(
                     f"{item_dir}/keyframes.json",

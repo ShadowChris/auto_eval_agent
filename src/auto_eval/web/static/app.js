@@ -3586,7 +3586,29 @@ createApp({
     function itemArtifactUrl(result, format) {
       const index = Number(result && result.index);
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
+      if (format === "video") {
+        const raw = String(items.value[index]?.video_path || items.value[index]?.source_data?.video_path || "").trim();
+        if (/^https?:\/\//i.test(raw)) return raw;
+      }
       return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
+    }
+
+    function itemVideoIsRemote(result) {
+      return /^https?:\/\//i.test(itemArtifactUrl(result, "video"));
+    }
+
+    function itemVideoLinks(result) {
+      const index = Number(result?.index);
+      const variants = items.value[index]?.group_variants || [];
+      if (!variants.length) return [{ url: itemArtifactUrl(result, "video"), remote: itemVideoIsRemote(result), label: "" }];
+      return variants.map((variant, groupIndex) => {
+        const raw = String(variant.item?.video_path || "").trim();
+        const remote = /^https?:\/\//i.test(raw);
+        return {
+          url: remote ? raw : `/api/eval/${taskId.value}/items/${index}/export?format=video&group_index=${groupIndex}`,
+          remote, label: variant.group_name || variant.group_id || `组 ${groupIndex+1}`,
+        };
+      });
     }
 
     function resultQueryImageCount(result) {
@@ -4061,7 +4083,7 @@ createApp({
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit, formatOptionalTaskTime, formatAttachmentPath,
       trunc, switchMode, onFile, onOpManifestFile, clearImportedOperationDataset,
       setAllImportedDatasetSelections, setImportedPreviewPage,
-      onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, resultQueryImageCount, queryImagePreviewUrl, resultQueryImageFilename, openQueryImagePreview, closeQueryImagePreview, moveResultQueryImagePreview, addOpItem, removeOpItem, onOpVideo, onQueryImage, removeQueryImage, onOpDrop,
+      onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, itemVideoIsRemote, resultQueryImageCount, queryImagePreviewUrl, resultQueryImageFilename, openQueryImagePreview, closeQueryImagePreview, moveResultQueryImagePreview, addOpItem, removeOpItem, onOpVideo, onQueryImage, removeQueryImage, onOpDrop,
       loadHistory, loadHistoryTask, delHistory, cancelHistoryTask,
       loadDatasetMaintenance, datasetStatusLabel, datasetEvaluationStatusLabel,
       datasetBatchStatusLabel, datasetChangeActionLabel, isDatasetMaintenanceSelected,
@@ -4082,6 +4104,7 @@ createApp({
       removeComparisonSource, moveComparisonSource, clearComparisonSources,
       beginComparisonSourceNameEdit, saveComparisonSourceName,
       cancelComparisonSourceNameEdit, comparisonSourceRoleLabel,
+      itemVideoLinks,
       generateHistoryComparison, exportHistoryComparison, exportHtml,
       comparisonCorrectnessCount, comparisonIsBestOkRate, changeComparisonScope,
       comparisonPairChangeClass, comparisonPairChangeLabel, comparisonIssueRows,

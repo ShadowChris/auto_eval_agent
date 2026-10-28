@@ -9,6 +9,7 @@ import re
 from numbers import Real
 from pathlib import Path
 from typing import Callable
+from urllib.parse import unquote, urlsplit
 
 from ..media import (
     DEFAULT_TASK_START_TIME,
@@ -19,6 +20,7 @@ from ..media import (
 )
 from ..config import VisualModeProfile
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from .remote_video import is_remote_video_url, local_video_input
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
@@ -361,6 +363,33 @@ def _prepared_operation_item(
     return prepared
 
 
+def _prepare_remote_operation_item(
+    prepare_fn: Callable, item: dict, raw_url: str, *, runs_dir: Path, **kwargs,
+) -> dict:
+    """远程输入仅在准备阶段下载，抽帧成功或失败后均释放临时原视频。"""
+    with local_video_input(raw_url, runs_dir) as local_path:
+        local_item = {**item, "video_path": str(local_path)}
+        # 新下载的内容必须重抽，避免同 URL 对象更新后命中旧帧。
+        # 模型重跑已有 frames 时不进入此阶段，仍复用已保存帧。
+        stat = local_path.stat()
+        fingerprint = f"{raw_url}:{stat.st_size}:{stat.st_mtime_ns}"
+        local_item["_remote_video_identity"] = hashlib.sha256(fingerprint.encode()).hexdigest()
+        prepared = prepare_fn(local_item, runs_dir=runs_dir, **kwargs)
+        if prepared.get("frames"):
+            metadata_path = Path(prepared["frames"][0]).parent / "keyframes.json"
+            if metadata_path.is_file():
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata["video"] = raw_url
+                metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    prepared.pop("_remote_video_identity", None)
+    prepared.update({
+        "video_path": raw_url,
+        "media": [raw_url],
+        "video_name": Path(unquote(urlsplit(raw_url).path)).name or "remote_video.mp4",
+    })
+    return prepared
+
+
 def prepare_cached_operation_item(
     item: dict,
     *,
@@ -374,6 +403,11 @@ def prepare_cached_operation_item(
     raw_path = str(item.get("video_path") or "").strip()
     if not raw_path:
         raise ValueError("缺少 video_path")
+    if is_remote_video_url(raw_path):
+        return _prepare_remote_operation_item(
+            prepare_cached_operation_item, item, raw_path, runs_dir=runs_dir,
+            base_dir=base_dir, probe_fn=probe_fn, extract_fn=extract_fn,
+        )
     video_path = resolve_operation_video_path(raw_path, base_dir=base_dir)
     duration = float(probe_fn(video_path))
     if duration <= 0:
@@ -425,11 +459,20 @@ def prepare_session_operation_item(
         raw_path = str(media[0]).strip() if media else ""
     if not raw_path:
         raise ValueError("缺少 video_path")
+    if is_remote_video_url(raw_path):
+        return _prepare_remote_operation_item(
+            prepare_session_operation_item, item, raw_path, runs_dir=runs_dir,
+            session_name=session_name, item_index=item_index, total_items=total_items,
+            base_dir=base_dir, probe_fn=probe_fn, extract_fn=extract_fn,
+        )
     video_path = resolve_operation_video_path(raw_path, base_dir=base_dir)
     duration = float(probe_fn(video_path))
     if duration <= 0:
         raise ValueError(f"无法读取视频或视频时长为 0：{raw_path}")
     extract_kwargs, cache_key, warnings, ignored_fields = _operation_timing(item, duration)
+
+    if item.get("_remote_video_identity"):
+        cache_key += ":remote:" + item["_remote_video_identity"]
 
     width = max(3, len(str(max(total_items, 1))))
     sequence = str(item_index + 1).zfill(width)

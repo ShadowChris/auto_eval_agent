@@ -1,0 +1,13 @@
+# 任务类 HTTP/HTTPS 视频：临时下载后本地抽帧，不长期保存原视频。
+download_concurrency: 10
+connect_timeout_s: 10
+read_timeout_s: 30
+total_timeout_s: 120
+max_size_mb: 500
+max_redirects: 5
+max_attempts: 3
+retry_delay_s: 1
+stale_after_hours: 24
+# 默认仅访问公网地址；明确列出的主机可访问内网 OBS，请勿配置不可信主机。
+# 仅填写主机名，不含协议、路径或通配符。修改后建议重启服务。
+allowed_hosts: []

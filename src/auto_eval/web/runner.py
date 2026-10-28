@@ -59,6 +59,7 @@ from .operation_media import (
     prepare_session_rich_content_item,
 )
 from .tasks import DEFAULT_OPERATION_CONCURRENCY, Task, prune_task_cache
+from .remote_video import run_video_preparation, video_reference_for_log
 
 
 logger = logging.getLogger(__name__)
@@ -796,7 +797,7 @@ async def _run(
                                 f"{item_id}__{variant.get('group_id') or group_position + 1}"
                             )
                             prepared = await asyncio.wait_for(
-                                asyncio.to_thread(
+                                run_video_preparation(
                                     prepare_session_operation_item,
                                     prepared_input,
                                     session_name=task.session_name,
@@ -863,7 +864,7 @@ async def _run(
                         log_event(
                             "视频准备",
                             "校验视频并分析场景",
-                            details={"视频路径": item_dict.get("video_path")},
+                            details={"视频路径": video_reference_for_log(str(item_dict.get("video_path") or ""))},
                             progress=3,
                             progress_message="正在校验视频并分析场景",
                         )
@@ -876,7 +877,7 @@ async def _run(
                             prepare_call = prepare_session_operation_item
                             prepare_kwargs = {}
                         prepared = await asyncio.wait_for(
-                            asyncio.to_thread(
+                            run_video_preparation(
                                 prepare_call,
                                 item_dict,
                                 session_name=task.session_name,

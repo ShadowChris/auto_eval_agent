@@ -25,6 +25,7 @@ from fastapi.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
+    RedirectResponse,
     Response,
     StreamingResponse,
 )
@@ -88,6 +89,7 @@ from .operation_media import (
 )
 from .operation_groups import align_operation_groups
 from .comparison_uploads import ComparisonUploadStore
+from .remote_video import cleanup_stale_video_downloads, is_remote_video_url
 from .operation_comparison_import import (
     SUPPORTED_SUFFIXES as COMPARISON_IMPORT_SUFFIXES,
     import_operation_comparison_file,
@@ -154,6 +156,7 @@ comparison_upload_store = ComparisonUploadStore(RUNS_DIR / "comparison_uploads")
 @app.on_event("startup")
 def _load():
     _state["cfg"] = load_config(CONFIG_DIR)
+    cleanup_stale_video_downloads()
 
 
 def cfg():
@@ -1870,7 +1873,7 @@ def api_eval_single_result(task_id: str, id: str, event: int = 0):
 
 @app.post("/api/operation/prepare")
 async def api_prepare_operation(req: OperationPrepareReq):
-    """批量校验 JSONL 中的本地视频路径并并发抽帧，逐条隔离错误。"""
+    """批量校验 JSONL 中的视频路径并并发抽帧，逐条隔离错误。"""
     if not req.items:
         raise HTTPException(400, "items 为空")
     concurrency = max(1, min(int(req.concurrency or 2), 8))
@@ -3090,6 +3093,7 @@ def api_export_item(
     item_index: int,
     format: str,
     image_index: int = 0,
+    group_index: int | None = None,
 ):
     """导出单条结果关联的原视频、原输入图片、关键帧或裁判调用 JSON。"""
     task = get_live_task(task_id)
@@ -3129,12 +3133,20 @@ def api_export_item(
         )
 
     if format == "video":
-        raw_path = str(item.get("video_path") or "").strip()
+        video_item = item
+        if group_index is not None:
+            variants = item.get("group_variants") or []
+            if group_index < 0 or group_index >= len(variants):
+                raise HTTPException(404, "数据组不存在")
+            video_item = variants[group_index].get("item") or {}
+        raw_path = str(video_item.get("video_path") or "").strip()
         if not raw_path:
-            media = item.get("media") or []
+            media = video_item.get("media") or []
             raw_path = str(media[0]).strip() if media else ""
         if not raw_path:
             raise HTTPException(404, "该条结果没有原始视频路径")
+        if is_remote_video_url(raw_path):
+            return RedirectResponse(raw_path, status_code=307)
         try:
             video_path = _resolve_operation_video_path(raw_path)
         except ValueError as exc:
