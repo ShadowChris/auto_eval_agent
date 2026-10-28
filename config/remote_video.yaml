@@ -7,6 +7,7 @@ max_redirects: 5
 max_attempts: 3
 retry_delay_s: 1
 stale_after_hours: 24
-# 默认仅访问公网地址；明确列出的主机可访问内网 OBS，请勿配置不可信主机。
-# 仅填写主机名，不含协议、路径或通配符。修改后建议重启服务。
+# 默认仅访问公网地址；内网 OBS 优先在 .env 配置 REMOTE_VIDEO_ALLOWED_HOSTS。
+# 此处为兼容回退：仅在环境变量未设置时生效；环境变量显式留空会清空白名单。
+# 仅填写可信域名或 IP，不含协议、端口、路径或通配符。
 allowed_hosts: []

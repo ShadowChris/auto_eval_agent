@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, fields
 import ipaddress
 import math
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -47,12 +48,45 @@ class RemoteVideoConfig:
     allowed_hosts: tuple[str, ...] = ()
 
 
+def _normalize_allowed_hosts(values: object, source: str) -> tuple[str, ...]:
+    message = f"{source} 必须填写域名或 IP，不含协议、端口、路径或通配符"
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(message)
+    hosts: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(message)
+        host = value.strip().lower()
+        if any(char.isspace() or char in "/\\*?#@[]%" for char in host):
+            raise ValueError(message)
+        try:
+            host = str(ipaddress.ip_address(host))
+        except ValueError:
+            if ":" in host:
+                raise ValueError(message) from None
+            try:
+                host = httpx.URL(f"http://{host}").host
+            except httpx.InvalidURL:
+                raise ValueError(message) from None
+            if not host:
+                raise ValueError(message)
+        hosts.append(host)
+    return tuple(dict.fromkeys(hosts))
+
+
 def load_remote_video_config() -> RemoteVideoConfig:
     data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
     data = data or {}
     known = {field.name for field in fields(RemoteVideoConfig)}
     if not isinstance(data, dict) or set(data) - known:
         raise ValueError("remote_video.yaml 配置字段无效")
+    # 未设置时兼容 YAML；显式留空会清空白名单，而不是意外回退到旧配置。
+    env_hosts = os.environ.get("REMOTE_VIDEO_ALLOWED_HOSTS")
+    if env_hosts is not None:
+        values = [part.strip() for part in env_hosts.split(",") if part.strip()]
+        data["allowed_hosts"] = _normalize_allowed_hosts(values, "REMOTE_VIDEO_ALLOWED_HOSTS")
+    else:
+        data["allowed_hosts"] = _normalize_allowed_hosts(data.get("allowed_hosts", ()), "allowed_hosts")
     data.setdefault("download_concurrency", load_pipeline_config().download_concurrency)
     cfg = RemoteVideoConfig(**data)
     for name in known - {"allowed_hosts"}:
@@ -64,11 +98,6 @@ def load_remote_video_config() -> RemoteVideoConfig:
     for name in ("download_concurrency", "max_redirects", "max_attempts"):
         if not isinstance(getattr(cfg, name), int):
             raise ValueError(f"远程视频配置 {name} 必须是整数")
-    if not isinstance(cfg.allowed_hosts, (list, tuple)) or any(
-        not isinstance(host, str) or not host.strip() or "/" in host or "*" in host
-        for host in cfg.allowed_hosts
-    ):
-        raise ValueError("allowed_hosts 必须是主机名列表")
     return cfg
 
 
@@ -98,9 +127,14 @@ def _checked_addresses(url: str, cfg: RemoteVideoConfig) -> tuple[httpx.URL, lis
                 type=socket.SOCK_STREAM,
             )
         ))
-        allowed = parsed.host.lower() in {host.lower() for host in cfg.allowed_hosts}
+        host = parsed.host.lower()
+        try:
+            host = str(ipaddress.ip_address(host))
+        except ValueError:
+            pass
+        allowed = host in {host.lower() for host in cfg.allowed_hosts}
         if not addresses or (not allowed and any(not ipaddress.ip_address(ip).is_global for ip in addresses)):
-            raise ValueError("视频链接指向非公网地址；内网 OBS 需配置 allowed_hosts")
+            raise ValueError("视频链接指向非公网地址；内网 OBS 请在 .env 配置 REMOTE_VIDEO_ALLOWED_HOSTS（或 YAML allowed_hosts）")
         return parsed, addresses
     except (httpx.InvalidURL, socket.gaierror) as exc:
         raise ValueError("视频 URL 无效或域名无法解析") from exc

@@ -17,6 +17,48 @@ from auto_eval.table_dataset import convert_table
 from auto_eval.web import remote_video, operation_media, history, server
 
 
+@pytest.fixture(autouse=True)
+def clear_remote_hosts_env(monkeypatch):
+    monkeypatch.delenv("REMOTE_VIDEO_ALLOWED_HOSTS", raising=False)
+
+
+@pytest.fixture
+def remote_config_file(tmp_path, monkeypatch):
+    path = tmp_path / "remote_video.yaml"
+    path.write_text("allowed_hosts:\n  - internal.test\n", encoding="utf-8")
+    monkeypatch.setattr(remote_video, "CONFIG_PATH", path)
+    return path
+
+
+def test_allowed_hosts_falls_back_to_yaml_when_env_unset(remote_config_file):
+    assert remote_video.load_remote_video_config().allowed_hosts == ("internal.test",)
+
+
+def test_allowed_hosts_env_overrides_yaml_and_normalizes_values(remote_config_file, monkeypatch):
+    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", " Other.INTERNAL , 10.20.30.40,other.internal, ,2001:0db8::1 ")
+    assert remote_video.load_remote_video_config().allowed_hosts == (
+        "other.internal", "10.20.30.40", "2001:db8::1",
+    )
+
+
+@pytest.mark.parametrize("value", ["", " ", ", ,"])
+def test_empty_allowed_hosts_env_clears_yaml_allowlist(remote_config_file, monkeypatch, value):
+    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", value)
+    assert remote_video.load_remote_video_config().allowed_hosts == ()
+
+
+@pytest.mark.parametrize("value", [
+    "https://internal.test/a?token=secret", "internal.test:9000", "10.20.30.40:9000",
+    "*.internal.test", "10.0.0.0/8", "internal.test/file", "user@internal.test",
+    "internal test", "[2001:db8::1]",
+])
+def test_invalid_allowed_hosts_env_has_actionable_error(remote_config_file, monkeypatch, value):
+    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", value)
+    with pytest.raises(ValueError, match="REMOTE_VIDEO_ALLOWED_HOSTS") as error:
+        remote_video.load_remote_video_config()
+    assert "secret" not in str(error.value)
+
+
 @pytest.fixture
 def network(monkeypatch):
     """固定 DNS 和 HTTP transport，所有普通测试均不访问真实网络。"""
@@ -35,6 +77,37 @@ def network(monkeypatch):
             transport=httpx.MockTransport(handler), **kwargs,
         ))
     return install
+
+
+def test_env_allowlist_is_applied_to_redirected_download(remote_config_file, monkeypatch, tmp_path, network):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(302, headers={"location": "http://internal.test/video.mp4"})
+        return httpx.Response(200, content=b"video")
+
+    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", "internal.test")
+    network(handler)
+    result = remote_video.download_remote_video("https://cdn.test/a", tmp_path)
+    assert result.read_bytes() == b"video"
+    assert requests[-1].url.host == "10.0.0.1"
+    assert requests[-1].headers["host"] == "internal.test"
+
+
+def test_empty_env_blocks_previously_yaml_allowed_internal_host(remote_config_file, monkeypatch, tmp_path, network):
+    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", "")
+    network(lambda _: pytest.fail("不应发送未放行的内网请求"))
+    with pytest.raises(ValueError, match="REMOTE_VIDEO_ALLOWED_HOSTS"):
+        remote_video.download_remote_video("http://internal.test/video.mp4", tmp_path)
+
+
+def test_ipv6_allowlist_matches_equivalent_url_address(remote_config_file, monkeypatch, tmp_path, network):
+    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", "2001:db8::1")
+    network(lambda _: httpx.Response(200, content=b"video"))
+    result = remote_video.download_remote_video("http://[2001:0db8::1]/video.mp4", tmp_path)
+    assert result.read_bytes() == b"video"
 
 
 def test_download_preserves_signed_query_and_pins_checked_ip(tmp_path, network):
