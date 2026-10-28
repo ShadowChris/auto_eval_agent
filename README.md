@@ -64,8 +64,10 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8503
 
 ### 输入格式（JSONL，每行一题）
 
-- **垂域视觉评测**：`query`（必填）、`video_path`（必填）、可选 `id` / `context`（可信背景条件，可写当前时间地点）/ `category`（垂域）/ `answer_text` / `task_start_time`+`task_end_time`（截取作答区间）。
-- **垂域视觉对比评测**：`query`、`video1`+`video2`（必填）、`answer1`+`answer2`、可选 `context` / `context1` / `context2`。
+- **垂域视觉评测**：`query`（必填）、`video_path`（必填，本地路径或 `http(s)` 链接）、可选 `id` / `context`（可信背景条件，可写当前时间地点）/ `category`（垂域）/ `answer_text` / `task_start_time`+`task_end_time`（截取作答区间）。
+- **垂域视觉对比评测**：`query`、`video1`+`video2`（必填，均支持本地路径或 `http(s)` 链接）、`answer1`+`answer2`、可选 `context` / `context1` / `context2`。
+
+网络视频只在评测期间下载到 `runs/downloads/`，单题结束后删除；结果表直接链接原始网络地址，不提供视频下载。
 
 ### 裁判明细日志（可选）
 

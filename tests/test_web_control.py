@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from auto_eval.config import load_config
-from auto_eval.web import runner, server
+from auto_eval.web import runner, server, video_prepare
 from auto_eval.web.scheduler import ResizableLimiter
 from auto_eval.web.tasks import EvalStopped, TASKS, Task
 
@@ -229,6 +229,49 @@ async def test_run_eval_stop_marks_remaining_and_error_terminal(monkeypatch):
         task.unsubscribe(q)
         TASKS.pop(task.id, None)
         _reset_scheduler_globals()
+
+
+async def test_run_eval_cleans_downloaded_video_after_evaluation(
+    monkeypatch,
+    tmp_path,
+):
+    task = _free_task(1)
+    source_url = "https://cdn.example.test/weather.mp4"
+    task.items[0]["video_path"] = source_url
+    downloaded = tmp_path / "runs" / "downloads" / "weather.mp4"
+
+    async def fake_eval_one(mode, idx, item, **kw):
+        return {"item_id": item.get("id"), "query": item.get("query")}
+
+    def fake_prep(item, **kw):
+        downloaded.parent.mkdir(parents=True, exist_ok=True)
+        downloaded.write_bytes(b"video")
+        return {
+            **item,
+            "frames": [str(tmp_path / "frames" / "kf_001.jpg")],
+            "frame_count": 1,
+            "_temporary_video_paths": [str(downloaded)],
+        }
+
+    _patch_runner(monkeypatch, ResizableLimiter(1), fake_eval_one)
+    monkeypatch.setattr(runner, "prepare_session_rich_content_item", fake_prep)
+    monkeypatch.setattr(
+        runner,
+        "cleanup_item_video_downloads",
+        lambda item: video_prepare.cleanup_item_video_downloads(
+            item,
+            runs_dir=tmp_path / "runs",
+        ),
+    )
+    task.active_runs = 1
+    try:
+        await asyncio.wait_for(runner.run_eval(task, _CFG), 5)
+    finally:
+        _reset_scheduler_globals()
+
+    assert not downloaded.exists()
+    assert task.items[0]["video_path"] == source_url
+    assert "_temporary_video_paths" not in task.items[0]
 
 
 async def test_update_batch_stop_marks_remaining_and_error_terminal(monkeypatch):

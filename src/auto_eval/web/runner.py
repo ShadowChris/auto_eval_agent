@@ -30,6 +30,7 @@ from ..observability import (
 from ..schema import EvalItem
 from .history import save_task
 from .video_prepare import (
+    cleanup_item_video_downloads,
     prepare_session_rich_content_item,
     prepare_session_visual_compare_item,
 )
@@ -165,6 +166,17 @@ def _mark_interrupted_if_stuck(task: Task) -> bool:
     return True
 
 
+async def _cleanup_task_video_downloads(task: Task) -> None:
+    """清理运行期下载的视频；正常路径已在单题完成时清理，这里兜底中断。"""
+    await asyncio.gather(
+        *(
+            asyncio.to_thread(cleanup_item_video_downloads, item)
+            for item in task.items
+        ),
+        return_exceptions=True,
+    )
+
+
 async def run_eval(task: Task, cfg: AppConfig) -> None:
     """全量评测入口。pin 契约（R1）：调用方须在提交时同步 `active_runs += 1`
     （endpoint 在 spawn_background 之前），本函数只负责结束时解除——否则
@@ -196,6 +208,7 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
             await task.publish("error", {"message": task.error})
             _persist_task(task, force=True)
     finally:
+        await _cleanup_task_video_downloads(task)
         task.active_runs -= 1
         _mark_interrupted_if_stuck(task)
         _persist_task(task, force=True)  # 退休前最后一次落盘，磁盘先于内存下线
@@ -549,6 +562,7 @@ def _make_item_evaluator(
                     pending_judge_traces,
                     res,
                 )
+            await asyncio.to_thread(cleanup_item_video_downloads, item_dict)
             await finish(idx, res, started)
             return res
 
@@ -688,6 +702,7 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         await asyncio.gather(*coros)
     finally:
         await _aclose_judge_clients(clients)
+        await _cleanup_task_video_downloads(task)
 
 
 # 登记后台更新批任务引用：避免协程被 GC，也便于测试等待完成。
@@ -989,6 +1004,8 @@ async def run_update_batch(
     finally:
         task.active_runs -= 1
         idle = task.active_runs <= 0
+        if idle:
+            await _cleanup_task_video_downloads(task)
         interrupted = _mark_interrupted_if_stuck(task) if idle else False
         if idle and task.stopped:
             # 用户停止：非崩溃终态，保留已完成结果。manage_status 批的 error

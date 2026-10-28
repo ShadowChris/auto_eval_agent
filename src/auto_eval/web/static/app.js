@@ -147,8 +147,8 @@ createApp({
     const formatHint = computed(
       () =>
         ({
-          compare: "逐题导入 JSONL：id(可选)、query、context(可选)、video1、video2、context1/context2(可选)、answer1/answer2(可选)、task_start_time/task_end_time(可选，单位秒)",
-          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、competitor_answer(可选，竞品答案，仅用于事实冲突判定，不代表正确答案、不作评分依据)、category/answer_text/task_start_time/task_end_time(均可选)；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。CSV 导入对应列名「竞品答案」（或英文列头 competitor_answer）。",
+          compare: "逐题导入 JSONL：id(可选)、query、context(可选)、video1、video2、context1/context2(可选)、answer1/answer2(可选)、task_start_time/task_end_time(可选，单位秒)；video1/video2 支持本地路径或 http(s) 链接",
+          rich_content: "可逐题上传，也可导入 JSONL：query、context(可选)、video_path、competitor_answer(可选，竞品答案，仅用于事实冲突判定，不代表正确答案、不作评分依据)、category/answer_text/task_start_time/task_end_time(均可选)；video_path 支持本地路径或 http(s) 链接，网络视频仅评测期间临时下载；普通图片不算挂卡，回答区域蓝色文字按 Superlink 统计。CSV 导入对应列名「竞品答案」（或英文列头 competitor_answer）。",
         }[mode.value])
     );
 
@@ -568,7 +568,7 @@ createApp({
     }
 
     const resultTableWidth = computed(
-      () => 36 + 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0)
+      () => 36 + 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 420 : 0)
     );
 
     const filteredResults = computed(() => {
@@ -1650,6 +1650,25 @@ createApp({
       if (!taskId.value || !Number.isInteger(index) || index < 0) return "";
       return `/api/eval/${taskId.value}/items/${index}/export?format=${encodeURIComponent(format)}`;
     }
+    function isRemoteVideoUrl(value) {
+      return /^https?:\/\//i.test(String(value || "").trim());
+    }
+    function itemVideoLinks(result) {
+      const index = Number(result && result.index);
+      if (!Number.isInteger(index) || index < 0) return [];
+      const item = items.value[index] || {};
+      const source = item.source_data || {};
+      const values = mode.value === "compare"
+        ? [item.video1 || source.video1, item.video2 || source.video2]
+        : [item.video_path || source.video_path];
+      return values
+        .map((url, sourceIndex) => ({
+          key: `${index}-${sourceIndex}`,
+          url: String(url || "").trim(),
+          label: mode.value === "compare" ? `视频${sourceIndex + 1}` : "打开",
+        }))
+        .filter((link) => isRemoteVideoUrl(link.url));
+    }
 
     onMounted(async () => {
       let queueStatsTicks = 0;
@@ -1695,7 +1714,7 @@ createApp({
       skillTabs, filteredResults, pagedResults, pageCount, resultTableWidth,
       correctnessStats, errorTypeStats, statsOpen,
       formatHint, resultCols, opItems, pagedOpItems, opPreparing, canSubmit,
-      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportHtml, exportFrames, itemArtifactUrl, addOpItem, removeOpItem, onOpVideo, onOpDrop,
+      switchMode, onOpManifestFile, submit, cell, columnWidth, exportCsv, exportJson, exportXlsx, exportHtml, exportFrames, itemArtifactUrl, itemVideoLinks, addOpItem, removeOpItem, onOpVideo, onOpDrop,
       page, openComparisonPage, openComparisonFromHistory,
       comparisonSelectedCount, comparisonSelectedList, comparisonSources, comparisonCanGenerate,
       historyComparison, historyComparisonLoading, historyComparisonError,

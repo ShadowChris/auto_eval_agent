@@ -970,7 +970,7 @@ def _download_stem(value: str, fallback: str) -> str:
 
 @app.get("/api/eval/{task_id}/items/{item_index}/export")
 def api_export_item(task_id: str, item_index: int, format: str):
-    """导出单条结果关联的原视频、关键帧或裁判调用 JSON。"""
+    """导出单条结果关联的关键帧或裁判调用 JSON。"""
     task = peek_task(task_id, touch=False)  # 导出只读视图不驻留内存；touch=False：线程池端点不变异 TASKS
     data = task_to_snapshot(task) if task else load_snapshot(task_id)
     if not data:
@@ -984,22 +984,6 @@ def api_export_item(task_id: str, item_index: int, format: str):
         f"{item_index + 1:03d}_{raw_id}",
         f"{item_index + 1:03d}_item",
     )
-
-    if format == "video":
-        raw_path = str(item.get("video_path") or "").strip()
-        if not raw_path:
-            media = item.get("media") or []
-            raw_path = str(media[0]).strip() if media else ""
-        if not raw_path:
-            raise HTTPException(404, "该条结果没有原始视频路径")
-        try:
-            video_path = _resolve_operation_video_path(raw_path)
-        except ValueError as exc:
-            raise HTTPException(404, str(exc)) from exc
-        return FileResponse(
-            video_path,
-            filename=f"{stem}{video_path.suffix.lower()}",
-        )
 
     if format in {"frames", "frames_zip"}:
         export_dir = RUNS_DIR / "exports"
@@ -1029,7 +1013,7 @@ def api_export_item(task_id: str, item_index: int, format: str):
             },
         )
 
-    raise HTTPException(400, "format 必须是 video、frames_zip 或 judge_calls")
+    raise HTTPException(400, "format 必须是 frames_zip 或 judge_calls")
 
 
 @app.get("/")

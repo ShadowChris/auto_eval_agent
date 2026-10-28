@@ -421,9 +421,12 @@ def _aligned_results(snapshot: dict, results: list[dict]) -> list[dict]:
 
 
 _RUNTIME_ITEM_FIELDS = {
+    "_temporary_video_paths",
     "frames",
     "frame_count",
     "media",
+    "video1_path",
+    "video2_path",
     "video_name",
     "duration",
     "source_data",
@@ -497,7 +500,10 @@ def _project_relative_path(
     """把项目内路径转为稳定的 POSIX 相对路径；项目外路径返回空。"""
     if value is None or str(value).strip() == "":
         return ""
-    path = Path(str(value)).expanduser()
+    raw = str(value).strip()
+    if "://" in raw:
+        return ""
+    path = Path(raw).expanduser()
     if not path.is_absolute():
         return path.as_posix()
     root = project_root or PROJECT_ROOT
@@ -837,9 +843,11 @@ def write_frames_zip(
 
             if metadata:
                 exported_metadata = dict(metadata)
-                exported_metadata["video"] = _project_relative_path(
-                    item.get("video_path"),
-                    project_root,
+                video_reference = str(item.get("video_path") or source_video).strip()
+                exported_metadata["video"] = (
+                    video_reference
+                    if "://" in video_reference
+                    else _project_relative_path(video_reference, project_root)
                 )
                 zf.writestr(
                     f"{item_dir}/keyframes.json",
