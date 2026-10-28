@@ -725,3 +725,8 @@ tr.result-warning-detail td {
   word-break: break-word;
   pointer-events: auto;
 }
+.operation-pipeline-config { margin: 10px 0; padding: 10px 12px; border: 1px solid #e2e5e9; border-radius: 6px; }
+.operation-pipeline-config .row { flex-wrap: wrap; gap: 10px; }
+.operation-pipeline-config label { display: inline-flex; align-items: center; gap: 5px; }
+.operation-pipeline-config input { width: 72px; }
+.operation-pipeline-config .hint { margin: 6px 0 0; line-height: 1.6; }

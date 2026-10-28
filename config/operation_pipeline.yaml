@@ -1,0 +1,7 @@
+# 部署默认值；Web 的「阶段并发→应用并保存」可免重启覆盖，优先使用 Web 保存值。
+# 任务 options.concurrency 仍是整条题目的总并发上限（默认 35）。
+download_concurrency: 10
+# 0 表示不增加独立限制，沿用共享线程池和任务总并发的约束。
+extraction_concurrency: 0
+# 0 表示不增加独立限制；模型请求限速仍按原配置执行。
+model_concurrency: 0

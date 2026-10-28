@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from dataclasses import asdict
 import hashlib
 import json
 import math
@@ -90,7 +91,8 @@ from .operation_media import (
 from .operation_groups import align_operation_groups
 from .comparison_uploads import ComparisonUploadStore
 from .frame_preview import create_frame_preview_router
-from .remote_video import cleanup_stale_video_downloads, is_remote_video_url
+from .pipeline_config import current_pipeline_config, save_pipeline_config
+from .remote_video import cleanup_stale_video_downloads, is_remote_video_url, run_video_preparation
 from .operation_comparison_import import (
     SUPPORTED_SUFFIXES as COMPARISON_IMPORT_SUFFIXES,
     import_operation_comparison_file,
@@ -200,6 +202,13 @@ class SingleEvalReq(BaseModel):
 class OperationPrepareReq(BaseModel):
     items: list[dict]
     concurrency: int = 2
+
+
+class OperationPipelineConfigReq(BaseModel):
+    model_config = {"extra": "forbid"}
+    download_concurrency: int = Field(strict=True, ge=1, le=128)
+    extraction_concurrency: int = Field(strict=True, ge=0, le=128)
+    model_concurrency: int = Field(strict=True, ge=0, le=128)
 
 
 class OperationGroupManifest(BaseModel):
@@ -921,7 +930,22 @@ def api_config():
         "models": [m.name for m in c.models],
         "rubrics": [d.name for d in c.rubrics],
         "scale": c.rubrics[0].scale if c.rubrics else 5,
+        "operation_pipeline": asdict(current_pipeline_config()),
     }
+
+
+@app.get("/api/operation/pipeline-config")
+def api_operation_pipeline_config():
+    return asdict(current_pipeline_config())
+
+
+@app.put("/api/operation/pipeline-config")
+def api_operation_pipeline_config_save(req: OperationPipelineConfigReq):
+    try:
+        config = save_pipeline_config(req.model_dump())
+    except (OSError, ValueError) as exc:
+        raise HTTPException(500, "阶段并发配置保存失败，请检查服务端配置和写入权限") from exc
+    return {"ok": True, "config": asdict(config)}
 
 
 @app.get("/api/llm-providers")
@@ -1874,7 +1898,7 @@ def api_eval_single_result(task_id: str, id: str, event: int = 0):
 
 @app.post("/api/operation/prepare")
 async def api_prepare_operation(req: OperationPrepareReq):
-    """批量校验 JSONL 中的视频路径并并发抽帧，逐条隔离错误。"""
+    """批量准备本地/远程任务视频，复用阶段资源上限，逐条隔离错误。"""
     if not req.items:
         raise HTTPException(400, "items 为空")
     concurrency = max(1, min(int(req.concurrency or 2), 8))
@@ -1883,7 +1907,7 @@ async def api_prepare_operation(req: OperationPrepareReq):
     async def prepare_one(index: int, item: dict) -> tuple[int, dict | None, str | None]:
         async with semaphore:
             try:
-                prepared = await asyncio.to_thread(_prepare_operation_item, item)
+                prepared = await run_video_preparation(_prepare_operation_item, item)
                 return index, prepared, None
             except Exception as exc:
                 line = item.get("source_line") or index + 1
@@ -1919,8 +1943,8 @@ async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation
     suffix = Path(file.filename or "v.mp4").suffix.lower() or ".mp4"
     video_path = video_dir / f"{video_id}{suffix}"
     video_path.write_bytes(data)
-    duration = probe_duration(video_path)
     if mode == "rich_content":
+        duration = await asyncio.to_thread(probe_duration, video_path)
         return {
             "video_id": video_id,
             "video_path": str(video_path),
@@ -1929,7 +1953,13 @@ async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation
             "duration": round(duration, 2),
         }
     frame_dir = video_dir / f"{video_id}_frames"
-    frames = extract_scene_keyframes(video_path, frame_dir)
+
+    def prepare_upload() -> tuple[float, list]:
+        return probe_duration(video_path), extract_scene_keyframes(video_path, frame_dir)
+
+    duration, frames = await run_video_preparation(
+        prepare_upload, operation_pipeline=mode == "operation",
+    )
     return {
         "video_id": video_id,
         "video_path": str(video_path),

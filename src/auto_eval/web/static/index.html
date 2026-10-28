@@ -341,7 +341,7 @@
           <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
         </div>
         <p v-if="mode==='operation'" class="hint">支持 JSONL、CSV、XLSX。表格必需列：<strong>query</strong>，以及 <strong>id / index / 序号</strong> 至少一列。非空 id 直接复用，缺失时按 index 或序号生成。视频优先读取 <strong>video_path</strong>；没有该列时使用<strong>原文件名</strong>拼接，<strong>文件路径</strong>可选。Excel 优先读取“合并数据”工作表。</p>
-        <p v-if="mode==='operation'" class="hint">video_path 支持本地路径或 HTTP/HTTPS 视频直链；开始评估时临时下载，抽帧后删除临时原视频。下载或视频校验失败会显示在对应题目下方。</p>
+        <p v-if="mode==='operation'" class="hint">video_path 支持本地路径或 HTTP/HTTPS 视频直链；开始评估时临时下载，单题评估结束后删除临时原视频。下载或视频校验失败会显示在对应题目下方。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","content_start_time":0,"content_end_time":18.5}</p>
         <p v-if="mode==='operation'" class="hint op-optional-fields-help">可选字段：id（题号）、context（背景）、query_images / query_image_path / attachment_path（用户图片）、agent_statement / answer（自述）、task_start_time / task_end_time（任务起止时间，单位秒）。图片字段按上述顺序取首个非空值；每题下方展示 attachment_path 和当前导入的起止时间，视频及图片在开始评估时校验。</p>
         <div v-if="datasetImportSummary" class="summary dataset-import-summary">
@@ -604,9 +604,21 @@
     </div>
     </template>
     <div class="row">
-      <span class="lbl">并发：</span>
-      <input type="number" min="1" max="64" v-model.number="concurrency" style="width:70px">
-      <span class="hint">（同时处理的题目数，主要影响本地抽帧和任务调度）</span>
+      <span class="lbl">整体任务并发：</span>
+      <input aria-label="整体任务并发" type="number" min="1" max="64" v-model.number="concurrency" style="width:70px">
+      <span class="hint">（当前批次同时处理的题目上限，包含视频下载、抽帧、阶段排队和模型评估）</span>
+    </div>
+    <div v-if="['operation', 'operation_multi_group'].includes(mode)" class="operation-pipeline-config">
+      <div class="row">
+        <span class="lbl">阶段并发：</span>
+        <label>视频下载 <input aria-label="视频下载并发" type="number" min="1" max="128" step="1" v-model.number="pipelineConfig.download_concurrency" :disabled="pipelineBusy"></label>
+        <label>抽帧 <input aria-label="抽帧并发" type="number" min="0" max="128" step="1" v-model.number="pipelineConfig.extraction_concurrency" :disabled="pipelineBusy"></label>
+        <label>模型评估 <input aria-label="模型评估并发" type="number" min="0" max="128" step="1" v-model.number="pipelineConfig.model_concurrency" :disabled="pipelineBusy"></label>
+        <button type="button" @click="savePipelineConfig" :disabled="pipelineBusy || !pipelineDirty">{{ pipelineBusy ? '处理中…' : '应用并保存' }}</button>
+        <button type="button" @click="refreshPipelineConfig" :disabled="pipelineBusy">读取当前配置</button>
+      </div>
+      <p class="hint">服务级共享上限：免重启生效，影响所有正在运行和后续批跑。降低上限不会中断已开始的阶段。抽帧/模型评估填 0 表示不额外限流，仍受整体任务并发和线程池约束；模型评估按题计数，不等同于 API 请求数。</p>
+      <p v-if="pipelineMessage" class="provider-message" :class="{err:pipelineError,ok:!pipelineError}" role="status">{{ pipelineMessage }}</p>
     </div>
     <div class="row">
       <span class="lbl">模型请求限速：</span>

@@ -133,6 +133,12 @@ createApp({
     const providerError = ref(false);
     const providerForm = ref(emptyProviderForm());
     const concurrency = ref(35);
+    const pipelineConfig = ref({ download_concurrency: 10, extraction_concurrency: 0, model_concurrency: 0 });
+    const pipelineAppliedConfig = ref({ ...pipelineConfig.value });
+    const pipelineBusy = ref(false);
+    const pipelineMessage = ref("");
+    const pipelineError = ref(false);
+    const pipelineDirty = computed(() => JSON.stringify(pipelineConfig.value) !== JSON.stringify(pipelineAppliedConfig.value));
     const rateLimitRequests = ref(9);
     const rateLimitWindowSeconds = ref(1);
     const evalTimeout = ref(300);
@@ -4014,6 +4020,63 @@ createApp({
       }
     }
 
+    function applyPipelineSnapshot(config) {
+      const snapshot = {
+        download_concurrency: config.download_concurrency,
+        extraction_concurrency: config.extraction_concurrency,
+        model_concurrency: config.model_concurrency,
+      };
+      pipelineConfig.value = { ...snapshot };
+      pipelineAppliedConfig.value = { ...snapshot };
+    }
+
+    async function refreshPipelineConfig() {
+      pipelineBusy.value = true;
+      pipelineMessage.value = "";
+      pipelineError.value = false;
+      try {
+        const response = await fetch("/api/operation/pipeline-config", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(providerApiErrorText(data));
+        applyPipelineSnapshot(data);
+        pipelineMessage.value = "已读取当前服务配置。";
+      } catch (error) {
+        pipelineError.value = true;
+        pipelineMessage.value = `读取失败：${error?.message || "未知错误"}`;
+      } finally {
+        pipelineBusy.value = false;
+      }
+    }
+
+    async function savePipelineConfig() {
+      const values = pipelineConfig.value;
+      const valid = ["download_concurrency", "extraction_concurrency", "model_concurrency"].every(key =>
+        Number.isInteger(values[key]) && values[key] >= (key === "download_concurrency" ? 1 : 0) && values[key] <= 128,
+      );
+      pipelineError.value = !valid;
+      if (!valid) {
+        pipelineMessage.value = "视频下载并发需为 1–128 的整数；抽帧、模型评估并发需为 0–128 的整数。";
+        return;
+      }
+      pipelineBusy.value = true;
+      pipelineMessage.value = "";
+      try {
+        const response = await fetch("/api/operation/pipeline-config", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(values),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(providerApiErrorText(data));
+        applyPipelineSnapshot(data.config);
+        pipelineMessage.value = "已生效并保存。所有批跑的后续阶段按新上限调度，已开始的阶段不会被中断。";
+      } catch (error) {
+        pipelineError.value = true;
+        pipelineMessage.value = `保存失败：${error?.message || "未知错误"}`;
+      } finally {
+        pipelineBusy.value = false;
+      }
+    }
+
     onMounted(async () => {
       progressClockTimer = window.setInterval(() => {
         clockNow.value = Date.now();
@@ -4022,6 +4085,7 @@ createApp({
       const d = await r.json();
       judges.value = d.judges;
       models.value = d.models;
+      if (d.operation_pipeline) applyPipelineSnapshot(d.operation_pipeline);
       selectedJudges.value = defaultJudgeSelection(mode.value);
       selectedModel.value = d.models[0] || "";
       await loadProviders(true);
@@ -4045,6 +4109,8 @@ createApp({
       editProvider, saveProvider, deleteProvider, testProvider,
       saveProviderDefault, clearProviderDefault,
       concurrency, rateLimitRequests, rateLimitWindowSeconds, evalTimeout,
+      pipelineConfig, pipelineBusy, pipelineMessage, pipelineError, pipelineDirty,
+      savePipelineConfig, refreshPipelineConfig,
       running, progress, total, results, summary, taskId, runError,
       submitMode, appendTargetTaskId, appendTargetMeta, appendTargetCandidates, selectedAppendTarget,
       appendMergePreview, appendConflictResolutions, unresolvedAppendConflictCount, appendPreviewing,

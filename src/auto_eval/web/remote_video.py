@@ -21,10 +21,13 @@ import yaml
 
 from ..paths import PROJECT_ROOT, RUNS_DIR
 from ..observability import log_event
+from .pipeline_config import current_pipeline_config as load_pipeline_config
 
 
 CONFIG_PATH = PROJECT_ROOT / "config" / "remote_video.yaml"
 _CANCEL: ContextVar[threading.Event | None] = ContextVar("remote_video_cancel", default=None)
+_PREPARED_INPUT: ContextVar[tuple[str, Path] | None] = ContextVar("prepared_video_input", default=None)
+_DOWNLOAD_SLOT: ContextVar[bool] = ContextVar("video_download_slot", default=False)
 _LOCK = threading.Lock()
 _LIMITERS: dict[int, threading.BoundedSemaphore] = {}
 _ACTIVE: set[Path] = set()
@@ -50,6 +53,7 @@ def load_remote_video_config() -> RemoteVideoConfig:
     known = {field.name for field in fields(RemoteVideoConfig)}
     if not isinstance(data, dict) or set(data) - known:
         raise ValueError("remote_video.yaml 配置字段无效")
+    data.setdefault("download_concurrency", load_pipeline_config().download_concurrency)
     cfg = RemoteVideoConfig(**data)
     for name in known - {"allowed_hosts"}:
         value = getattr(cfg, name)
@@ -118,7 +122,8 @@ def download_remote_video(
     cancel = _CANCEL.get()
     with _LOCK:
         limiter = _LIMITERS.setdefault(cfg.download_concurrency, threading.BoundedSemaphore(cfg.download_concurrency))
-    while not limiter.acquire(timeout=0.2):
+    owns_slot = not _DOWNLOAD_SLOT.get()
+    while owns_slot and not limiter.acquire(timeout=0.2):
         if cancel is not None and cancel.is_set():
             raise ValueError("远程视频准备已取消")
     part = directory / "video.part"
@@ -189,12 +194,17 @@ def download_remote_video(
                 part.unlink(missing_ok=True)
         raise ValueError("远程视频下载失败")
     finally:
-        limiter.release()
+        if owns_slot:
+            limiter.release()
 
 
 @contextmanager
 def local_video_input(raw: str, runs_dir: Path) -> Iterator[Path | None]:
     """本地输入不处理；远程输入只在本次准备期间持有临时原视频。"""
+    prepared = _PREPARED_INPUT.get()
+    if prepared is not None and prepared[0] == raw:
+        yield prepared[1]
+        return
     if not is_remote_video_url(raw):
         yield None
         return
@@ -216,15 +226,11 @@ def local_video_input(raw: str, runs_dir: Path) -> Iterator[Path | None]:
                 _ACTIVE.discard(directory.resolve())
 
 
-async def run_video_preparation(function: Callable, *args, **kwargs) -> dict:
-    """取消异步准备时通知下载线程收尾，避免继续下载无人接收的原视频。"""
-    stop = threading.Event()
-    token = _CANCEL.set(stop)
-    try:
-        return await asyncio.to_thread(function, *args, **kwargs)
-    finally:
-        stop.set()
-        _CANCEL.reset(token)
+async def run_video_preparation(function: Callable, *args, **kwargs):
+    """兼容准备入口；内部委托阶段调度，不改变准备函数返回值。"""
+    from .video_pipeline import prepare_video
+
+    return await prepare_video(function, *args, **kwargs)
 
 
 def cleanup_stale_video_downloads(runs_dir: Path = RUNS_DIR) -> int:

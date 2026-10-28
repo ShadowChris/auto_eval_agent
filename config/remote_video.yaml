@@ -1,5 +1,4 @@
 # 任务类 HTTP/HTTPS 视频：临时下载后本地抽帧，不长期保存原视频。
-download_concurrency: 10
 connect_timeout_s: 10
 read_timeout_s: 30
 total_timeout_s: 120

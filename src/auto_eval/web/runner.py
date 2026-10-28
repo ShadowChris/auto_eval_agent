@@ -60,6 +60,7 @@ from .operation_media import (
 )
 from .tasks import DEFAULT_OPERATION_CONCURRENCY, Task, prune_task_cache
 from .remote_video import run_video_preparation, video_reference_for_log
+from .video_pipeline import stage_slot, video_item_scope
 
 
 logger = logging.getLogger(__name__)
@@ -681,7 +682,7 @@ async def _run(
             attempt_no=attempt_no,
             progress_callback=publish_progress,
             judge_trace_callback=collect_judge_trace,
-        ):
+        ), video_item_scope():
             log_event(
                 "任务",
                 "开始",
@@ -796,15 +797,13 @@ async def _run(
                             prepared_input["id"] = (
                                 f"{item_id}__{variant.get('group_id') or group_position + 1}"
                             )
-                            prepared = await asyncio.wait_for(
-                                run_video_preparation(
-                                    prepare_session_operation_item,
-                                    prepared_input,
-                                    session_name=task.session_name,
-                                    item_index=idx * max(1, len(variants)) + group_position,
-                                    total_items=total_group_items,
-                                ),
-                                timeout=float(task.options.get("video_prepare_timeout_s") or 300),
+                            prepared = await run_video_preparation(
+                                prepare_session_operation_item,
+                                prepared_input,
+                                session_name=task.session_name,
+                                item_index=idx * max(1, len(variants)) + group_position,
+                                total_items=total_group_items,
+                                preparation_timeout_s=float(task.options.get("video_prepare_timeout_s") or 300),
                             )
                             prepared["id"] = group_item.get("id") or prepared["id"]
                             group_item.clear()
@@ -876,16 +875,15 @@ async def _run(
                         else:
                             prepare_call = prepare_session_operation_item
                             prepare_kwargs = {}
-                        prepared = await asyncio.wait_for(
-                            run_video_preparation(
-                                prepare_call,
-                                item_dict,
-                                session_name=task.session_name,
-                                item_index=idx,
-                                total_items=len(task.items),
-                                **prepare_kwargs,
-                            ),
-                            timeout=float(task.options.get("video_prepare_timeout_s") or 300),
+                        prepared = await run_video_preparation(
+                            prepare_call,
+                            item_dict,
+                            session_name=task.session_name,
+                            item_index=idx,
+                            total_items=len(task.items),
+                            operation_pipeline=task.mode == "operation",
+                            preparation_timeout_s=float(task.options.get("video_prepare_timeout_s") or 300),
+                            **prepare_kwargs,
                         )
                         item_dict.clear()
                         item_dict.update(prepared)
@@ -934,16 +932,17 @@ async def _run(
                                     progress=15,
                                     progress_message="正在重新执行单题评测",
                                 )
-                            res = await asyncio.wait_for(
-                                _eval_one(
-                                    task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
-                                    online_runner, process_dims, arbitrator,
-                                    rich_judges=rich_judges,
-                                    visual_judge=visual_judge,
-                                    task=task,
-                                ),
-                                timeout=eval_timeout,
-                            )
+                            async with stage_slot("model", enabled=task.mode == "operation"):
+                                res = await asyncio.wait_for(
+                                    _eval_one(
+                                        task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
+                                        online_runner, process_dims, arbitrator,
+                                        rich_judges=rich_judges,
+                                        visual_judge=visual_judge,
+                                        task=task,
+                                    ),
+                                    timeout=eval_timeout,
+                                )
                             break
                         except asyncio.TimeoutError:
                             last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")

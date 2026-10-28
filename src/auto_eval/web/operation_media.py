@@ -366,7 +366,7 @@ def _prepared_operation_item(
 def _prepare_remote_operation_item(
     prepare_fn: Callable, item: dict, raw_url: str, *, runs_dir: Path, **kwargs,
 ) -> dict:
-    """远程输入仅在准备阶段下载，抽帧成功或失败后均释放临时原视频。"""
+    """同步调用准备后释放原视频；批跑由外层阶段调度持有到单题结束。"""
     with local_video_input(raw_url, runs_dir) as local_path:
         local_item = {**item, "video_path": str(local_path)}
         # 新下载的内容必须重抽，避免同 URL 对象更新后命中旧帧。
