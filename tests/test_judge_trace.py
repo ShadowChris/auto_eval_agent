@@ -13,6 +13,14 @@ from auto_eval.judges.trace_storage import (
     judge_trace_enabled,
 )
 from auto_eval.observability import bind_chain_context
+from auto_eval.llm_reasoning import thinking_metadata, thinking_summary
+from auto_eval.llm_stream import (
+    AggregatedChoice,
+    AggregatedFunction,
+    AggregatedMessage,
+    AggregatedResponse,
+    AggregatedToolCall,
+)
 from auto_eval.paths import RUNS_DIR
 
 
@@ -241,3 +249,72 @@ def test_web_result_fields_win_conflicts_without_losing_call_error(tmp_path):
     assert record["error"] == "评测失败"
     assert record["call_error_type"] == "APIError"
     assert record["call_error"] == "provider failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force_final", [False, True])
+async def test_judge_records_native_reasoning_for_tool_and_final_rounds(tmp_path, force_final):
+    path = tmp_path / "judge_calls.jsonl"
+    client = _trace_client(path)
+    client.cfg = SimpleNamespace(name="judge_1", display="裁判", temperature=0)
+    client.has_tools = False
+    client.max_rounds = 1 if force_final else 2
+    answers = iter([
+        AggregatedMessage(
+            content="", reasoning_content="需要核实计算结果",
+            tool_calls=[AggregatedToolCall(
+                id="call-1", type="function",
+                function=AggregatedFunction(name="calculate", arguments='{"expression":"1+1"}'),
+            )],
+        ),
+        AggregatedMessage(
+            content='<analysis>正文分析</analysis>{"correctness":"ok"}',
+            reasoning_content="已取得结果并核对证据",
+        ),
+    ])
+
+    async def complete(*args, **kwargs):
+        return AggregatedResponse(
+            choices=[AggregatedChoice(index=0, message=next(answers), finish_reason="stop")],
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=7,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=4),
+            ),
+        )
+
+    async def tool(*args):
+        return "2", "calculate=2"
+
+    client._llm_create = complete
+    client._exec_tool_async = tool
+    reply = await client.complete("system", "user")
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert reply.content == '<analysis>正文分析</analysis>{"correctness":"ok"}'
+    assert record["thinking_summary"]["status"] == "confirmed"
+    assert record["thinking_summary"]["reasoning_tokens"] == 8
+    assert record["thinking_summary"]["content_recorded_rounds"] == 2
+    assert [row["reasoning_content"] for row in record["llm_rounds"]] == [
+        "需要核实计算结果", "已取得结果并核对证据",
+    ]
+    assert all(row["thinking"]["request_mode"] == "provider_default" for row in record["llm_rounds"])
+    assert record["llm_rounds"][-1]["finish_reason"] == ("force_judgement" if force_final else "stop")
+
+
+@pytest.mark.parametrize("enabled,mode", [(True, "enabled"), (False, "disabled")])
+def test_thinking_request_is_not_mistaken_for_response_evidence(enabled, mode):
+    thinking = thinking_metadata("", None, {"extra_body": {"enable_thinking": enabled}})
+    assert thinking["request_mode"] == mode
+    assert thinking["status"] == "unconfirmed"
+    assert thinking["reasoning_tokens"] is None
+
+
+def test_thinking_summary_does_not_treat_missing_usage_as_zero():
+    summary = thinking_summary([
+        {"reasoning_content": "服务端返回的原生思考", "usage": None},
+        {"usage": {"reasoning_tokens": 12}},
+    ])
+    assert summary["confirmed_rounds"] == 2
+    assert summary["reasoning_tokens"] == 12
+    assert summary["usage_reported_rounds"] == 1
+    assert summary["content_not_recorded_rounds"] == 1

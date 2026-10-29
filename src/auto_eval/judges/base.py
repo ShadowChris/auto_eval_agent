@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..config import JudgeConfig
+from ..llm_reasoning import annotate_reasoning_trace, thinking_metadata
 from ..llm_stream import build_openai_client, stream_chat_completion
 from ..observability import bind_chain_context, current_context, log_event
 from ..paths import resolve_project_path
@@ -54,6 +55,7 @@ _TRACE_FIELDS = {
     "user",
     "rounds",
     "llm_rounds",
+    "thinking_summary",
     "tool_results",
     "image_refs",
     "image_roles",
@@ -346,6 +348,11 @@ class JudgeClient:
                 llm_rounds.append({
                     "round": rounds,
                     "content": msg.content,
+                    "reasoning_content": getattr(msg, "reasoning_content", None),
+                    "thinking": thinking_metadata(
+                        getattr(msg, "reasoning_content", None),
+                        getattr(resp, "usage", None), kwargs,
+                    ),
                     "tool_calls": [
                         {"name": tc.function.name, "arguments": _safe_json(tc.function.arguments)}
                         for tc in (tool_calls or [])
@@ -463,8 +470,9 @@ class JudgeClient:
                     progress=80,
                     progress_message=f"{judge_label} · 强制生成最终判定",
                 )
+                kwargs = {"model": self.model, "messages": messages, "temperature": self.cfg.temperature}
                 resp = await self._llm_create(
-                    {"model": self.model, "messages": messages, "temperature": self.cfg.temperature},
+                    kwargs,
                     stream_callback=stream_callback,
                 )
             msg = resp.choices[0].message
@@ -473,6 +481,11 @@ class JudgeClient:
             if do_trace:
                 llm_rounds.append({
                     "round": rounds, "content": last_content, "tool_calls": [],
+                    "reasoning_content": getattr(msg, "reasoning_content", None),
+                    "thinking": thinking_metadata(
+                        getattr(msg, "reasoning_content", None),
+                        getattr(resp, "usage", None), kwargs,
+                    ),
                     "finish_reason": "force_judgement", "usage": _usage_dict(getattr(resp, "usage", None)),
                 })
 
@@ -511,6 +524,8 @@ class JudgeClient:
 
     def _write_trace(self, detail: dict[str, Any]) -> None:
         try:
+            if "llm_rounds" in detail:
+                detail = annotate_reasoning_trace(detail)
             ctx = current_context()
             trace_path = getattr(self, "trace_path", None)
             trace_dir = getattr(self, "trace_dir", None)

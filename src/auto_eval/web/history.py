@@ -24,6 +24,7 @@ from ..analysis.operation_statistics import (
     normalize_operation_issue_types,
     summarize_operation_results,
 )
+from ..llm_reasoning import annotate_reasoning_trace, thinking_summary
 from ..judges.operation_fields import (
     LEGACY_REVIEW_CATEGORIES,
     clean_operation_card_name,
@@ -2739,7 +2740,7 @@ def load_item_judge_calls(
                     record_item_id = str(record.get("item_id") or "")
                     if record_item_id and record_item_id != item_id:
                         continue
-                    exported = dict(record)
+                    exported = annotate_reasoning_trace(record)
                     exported["_trace_file"] = _project_relative_path(
                         path,
                         project_root,
@@ -2769,6 +2770,9 @@ def load_item_judge_calls(
         "item_id": item_id,
         "query": item.get("query") or item.get("question") or "",
         "judge_call_count": len(records),
+        "thinking_summary": thinking_summary([
+            row for record in records for row in record["llm_rounds"]
+        ]),
         "judge_calls": records,
     }
 

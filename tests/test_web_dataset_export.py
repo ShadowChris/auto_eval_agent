@@ -643,6 +643,35 @@ def test_load_item_judge_calls_uses_snapshot_task_trace_path(tmp_path: Path, mon
     assert payload["judge_calls"][0]["_trace_file"] == snapshot["judge_trace_path"]
 
 
+@pytest.mark.parametrize("round_data,status,content_status", [
+    ({"usage": {"reasoning_tokens": 1218}}, "confirmed", "not_recorded"),
+    ({"content": "<analysis>只有正文分析</analysis>", "usage": None}, "unconfirmed", "not_recorded"),
+    ({"reasoning_content": "原生思考", "usage": None}, "confirmed", "recorded"),
+    ({"reasoning_content": "", "usage": {"reasoning_tokens": 0}}, "unconfirmed", "not_returned"),
+])
+def test_judge_download_distinguishes_native_reasoning_and_legacy_logs(
+    tmp_path, round_data, status, content_status,
+):
+    snapshot = _snapshot(tmp_path)
+    snapshot["task_id"] = "task-reasoning"
+    trace = tmp_path / "judge_calls.jsonl"
+    record = {
+        "task_id": "task-reasoning", "item_index": 0, "item_id": "op_1",
+        "llm_rounds": [{"round": 1, **round_data}],
+    }
+    trace.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    payload = history.load_item_judge_calls(snapshot, 0, trace_paths=[trace])
+
+    assert payload["thinking_summary"]["status"] == status
+    row = payload["judge_calls"][0]["llm_rounds"][0]
+    assert row["thinking"]["content_status"] == content_status
+    assert row["thinking"]["request_mode"] == "unknown"
+    if "reasoning_content" not in round_data:
+        assert "reasoning_content" not in row
+    assert json.loads(trace.read_text(encoding="utf-8")) == record
+
+
 def test_item_judge_export_supports_chinese_download_filename(monkeypatch):
     snapshot = {
         "task_id": "task-1",
