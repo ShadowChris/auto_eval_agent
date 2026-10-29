@@ -326,6 +326,7 @@ def _rich_content_timing(
     return {
         "config": config,
         "algorithm_version": extraction.algorithm_version,
+        "front_protection": False,
     }, cache_key
 
 
@@ -435,7 +436,8 @@ def prepare_session_operation_item(
     sequence = str(item_index + 1).zfill(width)
     item_name = _safe_name(str(item.get("id") or f"q{item_index + 1}"), f"q{item_index + 1}")
     safe_session = _safe_name(session_name, "operation_session")
-    frame_dir = runs_dir / "videos" / "imported" / safe_session / f"{sequence}_{item_name}"
+    # Keep earlier history evidence intact when the extraction version changes.
+    frame_dir = runs_dir / "videos" / "imported" / safe_session / f"{sequence}_{item_name}__{KEYFRAME_ALGORITHM_VERSION}"
     frames = _extract_frames(
         video_path,
         frame_dir,

@@ -87,8 +87,8 @@ def test_keyframe_config_rejects_invalid_sampling_values():
         KeyframeConfig(max_frames=1)
 
 
-def test_keyframe_algorithm_version_is_frozen_baseline():
-    assert KEYFRAME_ALGORITHM_VERSION == "hybrid-state-v3.2.0"
+def test_keyframe_algorithm_version_invalidates_pre_front_protection_cache():
+    assert KEYFRAME_ALGORITHM_VERSION == "hybrid-state-v3.2.1"
 
 
 def test_keyframe_config_uses_expanded_protected_window_and_frame_limit():

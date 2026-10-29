@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 
-KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.2.0"
+KEYFRAME_ALGORITHM_VERSION = "hybrid-state-v3.2.1"
 DEFAULT_TASK_START_TIME = 7.0
 
 
@@ -402,6 +402,7 @@ def _extract_candidates(
     output_dir: Path,
     config: KeyframeConfig,
     duration: float,
+    front_protection: bool = True,
 ) -> tuple[float | None, list[_Candidate]]:
     effective_start = min(
         max(0.0, config.task_start_time),
@@ -486,6 +487,16 @@ def _extract_candidates(
                     protected = True
             if protected:
                 c.source = f"protected-{config.protected_sample_interval:g}s"
+
+    # Keep the existing 1 FPS grid, protecting every sample in the first ten
+    # task seconds. Existing protected marks and all later selection rules stay
+    # unchanged. Explicitly disabled/shortened begin protection is respected.
+    if (front_protection and config.sample_fps == 1.0
+            and config.protected_sample_interval > 0 and config.protected_begin_window > 0):
+        front_end = min(effective_start + min(10.0, config.protected_begin_window), algorithm_end)
+        for candidate in candidates:
+            if candidate.source == fps_source and effective_start <= candidate.time <= front_end:
+                candidate.source = "protected-1s"
 
     start_path = output_dir / "start" / f"start_{effective_start:.3f}.jpg"
     if _extract_at(video, effective_start, start_path, max_edge=config.max_edge):
@@ -923,12 +934,14 @@ def _hybrid_keyframes(
     work_dir: Path,
     config: KeyframeConfig,
     duration: float,
+    front_protection: bool = True,
 ) -> tuple[list[_Candidate], list[_Candidate], float | None, float | None]:
     effective_task_end, raw = _extract_candidates(
         video,
         work_dir,
         config,
         duration,
+        **({"front_protection": False} if not front_protection else {}),
     )
     terminal_candidates = [
         candidate
@@ -1020,12 +1033,16 @@ def extract_scene_keyframes(
     sample_fps: float = 1.0,
     config: KeyframeConfig | None = None,
     algorithm_version: str = KEYFRAME_ALGORITHM_VERSION,
+    front_protection: bool = True,
 ) -> list[Path]:
     """抽取操作录屏关键帧并返回有序图片路径。
 
     旧参数 ``max_frames/min_frames/threshold/min_gap_s/max_edge`` 保持兼容；
     ``min_frames`` 在新算法中不再强制均匀补帧。高级参数可通过
     :class:`KeyframeConfig` 一次性传入。
+
+    任务类默认对起点后前 10 秒的 1 FPS 候选逐秒保护；其他视觉模式可以
+    使用 ``front_protection=False`` 保持原保护行为。
     """
     del min_frames
     video = Path(video)
@@ -1061,6 +1078,7 @@ def extract_scene_keyframes(
             Path(temp_dir),
             config,
             duration,
+            **({"front_protection": False} if not front_protection else {}),
         )
         frames: list[Path] = []
         records: list[dict] = []

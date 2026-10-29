@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from auto_eval.web import history, runner, server
+from auto_eval.media import KEYFRAME_ALGORITHM_VERSION
 from auto_eval.web.server import RerunReq
 from auto_eval.web.tasks import TASKS, Task, get_task
 
@@ -94,6 +96,7 @@ async def test_rerun_keeps_original_timing_and_records_audit(monkeypatch):
 def test_missing_cached_frames_are_cleared_before_rerun(tmp_path):
     existing = tmp_path / "existing.jpg"
     existing.write_bytes(b"frame")
+    (tmp_path / "keyframes.json").write_text(json.dumps({"algorithm_version": KEYFRAME_ALGORITHM_VERSION}), encoding="utf-8")
     task = _task()
     task.items[0]["frames"] = [str(existing)]
     task.items[1]["frames"] = [str(tmp_path / "missing.jpg")]

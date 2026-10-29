@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from auto_eval.media import KEYFRAME_ALGORITHM_VERSION
 from auto_eval.web import server
 from auto_eval.web.operation_media import (
     prepare_session_operation_item,
@@ -287,7 +288,7 @@ def test_session_prepare_uses_history_name_and_one_based_item_sequence(
 
     expected_dir = (
         tmp_path / "runs" / "videos" / "imported"
-        / "20260717_103930_operation_aa5cd32001ec" / "001_slow_query_001"
+        / "20260717_103930_operation_aa5cd32001ec" / f"001_slow_query_001__{KEYFRAME_ALGORITHM_VERSION}"
     )
     assert extracted_to == [expected_dir]
     assert first["frames"] == [str(expected_dir / "kf_001.jpg")]

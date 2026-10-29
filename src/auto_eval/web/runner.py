@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..analysis.operation_statistics import summarize_operation_results
 from ..paths import RUNS_DIR
+from ..media import KEYFRAME_ALGORITHM_VERSION
 from ..config import AppConfig
 from ..dataset import to_prompt
 from ..judges import (
@@ -217,9 +218,17 @@ def _upsert_result(task: Task, result: dict) -> dict | None:
     return previous
 
 
-def _valid_cached_frames(item: dict) -> bool:
+def _valid_cached_frames(item: dict, *, operation: bool = False) -> bool:
     frames = item.get("frames") or []
-    return bool(frames) and all(Path(str(frame)).is_file() for frame in frames)
+    if not frames or not all(Path(str(frame)).is_file() for frame in frames):
+        return False
+    if operation:
+        try:
+            metadata = json.loads((Path(str(frames[0])).parent / "keyframes.json").read_text(encoding="utf-8"))
+            return metadata.get("algorithm_version") == KEYFRAME_ALGORITHM_VERSION
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
+    return True
 
 
 def _is_multi_group_operation(item: dict) -> bool:
@@ -238,11 +247,11 @@ def _prepare_rerun_items(task: Task, item_indices: list[int]) -> None:
                 if not isinstance(group_item, dict):
                     continue
                 group_item.pop("prepare_error", None)
-                if group_item.get("frames") and not _valid_cached_frames(group_item):
+                if group_item.get("frames") and not _valid_cached_frames(group_item, operation=True):
                     group_item.pop("frames", None)
                     group_item.pop("frame_count", None)
             continue
-        if item.get("frames") and not _valid_cached_frames(item):
+        if item.get("frames") and not _valid_cached_frames(item, operation=task.mode == "operation"):
             item.pop("frames", None)
             item.pop("frame_count", None)
 
@@ -704,6 +713,10 @@ async def _run(
                 )
                 last_error = None
                 res = None
+                if (task.mode == "operation" and not _is_multi_group_operation(item_dict)
+                        and item_dict.get("frames") and not _valid_cached_frames(item_dict, operation=True)):
+                    item_dict.pop("frames", None)
+                    item_dict.pop("frame_count", None)
                 if (
                     task.mode == "operation"
                     and not _is_multi_group_operation(item_dict)
@@ -774,7 +787,7 @@ async def _run(
                                 progress_message="部分实验组用户输入图片校验失败",
                             )
                             continue
-                        if _valid_cached_frames(group_item):
+                        if _valid_cached_frames(group_item, operation=True):
                             group_item.pop("prepare_error", None)
                             image_counts.append({
                                 "group_id": variant.get("group_id"),

@@ -1925,7 +1925,7 @@ async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation
             "duration": round(duration, 2),
         }
     frame_dir = video_dir / f"{video_id}_frames"
-    frames = extract_scene_keyframes(video_path, frame_dir)
+    frames = extract_scene_keyframes(video_path, frame_dir, **({"front_protection": False} if mode != "operation" else {}))
     return {
         "video_id": video_id,
         "video_path": str(video_path),
