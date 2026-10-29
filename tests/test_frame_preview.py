@@ -105,3 +105,27 @@ def test_preview_component_is_independent_and_lazy():
     assert 'aria-label="下一帧"' in component
     assert "download_remote_video" not in component
     assert "frame-preview" in (root / "index.html").read_text(encoding="utf-8")
+
+
+def test_result_actions_are_button_styled_and_frames_stay_on_one_line():
+    root = Path(__file__).resolve().parents[1] / "src/auto_eval/web/static"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    start = html.index('<table class="grid results compact-results"')
+    table = html[start:html.index("</table>", start)]
+    js = (root / "app.js").read_text(encoding="utf-8")
+    css = (root / "style.css").read_text(encoding="utf-8")
+    preview = (root / "frame_preview.js").read_text(encoding="utf-8")
+
+    assert 'class="row-export-link"' not in table
+    assert 'class="result-action-button" @click="rerunOne(r)"' in table
+    assert 'class="row-frame-actions"' in table
+    for field in ("video", "frames", "trace", "rerun"):
+        assert f"resultActionWidths.{field} + 'px'" in table
+        assert f"resultActionWidths.{field}" in js[js.index("const resultTableWidth"):]
+    assert "frames: 152" in js
+    assert ".row-frame-actions { display: flex;" in css
+    assert "flex-wrap: nowrap; gap: 8px;" in css
+    assert 'class="result-action-button frame-preview-trigger"' in preview
+    trigger = preview.split('class="result-action-button frame-preview-trigger"', 1)[1].split("</button>", 1)[0]
+    assert trigger.endswith(">预览")
+    assert "knownCount" in trigger  # Accessible count does not change the visible button width.

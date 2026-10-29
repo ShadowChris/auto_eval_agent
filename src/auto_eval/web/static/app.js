@@ -133,6 +133,18 @@ createApp({
     const providerError = ref(false);
     const providerForm = ref(emptyProviderForm());
     const concurrency = ref(35);
+    const executionMode = ref("full");
+    const versionBusy = ref(false);
+    const versionName = ref("");
+    const versionScope = ref("all");
+    const versionPanelOpen = ref(false);
+    const versionMode = ref("evaluate_only");
+    const versionModes = [
+      { value: "evaluate_only", action: "reuse_frames", label: "复用抽帧进行评估", description: "使用已有帧，不下载或重新抽帧；用当前模型和已发布标准生成新评估结果。" },
+      { value: "extract_only", action: "refresh_frames", label: "重新抽帧", description: "重新读取视频并抽帧，不调用评估模型；原有帧版本不会被覆盖。" },
+      { value: "full", action: "refresh_frames", label: "重新抽帧并评估", description: "重新读取视频、抽帧并评估；使用当前模型和已发布标准。" },
+    ];
+    const selectedVersionMode = computed(() => versionModes.find(option => option.value === versionMode.value) || versionModes[0]);
     const pipelineConfig = ref({ download_concurrency: 10, extraction_concurrency: 0, model_concurrency: 0 });
     const pipelineAppliedConfig = ref({ ...pipelineConfig.value });
     const pipelineBusy = ref(false);
@@ -149,7 +161,7 @@ createApp({
     const summary = ref(null);
     const issueStatsExpanded = ref(false);
     const operationStatistics = computed(() => {
-      if (isMultiGroupMode.value) return null;
+      if (isMultiGroupMode.value || loadedTaskOptions.value?.execution_mode === "extract_only") return null;
       return summary.value?.operation_statistics || null;
     });
     const visibleOperationIssueStats = computed(() => {
@@ -1049,6 +1061,13 @@ createApp({
         { key: "latency_s", label: "耗时" },
         ];
       if (mode.value === "operation")
+        if (loadedTaskOptions.value.execution_mode === "extract_only") return [
+          { key: "item_id", label: "题号（ID）" }, { key: "query", label: "操作意图" },
+          ...contextCols, { key: "preparation_status", label: "抽帧状态" },
+          { key: "frame_count", label: "帧数" }, { key: "frame_set_id", label: "抽帧版本" },
+          { key: "evaluation_status", label: "评估状态" }, { key: "duration_s", label: "耗时（秒）" },
+        ];
+      if (mode.value === "operation")
         return [
           { key: "item_id", label: "题号（ID）" },
           { key: "query", label: "操作意图" },
@@ -1168,6 +1187,8 @@ createApp({
       } else if (c.key === "query" && mode.value === "operation") {
         minWidth = 140;
         maxWidth = 240;
+      } else if (c.key === "query_image_count") {
+        minWidth = 132;
       }
       const visualLength = (value) => Array.from(String(value ?? "")).reduce(
         (sum, char) => sum + (char.charCodeAt(0) > 255 ? 2 : 1),
@@ -1183,8 +1204,11 @@ createApp({
       return Math.max(minWidth, Math.min(maxWidth, desired));
     }
 
+    const resultActionWidths = { video: 120, frames: 152, trace: 132, rerun: 80 };
     const resultTableWidth = computed(
-      () => 42 + 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0) + (isVideoMode.value ? 300 : 0) + 72
+      () => 42 + 48 + resultCols.value.reduce((sum, c) => sum + columnWidth(c), 0)
+        + (isVideoMode.value ? resultActionWidths.video + resultActionWidths.frames + resultActionWidths.trace : 0)
+        + resultActionWidths.rerun
     );
 
     function isFrozenResultColumn(column) {
@@ -1270,6 +1294,11 @@ createApp({
       return value === "control" ? "对照组" : "实验组";
     }
     const selectedRerunCount = computed(() => selectedRerunIndices.value.size);
+    const activeTaskItemCount = computed(() => items.value.filter(item => item?.dataset_status !== "excluded").length);
+    const selectedVersionItemCount = computed(() => [...selectedRerunIndices.value].filter(index => (
+      Number.isInteger(index) && index >= 0 && index < items.value.length
+      && items.value[index]?.dataset_status !== "excluded"
+    )).length);
     const unfinishedRerunRows = computed(() => {
       if (!taskId.value || running.value) return [];
       const resultIndexes = new Set(
@@ -1459,6 +1488,10 @@ createApp({
       disconnectSSE();
       taskId.value = "";
       loadedTaskOptions.value = {};
+      versionPanelOpen.value = false;
+      versionMode.value = "evaluate_only";
+      versionName.value = "";
+      versionScope.value = "all";
       running.value = false;
       progress.value = 0;
       total.value = 0;
@@ -1912,7 +1945,7 @@ createApp({
     const canSubmit = computed(() => {
       const isAppendSubmit = mode.value === "operation" && submitMode.value === "append";
       if (appendPreviewing.value) return false;
-      if (!isAppendSubmit && selectedProviderId.value && !selectedProviderModel.value.trim()) return false;
+      if (executionMode.value !== "extract_only" && !isAppendSubmit && selectedProviderId.value && !selectedProviderModel.value.trim()) return false;
       if (
         mode.value === "operation"
         && submitMode.value === "append"
@@ -2092,6 +2125,7 @@ createApp({
             },
           } : {}),
           concurrency: concurrency.value,
+          ...(["operation", "operation_multi_group"].includes(mode.value) ? { execution_mode: executionMode.value } : {}),
           request_rate_limit: requestRateLimit,
           eval_timeout_s: evalTimeout.value,
           ...(isMultiGroupMode.value ? {
@@ -2153,6 +2187,7 @@ createApp({
       }
       appendPreviewing.value = false;
       taskId.value = d.task_id;
+      loadedTaskOptions.value = body.options;
       eventCursor.value = 0;
       if (isAppendSubmit) {
         clearAppendConflictPreview();
@@ -2388,6 +2423,8 @@ createApp({
     }
 
     function cell(r, c) {
+      if (c.key === "evaluation_status") return ({ not_evaluated: "待评估", done: "已评估", error: "失败" })[r[c.key]] || "—";
+      if (c.key === "preparation_status") return r.error ? "失败" : r[c.key] === "ready" ? "已完成" : "—";
       const v = r[c.key];
       if (c.rubricDim) {
         if (isNA(r, c.rubricDim)) return "N/A";
@@ -2829,12 +2866,14 @@ createApp({
 
     function canCompareHistoryItem(item) {
       return item?.mode === "operation"
+        && item?.execution_mode !== "extract_only"
         && item?.operation_layout !== "multi_group"
         && ["completed", "partial_completed", "done"].includes(item?.status);
     }
 
     function canAppendHistoryItem(item) {
       return item?.mode === "operation"
+        && item?.execution_mode !== "extract_only"
         && item?.operation_layout !== "multi_group"
         && [
           "completed", "partial_completed", "failed", "cancelled",
@@ -3530,6 +3569,11 @@ createApp({
         barChartRefs.value = [];
         const options = d.options || {};
         loadedTaskOptions.value = options;
+        executionMode.value = options.execution_mode || "full";
+        versionName.value = "";
+        versionScope.value = "all";
+        versionPanelOpen.value = false;
+        versionMode.value = "evaluate_only";
         if (Array.isArray(options.judges) && options.judges.length) selectedJudges.value = options.judges;
         if (options.visual_judge) visualJudge.value = options.visual_judge;
         if (options.model) selectedModel.value = options.model;
@@ -3563,6 +3607,55 @@ createApp({
           loadingHistoryTaskId.value = "";
         }
       }
+    }
+
+    async function createTaskVersion(action, nextMode, overrides = {}) {
+      if (!taskId.value || running.value || versionBusy.value) return;
+      const scope = overrides.scope ?? versionScope.value;
+      const name = overrides.name ?? versionName.value;
+      const indices = scope === "selected" ? [...selectedRerunIndices.value].filter(index => (
+        Number.isInteger(index) && index >= 0 && index < items.value.length
+        && items.value[index]?.dataset_status !== "excluded"
+      )).sort((a, b) => a - b) : null;
+      if (indices && !indices.length) { alert("请先勾选需要创建新版本的题目"); return; }
+      const count = indices ? indices.length : activeTaskItemCount.value;
+      if (!count) { alert("当前任务没有可用题目"); return; }
+      if (nextMode !== "extract_only" && selectedProviderId.value && !selectedProviderModel.value.trim()) {
+        alert("请先选择本次评估使用的模型"); return;
+      }
+      const method = versionModes.find(option => option.value === nextMode);
+      if (!confirm(`确认创建独立的新任务？\n执行方式：${method?.label || nextMode}\n题目范围：${count} 条\n原任务的输入、抽帧和结果均保持不变。`)) return;
+      versionBusy.value = true;
+      try {
+        const response = await fetch(`/api/eval/${taskId.value}/fork`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action, execution_mode: nextMode, item_indices: indices, dataset_name: name.trim(),
+            options: {
+              concurrency: concurrency.value, eval_timeout_s: evalTimeout.value,
+              request_rate_limit: requestRateLimitPayload(),
+              judge_backend: selectedProviderId.value ? {
+                provider_id: selectedProviderId.value, model: selectedProviderModel.value,
+              } : null,
+            },
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(providerApiErrorText(data));
+        await loadHistoryTask(data.task_id, false);
+        loadHistory();
+      } catch (error) { alert(`创建新版本失败：${error?.message || "未知错误"}`); }
+      finally { versionBusy.value = false; }
+    }
+
+    async function startTaskVersion() {
+      await createTaskVersion(selectedVersionMode.value.action, selectedVersionMode.value.value);
+    }
+
+    async function evaluatePreparedFrames() {
+      if (loadedTaskOptions.value.execution_mode !== "extract_only") return;
+      // The quick action always uses the whole task, independently of the new-version form.
+      await createTaskVersion("reuse_frames", "evaluate_only", { scope: "all", name: "" });
     }
 
     function exportCsv() {
@@ -3682,15 +3775,19 @@ createApp({
     }
 
     function selectFailedResults() {
+      const extractOnly = loadedTaskOptions.value.execution_mode === "extract_only";
       const failedResultIndices = results.value
         .filter((result) => Boolean(result?.error) || (
+          !extractOnly && ["error", "failed", "not_evaluated"].includes(result?.evaluation_status)
+        ) || (
           isMultiGroupMode.value
           && (result?.group_results || []).some((group) => group?.evaluation_status === "error")
         ))
         .map((result) => Number(result.index));
       selectedRerunIndices.value = new Set(
         [...failedResultIndices, ...unfinishedRerunRows.value.map((row) => row.index)]
-          .filter((index) => Number.isInteger(index) && index >= 0),
+          .filter((index) => Number.isInteger(index) && index >= 0 && index < items.value.length
+            && items.value[index]?.dataset_status !== "excluded"),
       );
     }
 
@@ -3699,7 +3796,7 @@ createApp({
     }
 
     async function startRerun(rawIndices) {
-      if (!taskId.value || running.value) return;
+      if (!taskId.value || running.value || versionBusy.value) return;
       const indices = [...new Set(rawIndices)]
         .map(Number)
         .filter((index) => Number.isInteger(index) && index >= 0)
@@ -4109,6 +4206,10 @@ createApp({
       editProvider, saveProvider, deleteProvider, testProvider,
       saveProviderDefault, clearProviderDefault,
       concurrency, rateLimitRequests, rateLimitWindowSeconds, evalTimeout,
+      executionMode, versionBusy, versionName, versionScope, versionPanelOpen, versionMode,
+      versionModes, selectedVersionMode, activeTaskItemCount, selectedVersionItemCount,
+      startTaskVersion, evaluatePreparedFrames,
+      loadedTaskOptions,
       pipelineConfig, pipelineBusy, pipelineMessage, pipelineError, pipelineDirty,
       savePipelineConfig, refreshPipelineConfig,
       running, progress, total, results, summary, taskId, runError,
@@ -4146,7 +4247,7 @@ createApp({
       resultJumpPage,
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize, resultQueryImagePreviewIndex, resultQueryImagePreviewItemIndex,
-      skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, fallbackStat,
+      skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, resultActionWidths, fallbackStat,
       operationGroups, groupAlignment, groupAligning, multiGroupColumns, multiGroupResult, displayArray, groupRoleLabel,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit, formatOptionalTaskTime, formatAttachmentPath,
       trunc, switchMode, onFile, onOpManifestFile, clearImportedOperationDataset,

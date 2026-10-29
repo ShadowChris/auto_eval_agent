@@ -81,6 +81,8 @@
               <div class="history-task-id" :title="h.task_id">task_id: {{ h.task_id }}</div>
               <div v-if="h.append_count" class="history-append-count">已追加 {{ h.append_count }} 次</div>
               <div v-if="h.excluded_count" class="history-task-id">已排除 {{ h.excluded_count }} 条</div>
+              <div v-if="h.execution_mode==='extract_only'" class="history-task-id">仅抽帧 · 待评估</div>
+              <div v-if="h.source_task_id" class="history-task-id">来源：{{ h.source_dataset_name || h.source_task_id }}</div>
             </td>
             <td>{{ historyModeLabel(h) }}</td>
             <td>
@@ -608,6 +610,14 @@
       <input aria-label="整体任务并发" type="number" min="1" max="64" v-model.number="concurrency" style="width:70px">
       <span class="hint">（当前批次同时处理的题目上限，包含视频下载、抽帧、阶段排队和模型评估）</span>
     </div>
+    <div v-if="['operation', 'operation_multi_group'].includes(mode) && submitMode!=='append'" class="row">
+      <label>执行模式：<select aria-label="执行模式" v-model="executionMode" :disabled="running">
+        <option value="full">全流程（有效帧自动复用）</option>
+        <option value="extract_only">只抽帧（不调用模型）</option>
+        <option value="evaluate_only">仅评估（严格复用帧）</option>
+      </select></label>
+      <span class="hint">仅评估需完整的受保护帧；推荐从历史任务“新建评估版本”中选择“复用抽帧进行评估”。</span>
+    </div>
     <div v-if="['operation', 'operation_multi_group'].includes(mode)" class="operation-pipeline-config">
       <div class="row">
         <span class="lbl">阶段并发：</span>
@@ -637,7 +647,7 @@
   </section>
 
   <section>
-    <button v-if="!(mode==='operation' && submitMode==='append' && appendMergePreview)" class="primary" @click="submit" :disabled="running || !canSubmit">▶ {{ mode==='operation' && submitMode==='append' ? '预检冲突' : '开始评估' }}</button>
+    <button v-if="!(mode==='operation' && submitMode==='append' && appendMergePreview)" class="primary" @click="submit" :disabled="running || !canSubmit">▶ {{ mode==='operation' && submitMode==='append' ? '预检冲突' : executionMode==='extract_only' && ['operation','operation_multi_group'].includes(mode) ? '开始抽帧' : '开始评估' }}</button>
     <span v-if="running" class="running">
       <template v-if="runKind==='rerun'">重跑中… {{ rerunProgress }}/{{ rerunTotal }}</template>
       <template v-else-if="runKind==='append'">追加评估中… {{ progress }}/{{ total }}</template>
@@ -762,12 +772,12 @@
       <button @click="exportJson" :disabled="!taskId">导出任务快照 JSON</button>
       <button @click="exportJsonl" :disabled="!taskId">导出逐题 JSONL</button>
       <button @click="exportXlsx" :disabled="!taskId">导出 XLSX（完整）</button>
-      <button v-if="mode==='operation' && !isMultiGroupMode" @click="exportHtml" :disabled="!taskId">导出 HTML 报告</button>
+      <button v-if="mode==='operation' && !isMultiGroupMode && loadedTaskOptions.execution_mode!=='extract_only'" @click="exportHtml" :disabled="!taskId">导出 HTML 报告</button>
       <button v-if="isVideoMode" @click="exportFrames" :disabled="!taskId">导出抽帧 ZIP</button>
     </h2>
     <div class="summary" v-if="summary">
       <span>样本量 {{ summary.total }}</span>
-      <span>成功评测 {{ summary.done }}</span>
+      <span>{{ loadedTaskOptions.execution_mode==='extract_only' ? '抽帧完成' : '成功评测' }} {{ summary.done }}</span>
       <span v-if="summary.failed">失败 {{ summary.failed }}</span>
       <span v-if="summary.total_submitted_images!=null">输入图片总数 {{ summary.total_submitted_images }}</span>
       <span v-if="summary.case_duration_stats?.count">平均耗时 {{ formatProgressElapsed(summary.case_duration_stats.mean_s) }}</span>
@@ -1017,6 +1027,41 @@
         </table>
       </div>
     </div>
+    <div v-if="mode==='operation' && taskId && !running" class="task-actions">
+      <p v-if="loadedTaskOptions.source_task_id" class="hint">来源任务：<a href="#" @click.prevent="loadHistoryTask(loadedTaskOptions.source_task_id)">{{ loadedTaskOptions.source_dataset_name || loadedTaskOptions.source_task_id }}</a></p>
+      <div v-if="loadedTaskOptions.execution_mode==='extract_only'" class="task-continue-actions">
+        <button type="button" class="primary" @click="evaluatePreparedFrames" :disabled="versionBusy || !activeTaskItemCount">使用这些帧开始评估</button>
+        <span class="hint">复用全部有效题目的帧创建独立评估任务，保留当前抽帧任务；缺帧会报错，不自动重抽。</span>
+      </div>
+      <details class="task-version-tools" :open="versionPanelOpen" @toggle="versionPanelOpen=$event.target.open">
+        <summary>新建评估版本 <span class="hint">复用抽帧、更换模型或重新抽帧</span></summary>
+        <div class="task-version-form">
+          <label class="task-version-field">执行方式
+            <select aria-label="新版本执行方式" v-model="versionMode" :disabled="versionBusy">
+              <option v-for="option in versionModes" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <p class="hint">{{ selectedVersionMode.description }}</p>
+          <p v-if="versionMode!=='evaluate_only'" class="task-version-warning">{{ versionMode==='full' ? '将重新消耗视频读取、抽帧和模型资源。' : '将重新消耗视频读取和抽帧资源。' }}</p>
+          <div class="task-version-fields">
+            <label class="task-version-field">题目范围
+              <select aria-label="新版本范围" v-model="versionScope" :disabled="versionBusy">
+                <option value="all">全部有效题目（{{ activeTaskItemCount }}）</option>
+                <option value="selected">已勾选题目（{{ selectedVersionItemCount }}）</option>
+              </select>
+            </label>
+            <label class="task-version-field">新任务名称（可选）
+              <input aria-label="新版本名称" v-model="versionName" :disabled="versionBusy" placeholder="留空自动生成">
+            </label>
+          </div>
+          <div class="task-version-footer">
+            <span class="hint">保留原题号与评估基准时间；原任务的输入、抽帧和结果均保持不变。</span>
+            <button type="button" class="primary" @click="startTaskVersion" :disabled="versionBusy || !activeTaskItemCount || (versionScope==='selected' && !selectedVersionItemCount)">{{ versionBusy ? '正在创建…' : '创建并启动' }}</button>
+          </div>
+          <p v-if="versionMode==='evaluate_only'" class="hint">缺帧或帧校验失败会报错，不自动重新抽帧。</p>
+        </div>
+      </details>
+    </div>
     <div v-if="isMultiGroupMode" ref="resultBrowser" class="result-browser multi-group-results">
       <div v-if="summary?.group_summaries?.length" class="table-scroll">
         <table class="grid auto-table">
@@ -1029,7 +1074,7 @@
       </div>
       <div v-if="taskId && (results.length || unfinishedRerunRows.length)" class="rerun-toolbar">
         <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败/未完成 Case</button>
-        <button type="button" class="primary" @click="startRerun([...selectedRerunIndices])" :disabled="running || !selectedRerunCount">重跑选中 Case（{{ selectedRerunCount }}）</button>
+        <button type="button" class="primary" @click="startRerun([...selectedRerunIndices])" :disabled="running || !selectedRerunCount">重跑选中项（{{ selectedRerunCount }}）</button>
         <button type="button" @click="clearRerunSelection" :disabled="running || !selectedRerunCount">清空选择</button>
         <span class="hint">重跑一个 Case 时会按当前对齐策略重跑该 Case 的所有可用实验组。</span>
       </div>
@@ -1047,7 +1092,7 @@
             <td><input type="checkbox" :checked="isRerunSelected(result)" :disabled="running" @change="setRerunSelected(result,$event.target.checked)"></td>
             <td>{{ (resultPage-1)*resultPageSize+index+1 }}</td>
             <td class="multi-case-cell"><strong>{{ result.case_id || result.item_id }}</strong><div>{{ result.query }}</div><div class="err" v-if="result.alignment_warnings?.length">{{ result.alignment_warnings.join('；') }}</div><div class="err" v-if="result.error">{{ result.error }}</div></td>
-            <td><div>{{ result.evaluation_strategy || '—' }}</div><div>{{ result.input_image_count || 0 }} 张</div><div>总耗时 {{ result.duration_s!=null ? formatProgressElapsed(result.duration_s) : '—' }}</div><div v-if="result.failure_stage" class="err">失败阶段：{{ result.failure_stage }}</div><a v-if="!running" href="#" class="row-export-link" @click.prevent="rerunOne(result)">重跑 Case</a></td>
+            <td><div>{{ result.evaluation_strategy || '—' }}</div><div>{{ result.input_image_count || result.frame_count || 0 }} 张</div><div>总耗时 {{ result.duration_s!=null ? formatProgressElapsed(result.duration_s) : '—' }}</div><frame-preview :task-id="taskId" :item-index="Number(result.index)"></frame-preview><div v-if="result.failure_stage" class="err">失败阶段：{{ result.failure_stage }}</div><button v-if="!running" type="button" class="result-action-button" @click="rerunOne(result)">重跑 Case</button></td>
             <td v-for="group in multiGroupColumns" :key="'cell-'+group.group_id" class="multi-result-cell">
               <template v-if="multiGroupResult(result,group.group_id)">
                 <div><strong>correctness：</strong>{{ multiGroupResult(result,group.group_id).correctness || '—' }}</div>
@@ -1076,16 +1121,17 @@
         </button>
       </div>
       <div v-if="taskId && (results.length || unfinishedRerunRows.length)" class="rerun-toolbar">
-        <button type="button" @click="selectFailedResults" :disabled="running">选择全部失败/未完成项</button>
+        <button type="button" @click="selectFailedResults" :disabled="running">{{ loadedTaskOptions.execution_mode==='extract_only' ? '选择抽帧失败/未完成项' : '选择全部失败/未完成项' }}</button>
         <button type="button" class="primary" @click="startRerun([...selectedRerunIndices])" :disabled="running || !selectedRerunCount">
           重跑选中项（{{ selectedRerunCount }}）
         </button>
         <button type="button" @click="clearRerunSelection" :disabled="running || !selectedRerunCount">清空选择</button>
-        <span class="hint">自动选择技术失败及没有结果的取消/遗漏项；判定为 NOK 不会自动选中。</span>
+        <span v-if="loadedTaskOptions.execution_mode==='extract_only'" class="hint">已成功抽帧的题目，可通过上方“使用这些帧开始评估”创建独立评估任务。</span>
+        <span v-else class="hint">跨分页选择技术失败、未评估及没有结果的取消/遗漏项；重跑结果合并回当前任务，判定为 NOK 不会自动选中。</span>
       </div>
       <div class="result-filters">
         <input v-model="resultQuery" @input="resetResultPage" placeholder="搜索题号、query、context、回答或理由">
-        <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="correctnessFilter" @change="resetResultPage">
+        <select v-if="mode!=='compare' && mode!=='rich_content' && loadedTaskOptions.execution_mode!=='extract_only'" v-model="correctnessFilter" @change="resetResultPage">
           <option value="">全部判定</option>
           <template v-if="mode==='operation'">
             <option value="ok">完成</option>
@@ -1099,7 +1145,7 @@
             <option value="unclear">不清楚</option>
           </template>
         </select>
-        <select v-if="mode!=='compare' && mode!=='rich_content'" v-model="problemDimFilter" @change="resetResultPage">
+        <select v-if="mode!=='compare' && mode!=='rich_content' && loadedTaskOptions.execution_mode!=='extract_only'" v-model="problemDimFilter" @change="resetResultPage">
           <option value="">全部维度</option>
           <option v-for="d in rubricDims" :key="d" :value="d">{{ d }}存在问题</option>
         </select>
@@ -1115,10 +1161,10 @@
             <col style="width:42px">
             <col style="width:48px">
             <col v-for="c in resultCols" :key="'col-'+c.key" :style="{ width: columnWidth(c) + 'px' }">
-            <col v-if="isVideoMode" style="width:100px">
-            <col v-if="isVideoMode" style="width:100px">
-            <col v-if="isVideoMode" style="width:100px">
-            <col style="width:72px">
+            <col v-if="isVideoMode" :style="{ width: resultActionWidths.video + 'px' }">
+            <col v-if="isVideoMode" :style="{ width: resultActionWidths.frames + 'px' }">
+            <col v-if="isVideoMode" :style="{ width: resultActionWidths.trace + 'px' }">
+            <col :style="{ width: resultActionWidths.rerun + 'px' }">
           </colgroup>
           <thead>
             <tr>
@@ -1157,7 +1203,7 @@
                     <span>{{ resultQueryImageCount(r) }} 张</span>
                     <button
                       type="button"
-                      class="query-image-preview-button"
+                      class="result-action-button query-image-preview-button"
                       @click.stop="openQueryImagePreview($event,r)"
                     >预览</button>
                     <dialog
@@ -1198,22 +1244,26 @@
                   >{{ cell(r, c) }}</div>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
-                  <div v-for="(video,videoIndex) in itemVideoLinks(r)" :key="videoIndex">
-                    <a v-if="video.url" :href="video.url" :target="video.remote ? '_blank' : null" rel="noopener noreferrer" class="row-export-link">{{ video.label ? video.label+' · ' : '' }}{{ video.remote ? '打开链接' : '下载' }}</a>
+                  <div v-for="(video,videoIndex) in itemVideoLinks(r)" :key="videoIndex" class="row-video-item">
+                    <span v-if="video.label" class="row-video-label">{{ video.label }}</span>
+                    <a v-if="video.url" :href="video.url" :target="video.remote ? '_blank' : null" rel="noopener noreferrer" class="result-action-button">{{ video.remote ? '打开链接' : '下载' }}</a>
                     <span v-else>—</span>
                   </div>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
-                  <frame-preview :task-id="taskId" :item-index="Number(r.index)"></frame-preview>
-                  <a v-if="itemArtifactUrl(r, 'frames_zip')" :href="itemArtifactUrl(r, 'frames_zip')" class="row-export-link">下载</a>
-                  <span v-else>—</span>
+                  <div class="row-frame-actions">
+                    <frame-preview :task-id="taskId" :item-index="Number(r.index)"></frame-preview>
+                    <a v-if="itemArtifactUrl(r, 'frames_zip')" :href="itemArtifactUrl(r, 'frames_zip')" class="result-action-button">下载</a>
+                    <span v-else>—</span>
+                  </div>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
-                  <a v-if="itemArtifactUrl(r, 'judge_calls')" :href="itemArtifactUrl(r, 'judge_calls')" class="row-export-link">下载</a>
+                  <span v-if="loadedTaskOptions.execution_mode==='extract_only'">待评估</span>
+                  <a v-else-if="itemArtifactUrl(r, 'judge_calls')" :href="itemArtifactUrl(r, 'judge_calls')" class="result-action-button">下载</a>
                   <span v-else>—</span>
                 </td>
                 <td class="row-export-cell">
-                  <a v-if="!running" href="#" class="row-export-link" @click.prevent="rerunOne(r)">重跑</a>
+                  <button v-if="!running" type="button" class="result-action-button" @click="rerunOne(r)">重跑</button>
                   <span v-else>—</span>
                 </td>
               </tr>

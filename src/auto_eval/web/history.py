@@ -348,6 +348,9 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "note": data.get("note") or "",
             "mode": data.get("mode"),
             "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
+            "execution_mode": (data.get("options") or {}).get("execution_mode", "full"),
+            "source_task_id": (data.get("options") or {}).get("source_task_id", ""),
+            "source_dataset_name": (data.get("options") or {}).get("source_dataset_name", ""),
             "status": run_state["status"],
             "total": run_state["total"],
             "done": run_state["progress"],
@@ -430,6 +433,9 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             "note": data.get("note") or "",
             "mode": data.get("mode"),
             "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
+            "execution_mode": (data.get("options") or {}).get("execution_mode", "full"),
+            "source_task_id": (data.get("options") or {}).get("source_task_id", ""),
+            "source_dataset_name": (data.get("options") or {}).get("source_dataset_name", ""),
             "status": run_state["status"],
             "total": run_state["total"],
             "done": run_state["progress"],
@@ -928,7 +934,9 @@ def _with_operation_compat(data: dict) -> dict:
             status: sum(row.get("correctness") == status for row in judged)
             for status in ("ok", "nok", "no_support")
         }
-    if (data.get("options") or {}).get("operation_layout") != "multi_group":
+    if (data.get("options") or {}).get("execution_mode") == "extract_only":
+        summary.pop("operation_statistics", None)
+    elif (data.get("options") or {}).get("operation_layout") != "multi_group":
         summary["operation_statistics"] = summarize_operation_results(
             current_results,
             total_cases=active_total(data.get("items") or []),
@@ -2187,6 +2195,8 @@ def operation_comparison_batch(snapshot: dict, *, include_source_data: bool = Fa
     """将普通任务类历史快照转换为批次对比所需的紧凑输入。"""
     if snapshot.get("mode") != "operation":
         raise ValueError("仅任务类历史支持批次对比")
+    if (snapshot.get("options") or {}).get("execution_mode") == "extract_only":
+        raise ValueError("只抽帧任务尚无评估结果，不能参与效果对比")
     if (snapshot.get("options") or {}).get("operation_layout") == "multi_group":
         raise ValueError("任务类多组评估历史暂不参与批次对比")
     normalized = _with_operation_compat(snapshot)

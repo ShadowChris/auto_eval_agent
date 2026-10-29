@@ -84,7 +84,7 @@ export const FramePreview = {
   },
   template: `
     <span class="frame-preview-entry">
-      <button type="button" class="row-export-link frame-preview-trigger" @click.stop="open" :disabled="!taskId">预览<span v-if="knownCount!==null">（{{ knownCount }}张）</span></button>
+      <button type="button" class="result-action-button frame-preview-trigger" @click.stop="open" :disabled="!taskId" :aria-label="knownCount!==null ? '预览抽帧（'+knownCount+'张）' : '预览抽帧'">预览</button>
       <Teleport to="body">
         <dialog ref="dialog" class="frame-preview-dialog" aria-label="录屏抽帧预览" @click.self="close" @close="dispose" @keydown="keyboard">
           <div class="frame-preview-head">

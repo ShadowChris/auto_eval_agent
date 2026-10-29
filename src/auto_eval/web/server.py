@@ -92,6 +92,7 @@ from .operation_groups import align_operation_groups
 from .comparison_uploads import ComparisonUploadStore
 from .frame_preview import create_frame_preview_router
 from .pipeline_config import current_pipeline_config, save_pipeline_config
+from .operation_runs import EXECUTION_MODES, evaluation_snapshot, fork_items
 from .remote_video import cleanup_stale_video_downloads, is_remote_video_url, run_video_preparation
 from .operation_comparison_import import (
     SUPPORTED_SUFFIXES as COMPARISON_IMPORT_SUFFIXES,
@@ -259,6 +260,14 @@ class RerunReq(BaseModel):
     request_rate_limit: dict | None = None
 
 
+class OperationForkReq(BaseModel):
+    action: Literal["reuse_frames", "refresh_frames"]
+    execution_mode: Literal["full", "extract_only", "evaluate_only"] = "evaluate_only"
+    item_indices: list[int] | None = None
+    dataset_name: str = ""
+    options: dict = Field(default_factory=dict)
+
+
 class DatasetItemsActionReq(BaseModel):
     item_indices: list[int]
     reason: str = ""
@@ -377,6 +386,9 @@ def _runtime_config_for_options(app_cfg, options: dict):
 def _normalize_eval_options(app_cfg, options: dict) -> tuple[dict, object]:
     """校验前端绑定并保存无密钥的 Provider 快照。"""
     normalized = dict(options or {})
+    if normalized.get("execution_mode") == "extract_only":
+        normalized.pop("judge_backend", None)
+        return normalized, app_cfg
     backend = normalized.get("judge_backend") or {}
     provider_id = str(backend.get("provider_id") or "").strip()
     resolution = None
@@ -478,7 +490,12 @@ def _with_operation_eval_persona(app_cfg, mode: Mode, options: dict) -> dict:
     """任务类固定终端用户视角；模型服务由 judge_backend 独立选择。"""
     normalized = dict(options or {})
     if mode == "operation":
-        normalized["judges"] = [_terminal_user_judge_name(app_cfg)]
+        execution_mode = normalized.setdefault("execution_mode", "full")
+        if execution_mode not in EXECUTION_MODES:
+            raise HTTPException(422, "execution_mode 只能是 full、extract_only 或 evaluate_only")
+        normalized["judges"] = [] if execution_mode == "extract_only" else [_terminal_user_judge_name(app_cfg)]
+        if execution_mode == "extract_only":
+            normalized.pop("evaluation_snapshot", None)
         normalized.setdefault("concurrency", DEFAULT_OPERATION_CONCURRENCY)
         normalized.setdefault("request_rate_limit", {
             "max_requests": 9,
@@ -1295,6 +1312,8 @@ def api_align_operation_groups(req: OperationGroupsAlignReq):
 async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
+    if req.mode != "operation" and "execution_mode" in req.options:
+        raise HTTPException(422, "分阶段执行模式目前仅支持任务类")
     app_cfg = cfg()
     append_task = None
     if req.submit_mode == "append":
@@ -1308,6 +1327,8 @@ async def api_eval(req: EvalReq):
             raise HTTPException(404, "目标历史评估集不存在")
         if append_task.mode != req.mode:
             raise HTTPException(409, "目标历史评估集的评测模式不一致")
+        if append_task.options.get("execution_mode") == "extract_only":
+            raise HTTPException(409, "只抽帧任务请复用抽帧新建评估，不追加评估结果到原任务")
         if (append_task.options or {}).get("operation_layout") == "multi_group":
             raise HTTPException(409, "任务类多组评估暂不支持分段追加")
         if append_task.status in {"pending", "running", "rerunning"}:
@@ -1337,7 +1358,7 @@ async def api_eval(req: EvalReq):
         requested_options = _with_operation_eval_persona(
             app_cfg,
             req.mode,
-            req.options,
+            {key: value for key, value in req.options.items() if key != "evaluation_snapshot"},
         )
     _validate_eval_request(
         req.model_copy(update={"options": requested_options}),
@@ -2851,6 +2872,68 @@ async def api_eval_cancel(task_id: str):
         "task_id": task.id,
         **batch_run_state(task.status, task.items, task.results),
     }
+
+
+@app.post("/api/eval/{task_id}/fork")
+async def api_operation_fork(task_id: str, req: OperationForkReq):
+    """复制输入创建独立运行；绝不回写来源任务、帧目录或评估结果。"""
+    live = get_live_task(task_id)
+    if live is not None and (
+        live.status in {"pending", "running", "rerunning"}
+        or live.execution is not None and not live.execution.done()
+        or any(not execution.done() for execution in live.item_executions.values())
+    ):
+        raise HTTPException(409, "来源任务仍在运行，请完成或中断后再新建版本")
+    source = task_to_snapshot(live) if live else await asyncio.to_thread(load_snapshot, task_id)
+    if source is None:
+        raise HTTPException(404, "来源任务不存在")
+    if source.get("mode") != "operation":
+        raise HTTPException(422, "目前仅任务类支持创建抽帧/评估版本")
+    if req.action == "reuse_frames" and req.execution_mode != "evaluate_only":
+        raise HTTPException(422, "复用抽帧新建评估必须使用 evaluate_only")
+    if req.action == "refresh_frames" and req.execution_mode == "evaluate_only":
+        raise HTTPException(422, "重新抽帧请选择 extract_only 或 full")
+    raw_items = source.get("items") or []
+    indices = sorted(set(req.item_indices)) if req.item_indices is not None else [
+        index for index, item in enumerate(raw_items) if is_item_active(item)
+    ]
+    if not indices or any(index < 0 or index >= len(raw_items) or not is_item_active(raw_items[index]) for index in indices):
+        raise HTTPException(422, "请选择有效的题目范围，已排除条目不能用于新版本")
+    # 仅继承评估配置，不继承旧快照、追加记录、结果或任何执行状态。
+    options = {key: deepcopy(value) for key, value in (source.get("options") or {}).items() if key in {
+        "concurrency", "request_rate_limit", "eval_timeout_s", "video_prepare_timeout_s",
+        "operation_layout", "operation_groups", "alignment_summary", "judge_backend",
+    }}
+    for key in ("concurrency", "request_rate_limit", "eval_timeout_s", "judge_backend"):
+        if key in req.options:
+            options[key] = req.options[key]
+    options.update({
+        "execution_mode": req.execution_mode, "source_task_id": task_id,
+        "source_dataset_name": source.get("dataset_name") or "",
+        "fork_action": req.action, "source_item_indices": indices,
+        "evaluation_timestamp": (source.get("options") or {}).get("evaluation_timestamp") or source.get("created_at"),
+    })
+    try:
+        # 新版本读取当前已发布 YAML 标准；原版本的配置快照不会被改动。
+        latest = await asyncio.to_thread(load_config, CONFIG_DIR)
+        options, runtime_cfg = _normalize_eval_options(latest, _with_operation_eval_persona(latest, "operation", options))
+        if req.execution_mode != "extract_only":
+            options["evaluation_snapshot"] = evaluation_snapshot(runtime_cfg)
+        items = await asyncio.to_thread(
+            fork_items, source, indices, reuse_frames=req.action == "reuse_frames", runs_dir=RUNS_DIR,
+        )
+    except (ValueError, KeyError, OSError) as exc:
+        raise HTTPException(422, f"无法新建版本：{exc}") from exc
+    suffix = "复用帧评估" if req.action == "reuse_frames" else "重抽帧"
+    name = req.dataset_name.strip() or f"{source.get('dataset_name') or '数据集'}_{suffix}_{datetime.now():%Y%m%d_%H%M%S}"
+    task = new_task("operation", items, options, dataset_name=name)
+
+    async def start():
+        await asyncio.sleep(0.05)
+        await run_eval(task, runtime_cfg)
+
+    task.execution = asyncio.create_task(start())
+    return {"task_id": task.id, "source_task_id": task_id, "dataset_name": name, "execution_mode": req.execution_mode}
 
 
 @app.post("/api/eval/{task_id}/rerun")
