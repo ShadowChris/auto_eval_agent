@@ -11,6 +11,7 @@ from typing import Any, Callable
 import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
+from .llm_reasoning import thinking_metadata
 from .observability import current_context, error_details, log_event
 from .request_rate_limit import acquire_request_slot
 
@@ -54,6 +55,7 @@ class AggregatedMessage:
     content: str
     role: str = "assistant"
     tool_calls: list[AggregatedToolCall] | None = None
+    reasoning_content: str = ""
 
 
 @dataclass
@@ -210,6 +212,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
 
     stream = await client.chat.completions.create(**request)
     content_chunks: list[str] = []
+    reasoning_chunks: list[str] = []
     tool_chunks: dict[int, dict[str, str]] = {}
     finish_reason = None
     usage = None
@@ -219,6 +222,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
     stats = {
         "chunk数": 0,
         "输出字符": 0,
+        "原生思考字符": 0,
         "工具参数字符": 0,
         "首Token耗时": None,
     }
@@ -240,6 +244,10 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
             saw_choice = True
             choice = choices[0]
             delta = choice.delta
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                reasoning_chunks.append(reasoning)
+                stats["原生思考字符"] += len(reasoning)
             content = getattr(delta, "content", None)
             if content:
                 if stats["首Token耗时"] is None:
@@ -351,6 +359,7 @@ async def _collect_stream(client, kwargs: dict, *, include_usage: bool):
                 message=AggregatedMessage(
                     content="".join(content_chunks),
                     tool_calls=tool_calls,
+                    reasoning_content="".join(reasoning_chunks),
                 ),
             )
         ],
@@ -460,6 +469,7 @@ async def stream_chat_completion(
             choice = response.choices[0]
             tool_calls = getattr(choice.message, "tool_calls", None) or []
             usage = getattr(response, "usage", None)
+            thinking = thinking_metadata(choice.message.reasoning_content, usage, kwargs)
             log_event(
                 module,
                 "流式调用成功" if attempt == 0 else "重试成功",
@@ -474,6 +484,9 @@ async def stream_chat_completion(
                     "输出字符": stats.get("输出字符"),
                     "输入Token": getattr(usage, "prompt_tokens", None) if usage else None,
                     "输出Token": getattr(usage, "completion_tokens", None) if usage else None,
+                    "原生思考": "已确认" if thinking["status"] == "confirmed" else "未确认",
+                    "思考Token": thinking["reasoning_tokens"],
+                    "原生思考字符": stats.get("原生思考字符"),
                     "耗时": f"{time.perf_counter() - call_started:.2f}秒",
                 },
                 progress=60,

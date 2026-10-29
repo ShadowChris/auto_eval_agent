@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 
 from pathlib import Path
+from jinja2 import Template
 
 from ..config import RubricDim
 from ..expert_knowledge import render_expert_knowledge
@@ -213,6 +214,7 @@ class RubricJudge:
         skill_router=None,
         evaluation_time: datetime | None = None,
         expert_knowledge=None,
+        operation_templates: dict | None = None,
     ):
         self.client = client
         self.dims = dims
@@ -220,6 +222,14 @@ class RubricJudge:
         self.skill_router = skill_router
         self.evaluation_time = evaluation_time
         self.expert_knowledge = expert_knowledge
+        self.operation_templates = {
+            "OPERATION_SYSTEM": OPERATION_SYSTEM,
+            "OPERATION_USER": OPERATION_USER,
+            "OPERATION_MULTI_USER": OPERATION_MULTI_USER,
+        }
+        for name, source in (operation_templates or {}).items():
+            if name in self.operation_templates:
+                self.operation_templates[name] = Template(source)
 
     async def score_operation_groups(
         self,
@@ -264,7 +274,7 @@ class RubricJudge:
         if len(expected) < 2:
             raise ValueError("多组联合评估至少需要两个具有关键帧的实验组")
 
-        system = OPERATION_SYSTEM.render(
+        system = self.operation_templates["OPERATION_SYSTEM"].render(
             persona=self.client.persona,
             dims=dims,
             scale=dims[0].scale if dims else 5,
@@ -272,7 +282,7 @@ class RubricJudge:
             expert_knowledge_text=render_expert_knowledge(self.expert_knowledge),
             multi_group=True,
         )
-        user = OPERATION_MULTI_USER.render(
+        user = self.operation_templates["OPERATION_MULTI_USER"].render(
             question=item.question,
             groups=prompt_groups,
         )
@@ -376,7 +386,7 @@ class RubricJudge:
             if policy is None:
                 raise ValueError("任务类评测缺少 config/skills/operation.yaml 的 operation_policy")
             query_images = list(item.query_images or [])
-            system = OPERATION_SYSTEM.render(
+            system = self.operation_templates["OPERATION_SYSTEM"].render(
                 persona=self.client.persona,
                 dims=dims,
                 scale=dims[0].scale if dims else 5,
@@ -385,7 +395,7 @@ class RubricJudge:
                 multi_group=False,
                 has_query_images=bool(query_images),
             )
-            user = OPERATION_USER.render(
+            user = self.operation_templates["OPERATION_USER"].render(
                 question=item.question,
                 context=prompt_context,
                 agent_claim=(answer or "").strip(),

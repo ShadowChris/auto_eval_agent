@@ -1,0 +1,13 @@
+# 任务类 HTTP/HTTPS 视频：临时下载后本地抽帧，不长期保存原视频。
+connect_timeout_s: 10
+read_timeout_s: 30
+total_timeout_s: 120
+max_size_mb: 500
+max_redirects: 5
+max_attempts: 3
+retry_delay_s: 1
+stale_after_hours: 24
+# 默认仅访问公网地址；内网 OBS 优先在 .env 配置 REMOTE_VIDEO_ALLOWED_HOSTS。
+# 此处为兼容回退：仅在环境变量未设置时生效；环境变量显式留空会清空白名单。
+# 仅填写可信域名或 IP，不含协议、端口、路径或通配符。
+allowed_hosts: []

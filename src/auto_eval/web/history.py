@@ -24,6 +24,7 @@ from ..analysis.operation_statistics import (
     normalize_operation_issue_types,
     summarize_operation_results,
 )
+from ..llm_reasoning import annotate_reasoning_trace, thinking_summary
 from ..judges.operation_fields import (
     LEGACY_REVIEW_CATEGORIES,
     clean_operation_card_name,
@@ -348,6 +349,9 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             "note": data.get("note") or "",
             "mode": data.get("mode"),
             "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
+            "execution_mode": (data.get("options") or {}).get("execution_mode", "full"),
+            "source_task_id": (data.get("options") or {}).get("source_task_id", ""),
+            "source_dataset_name": (data.get("options") or {}).get("source_dataset_name", ""),
             "status": run_state["status"],
             "total": run_state["total"],
             "done": run_state["progress"],
@@ -430,6 +434,9 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
             "note": data.get("note") or "",
             "mode": data.get("mode"),
             "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
+            "execution_mode": (data.get("options") or {}).get("execution_mode", "full"),
+            "source_task_id": (data.get("options") or {}).get("source_task_id", ""),
+            "source_dataset_name": (data.get("options") or {}).get("source_dataset_name", ""),
             "status": run_state["status"],
             "total": run_state["total"],
             "done": run_state["progress"],
@@ -493,7 +500,9 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
             "evaluation_segment_no", "evaluation_source_dataset",
         }
         items = [
-            {key: value for key, value in item.items() if key in item_fields}
+            {key: value for key, value in item.items() if key in item_fields or (
+                key == "video_path" and str(value).lower().startswith(("http://", "https://"))
+            )}
             for item in items
         ]
         # 历史恢复页只需要每题最近两条进度摘要；完整日志仍保留在快照中。
@@ -926,7 +935,9 @@ def _with_operation_compat(data: dict) -> dict:
             status: sum(row.get("correctness") == status for row in judged)
             for status in ("ok", "nok", "no_support")
         }
-    if (data.get("options") or {}).get("operation_layout") != "multi_group":
+    if (data.get("options") or {}).get("execution_mode") == "extract_only":
+        summary.pop("operation_statistics", None)
+    elif (data.get("options") or {}).get("operation_layout") != "multi_group":
         summary["operation_statistics"] = summarize_operation_results(
             current_results,
             total_cases=active_total(data.get("items") or []),
@@ -1727,6 +1738,8 @@ def _project_relative_path(
     """把项目内路径转为稳定的 POSIX 相对路径；项目外路径返回空。"""
     if value is None or str(value).strip() == "":
         return ""
+    if str(value).strip().lower().startswith(("http://", "https://")):
+        return ""
     path = Path(str(value)).expanduser()
     if not path.is_absolute():
         return path.as_posix()
@@ -2183,6 +2196,8 @@ def operation_comparison_batch(snapshot: dict, *, include_source_data: bool = Fa
     """将普通任务类历史快照转换为批次对比所需的紧凑输入。"""
     if snapshot.get("mode") != "operation":
         raise ValueError("仅任务类历史支持批次对比")
+    if (snapshot.get("options") or {}).get("execution_mode") == "extract_only":
+        raise ValueError("只抽帧任务尚无评估结果，不能参与效果对比")
     if (snapshot.get("options") or {}).get("operation_layout") == "multi_group":
         raise ValueError("任务类多组评估历史暂不参与批次对比")
     normalized = _with_operation_compat(snapshot)
@@ -2620,9 +2635,11 @@ def write_frames_zip(
 
             if metadata:
                 exported_metadata = dict(metadata)
-                exported_metadata["video"] = _project_relative_path(
-                    item.get("video_path"),
-                    project_root,
+                video_reference = str(item.get("video_path") or "")
+                exported_metadata["video"] = (
+                    video_reference
+                    if video_reference.lower().startswith(("http://", "https://"))
+                    else _project_relative_path(video_reference, project_root)
                 )
                 zf.writestr(
                     f"{item_dir}/keyframes.json",
@@ -2723,7 +2740,7 @@ def load_item_judge_calls(
                     record_item_id = str(record.get("item_id") or "")
                     if record_item_id and record_item_id != item_id:
                         continue
-                    exported = dict(record)
+                    exported = annotate_reasoning_trace(record)
                     exported["_trace_file"] = _project_relative_path(
                         path,
                         project_root,
@@ -2753,6 +2770,9 @@ def load_item_judge_calls(
         "item_id": item_id,
         "query": item.get("query") or item.get("question") or "",
         "judge_call_count": len(records),
+        "thinking_summary": thinking_summary([
+            row for record in records for row in record["llm_rounds"]
+        ]),
         "judge_calls": records,
     }
 

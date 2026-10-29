@@ -7,12 +7,12 @@ import pytest
 from auto_eval.llm_stream import ProviderStreamError, stream_chat_completion
 
 
-def _chunk(content=None, *, finish=None, tool_calls=None, usage=None, error=None):
+def _chunk(content=None, *, finish=None, tool_calls=None, usage=None, error=None, reasoning=None):
     choices = []
-    if content is not None or finish is not None or tool_calls:
+    if content is not None or finish is not None or tool_calls or reasoning is not None:
         choices = [
             SimpleNamespace(
-                delta=SimpleNamespace(content=content, tool_calls=tool_calls),
+                delta=SimpleNamespace(content=content, tool_calls=tool_calls, reasoning_content=reasoning),
                 finish_reason=finish,
             )
         ]
@@ -114,11 +114,44 @@ async def test_stream_aggregates_content_usage_and_tool_calls():
 
 
 @pytest.mark.asyncio
+async def test_native_reasoning_is_separate_from_content_and_logged(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "auto_eval.llm_stream.log_event",
+        lambda module, event, **kwargs: events.append((event, kwargs)),
+    )
+    usage = SimpleNamespace(
+        prompt_tokens=10, completion_tokens=8,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=5),
+    )
+    client, _ = _client([[
+        _chunk(reasoning="先检查"),
+        _chunk(reasoning="可见状态"),
+        _chunk("<analysis>评判说明</analysis>"),
+        _chunk('{"correctness":"ok"}', finish="stop"),
+        _chunk(usage=usage),
+    ]])
+    output = []
+    response = await stream_chat_completion(
+        client, {"model": "fake-model", "messages": []},
+        callback=output.append, max_attempts=1,
+    )
+    message = response.choices[0].message
+    assert message.reasoning_content == "先检查可见状态"
+    assert message.content == '<analysis>评判说明</analysis>{"correctness":"ok"}'
+    assert "".join(output) == message.content
+    details = next(kwargs["details"] for event, kwargs in events if event == "流式调用成功")
+    assert details["原生思考"] == "已确认"
+    assert details["思考Token"] == 5
+    assert details["原生思考字符"] == len(message.reasoning_content)
+
+
+@pytest.mark.asyncio
 async def test_stream_retry_discards_partial_callback_output():
     client, completions = _client(
         [
-            [_chunk("重复内容"), httpx.RemoteProtocolError("peer closed")],
-            [_chunk("完"), _chunk("整", finish="stop")],
+            [_chunk(reasoning="失败尝试"), _chunk("重复内容"), httpx.RemoteProtocolError("peer closed")],
+            [_chunk(reasoning="成功尝试"), _chunk("完"), _chunk("整", finish="stop")],
         ]
     )
     callback_chunks = []
@@ -133,6 +166,7 @@ async def test_stream_retry_discards_partial_callback_output():
 
     assert len(completions.requests) == 2
     assert response.choices[0].message.content == "完整"
+    assert response.choices[0].message.reasoning_content == "成功尝试"
     assert callback_chunks == ["完", "整"]
 
 
@@ -244,7 +278,7 @@ async def test_stream_retries_aborted_finish_reason():
 async def test_stream_retries_empty_response():
     client, completions = _client(
         [
-            [_chunk(finish="stop")],
+            [_chunk(reasoning="仅有思考不能算有效评估", finish="stop")],
             [_chunk("有效回答", finish="stop")],
         ]
     )

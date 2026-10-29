@@ -11,6 +11,7 @@ from auto_eval.paths import PROJECT_ROOT
 from auto_eval.web import runner
 from auto_eval.web.operation_media import prepare_session_operation_item, _rich_content_timing
 from auto_eval.web.tasks import Task
+from auto_eval.web.operation_runs import freeze_frames, verify_frames
 
 
 @pytest.fixture(scope="module")
@@ -121,3 +122,84 @@ def test_non_operation_extraction_keeps_its_original_rules():
     profile = load_config(PROJECT_ROOT / "config").visual_modes["rich_content"]
     kwargs, _ = _rich_content_timing({}, 30, profile)
     assert kwargs["front_protection"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("execution_mode", ["full", "extract_only", "evaluate_only"])
+async def test_execution_modes_handle_old_frozen_frames(recording, tmp_path, monkeypatch, multi, execution_mode):
+    monkeypatch.setenv("OPERATION_VIDEO_ROOTS", str(recording.parent))
+    runs = tmp_path / "runs"
+    old_dir = runs / "old"
+    old_dir.mkdir(parents=True)
+    old_frame = old_dir / "kf_001.jpg"
+    old_frame.write_bytes(b"old evidence")
+    (old_dir / "keyframes.json").write_text(json.dumps({
+        "algorithm_version": "hybrid-state-v3.2.0",
+        "selected": [{"index": 1, "time": 7}],
+    }), encoding="utf-8")
+    row = {"id": "case", "query": "q", "video_path": str(recording),
+           "frames": [str(old_frame)], "task_start_time": 7, "task_end_time": 34}
+    item = {"id": "case", "query": "q", "group_variants": [
+        {"group_id": "a", "group_name": "A", "group_role": "experiment", "item": row},
+    ]} if multi else row
+    freeze_frames(item, runs_dir=runs)
+    old_identity = row["frame_set_id"]
+    old_archive = Path(row["frames"][0]).parent
+    original_files = {path.name: path.read_bytes() for path in old_archive.iterdir()}
+    task = Task(id="mode-front", mode="operation", items=[item], options={"execution_mode": execution_mode})
+    monkeypatch.setattr(runner, "RUNS_DIR", runs)
+    monkeypatch.setattr(runner, "_persist_task", lambda *args, **kwargs: True)
+    prepare = runner.prepare_session_operation_item
+    prepared = []
+
+    def prepare_current(current, **kwargs):
+        assert execution_mode != "evaluate_only"
+        assert "frame_set_id" not in current and "frame_manifest_path" not in current
+        prepared.append(True)
+        return prepare(current, runs_dir=runs, **kwargs)
+
+    monkeypatch.setattr(runner, "prepare_session_operation_item", prepare_current)
+    evaluated = []
+
+    async def evaluate(mode, index, current, *args, **kwargs):
+        evaluated.append(True)
+        actual = current["group_variants"][0]["item"] if multi else current
+        expected = "hybrid-state-v3.2.0" if execution_mode == "evaluate_only" else media.KEYFRAME_ALGORITHM_VERSION
+        assert metadata(Path(actual["frames"][0]).parent)["algorithm_version"] == expected
+        return {"correctness": "ok", "category": "operation"}
+
+    monkeypatch.setattr(runner, "_eval_one", evaluate)
+    if execution_mode == "evaluate_only":
+        runner._prepare_rerun_items(task, [0])
+        assert row["frame_set_id"] == old_identity
+    await runner._run(task, load_config(PROJECT_ROOT / "config"))
+    assert not task.results[0].get("error"), task.results
+    assert bool(prepared) == (execution_mode != "evaluate_only")
+    assert bool(evaluated) == (execution_mode != "extract_only")
+    assert (row["frame_set_id"] == old_identity) == (execution_mode == "evaluate_only")
+    verify_frames(item, runs)
+    assert {path.name: path.read_bytes() for path in old_archive.iterdir()} == original_files
+    if execution_mode != "evaluate_only":
+        assert [r["time"] for r in metadata(Path(row["frames"][0]).parent)["selected"]] == [7, 10, 34]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["operation", "rich_content_quality"])
+async def test_upload_preserves_front_protection_with_staged_preparation(tmp_path, monkeypatch, mode):
+    from io import BytesIO
+    from fastapi import UploadFile
+    from auto_eval.web import server
+
+    monkeypatch.setattr(server, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(server, "probe_duration", lambda _: 12)
+    calls = []
+
+    def extract(video, directory, **kwargs):
+        calls.append(kwargs.get("front_protection", True))
+        return []
+
+    monkeypatch.setattr(server, "extract_scene_keyframes", extract)
+    result = await server.api_upload_video(UploadFile(filename="test.mp4", file=BytesIO(b"video")), mode=mode)
+    assert calls == [mode == "operation"]
+    assert result["duration"] == 12

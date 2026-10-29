@@ -60,6 +60,9 @@ from .operation_media import (
     prepare_session_rich_content_item,
 )
 from .tasks import DEFAULT_OPERATION_CONCURRENCY, Task, prune_task_cache
+from .remote_video import run_video_preparation, video_reference_for_log
+from .video_pipeline import stage_slot, video_item_scope
+from .operation_runs import freeze_frames, verify_frames, frame_items, frozen_evaluation_config, evaluation_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -157,6 +160,8 @@ async def run_eval(task: Task, cfg: AppConfig) -> None:
     task.status = "running"
     _persist_task(task, force=True)
     try:
+        if task.mode == "operation" and task.options.get("execution_mode") != "extract_only" and "evaluation_snapshot" not in task.options:
+            task.options["evaluation_snapshot"] = evaluation_snapshot(cfg)
         await _run(task, cfg)
         task.summary = _summarize(task, cfg)
         task.status = "done"
@@ -239,6 +244,8 @@ def _prepare_rerun_items(task: Task, item_indices: list[int]) -> None:
     """复用有效抽帧；缓存缺失时回退到原视频重新抽取。"""
     if task.mode not in {"operation", "rich_content", "rich_content_quality"}:
         return
+    if task.options.get("execution_mode") == "evaluate_only":
+        return  # 严格复用，缺失帧不能静默回退成另一套视觉输入。
     for index in item_indices:
         item = task.items[index]
         if task.mode == "operation" and _is_multi_group_operation(item):
@@ -247,13 +254,17 @@ def _prepare_rerun_items(task: Task, item_indices: list[int]) -> None:
                 if not isinstance(group_item, dict):
                     continue
                 group_item.pop("prepare_error", None)
-                if group_item.get("frames") and not _valid_cached_frames(group_item, operation=True):
+                if not _valid_cached_frames(group_item, operation=True):
                     group_item.pop("frames", None)
                     group_item.pop("frame_count", None)
+                    group_item.pop("frame_set_id", None)
+                    group_item.pop("frame_manifest_path", None)
             continue
-        if item.get("frames") and not _valid_cached_frames(item, operation=task.mode == "operation"):
+        if not _valid_cached_frames(item, operation=task.mode == "operation"):
             item.pop("frames", None)
             item.pop("frame_count", None)
+            item.pop("frame_set_id", None)
+            item.pop("frame_manifest_path", None)
 
 
 async def run_rerun(
@@ -572,7 +583,14 @@ async def _run(
     append_attempt: dict | None = None,
     evaluation_timestamp: float | None = None,
 ) -> None:
-    judges_cfg = _selected_judge_configs(task, cfg)
+    execution_mode = task.options.get("execution_mode", "full") if task.mode == "operation" else "full"
+    extract_only = execution_mode == "extract_only"
+    if execution_mode == "full" and "execution_mode" in task.options:
+        _prepare_rerun_items(task, active_item_indices(task.items) if item_indices is None else item_indices)
+    snapshot = task.options.get("evaluation_snapshot") if task.mode == "operation" else None
+    if snapshot and not extract_only:
+        cfg = frozen_evaluation_config(cfg, snapshot)
+    judges_cfg = [] if extract_only else _selected_judge_configs(task, cfg)
     run_backend = dict(
         ((rerun or {}).get("judge_backend") or {})
         if rerun is not None
@@ -590,7 +608,7 @@ async def _run(
         run_backend.get("provider_revision") or ""
     )
     evaluation_time = datetime.fromtimestamp(
-        evaluation_timestamp or task.created_at
+        evaluation_timestamp or task.options.get("evaluation_timestamp") or task.created_at
     ).astimezone()
     _providers = cfg.eval_options.effective_providers()
     clients = [
@@ -606,6 +624,7 @@ async def _run(
             skill_router,
             evaluation_time=evaluation_time,
             expert_knowledge=operation_knowledge,
+            operation_templates=(snapshot or {}).get("templates"),
         )
         for c in clients
     ]
@@ -689,7 +708,7 @@ async def _run(
             attempt_no=attempt_no,
             progress_callback=publish_progress,
             judge_trace_callback=collect_judge_trace,
-        ):
+        ), video_item_scope():
             log_event(
                 "任务",
                 "开始",
@@ -713,12 +732,20 @@ async def _run(
                 )
                 last_error = None
                 res = None
-                if (task.mode == "operation" and not _is_multi_group_operation(item_dict)
+                preparation_failure_stage = None
+                if execution_mode == "evaluate_only":
+                    try:
+                        await asyncio.to_thread(verify_frames, item_dict, RUNS_DIR)
+                    except Exception as exc:
+                        last_error = exc
+                        preparation_failure_stage = "frame_validation"
+                elif (task.mode == "operation" and not _is_multi_group_operation(item_dict)
                         and item_dict.get("frames") and not _valid_cached_frames(item_dict, operation=True)):
-                    item_dict.pop("frames", None)
-                    item_dict.pop("frame_count", None)
+                    for field in ("frames", "frame_count", "frame_set_id", "frame_manifest_path"):
+                        item_dict.pop(field, None)
                 if (
-                    task.mode == "operation"
+                    last_error is None
+                    and task.mode == "operation"
                     and not _is_multi_group_operation(item_dict)
                     and item_dict.get("query_images")
                 ):
@@ -732,6 +759,7 @@ async def _run(
                         )
                     except Exception as exc:
                         last_error = exc
+                        preparation_failure_stage = "query_images"
                         log_event(
                             "用户图片准备",
                             "失败",
@@ -787,7 +815,7 @@ async def _run(
                                 progress_message="部分实验组用户输入图片校验失败",
                             )
                             continue
-                        if _valid_cached_frames(group_item, operation=True):
+                        if _valid_cached_frames(group_item, operation=execution_mode != "evaluate_only"):
                             group_item.pop("prepare_error", None)
                             image_counts.append({
                                 "group_id": variant.get("group_id"),
@@ -796,6 +824,8 @@ async def _run(
                                 "count": len(group_item.get("frames") or []),
                             })
                             continue
+                        for field in ("frames", "frame_count", "frame_set_id", "frame_manifest_path"):
+                            group_item.pop(field, None)
                         try:
                             log_event(
                                 "视频准备",
@@ -808,15 +838,13 @@ async def _run(
                             prepared_input["id"] = (
                                 f"{item_id}__{variant.get('group_id') or group_position + 1}"
                             )
-                            prepared = await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    prepare_session_operation_item,
-                                    prepared_input,
-                                    session_name=task.session_name,
-                                    item_index=idx * max(1, len(variants)) + group_position,
-                                    total_items=total_group_items,
-                                ),
-                                timeout=float(task.options.get("video_prepare_timeout_s") or 300),
+                            prepared = await run_video_preparation(
+                                prepare_session_operation_item,
+                                prepared_input,
+                                session_name=task.session_name,
+                                item_index=idx * max(1, len(variants)) + group_position,
+                                total_items=total_group_items,
+                                preparation_timeout_s=float(task.options.get("video_prepare_timeout_s") or 300),
                             )
                             prepared["id"] = group_item.get("id") or prepared["id"]
                             group_item.clear()
@@ -876,7 +904,7 @@ async def _run(
                         log_event(
                             "视频准备",
                             "校验视频并分析场景",
-                            details={"视频路径": item_dict.get("video_path")},
+                            details={"视频路径": video_reference_for_log(str(item_dict.get("video_path") or ""))},
                             progress=3,
                             progress_message="正在校验视频并分析场景",
                         )
@@ -888,16 +916,15 @@ async def _run(
                         else:
                             prepare_call = prepare_session_operation_item
                             prepare_kwargs = {}
-                        prepared = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                prepare_call,
-                                item_dict,
-                                session_name=task.session_name,
-                                item_index=idx,
-                                total_items=len(task.items),
-                                **prepare_kwargs,
-                            ),
-                            timeout=float(task.options.get("video_prepare_timeout_s") or 300),
+                        prepared = await run_video_preparation(
+                            prepare_call,
+                            item_dict,
+                            session_name=task.session_name,
+                            item_index=idx,
+                            total_items=len(task.items),
+                            operation_pipeline=task.mode == "operation",
+                            preparation_timeout_s=float(task.options.get("video_prepare_timeout_s") or 300),
+                            **prepare_kwargs,
                         )
                         item_dict.clear()
                         item_dict.update(prepared)
@@ -933,7 +960,31 @@ async def _run(
                             progress_message="视频校验或抽帧失败",
                             progress_status="error",
                         )
-                if last_error is None:
+                if last_error is None and task.mode == "operation" and "execution_mode" in task.options:
+                    try:
+                        await asyncio.to_thread(freeze_frames, item_dict, runs_dir=RUNS_DIR, generation_id=task.id)
+                        _persist_task(task)
+                    except Exception as exc:
+                        last_error = exc
+                        preparation_failure_stage = "frame_archive"
+                if last_error is None and extract_only:
+                    rows = frame_items(item_dict)
+                    failures = [row.get("prepare_error") for row in rows if row.get("prepare_error")]
+                    res = {
+                        "item_id": item_id, "query": item_dict.get("query", ""),
+                        "context": item_dict.get("context", ""), "category": "operation",
+                        "execution_mode": "extract_only", "evaluation_status": "not_evaluated",
+                        "preparation_status": "error" if failures else "ready",
+                        "frame_count": sum(len(row.get("frames") or []) for row in rows),
+                    }
+                    if failures:
+                        res["error"] = "；".join(failures)
+                    if _is_multi_group_operation(item_dict):
+                        res["group_results"] = [{
+                            "group_id": variant.get("group_id"), "group_name": variant.get("group_name"),
+                            "evaluation_status": "not_evaluated", "frame_count": len((variant.get("item") or {}).get("frames") or []),
+                        } for variant in item_dict["group_variants"]]
+                if last_error is None and not extract_only:
                     for attempt in range(2):
                         trace_start = len(pending_judge_traces)
                         try:
@@ -946,16 +997,17 @@ async def _run(
                                     progress=15,
                                     progress_message="正在重新执行单题评测",
                                 )
-                            res = await asyncio.wait_for(
-                                _eval_one(
-                                    task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
-                                    online_runner, process_dims, arbitrator,
-                                    rich_judges=rich_judges,
-                                    visual_judge=visual_judge,
-                                    task=task,
-                                ),
-                                timeout=eval_timeout,
-                            )
+                            async with stage_slot("model", enabled=task.mode == "operation"):
+                                res = await asyncio.wait_for(
+                                    _eval_one(
+                                        task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
+                                        online_runner, process_dims, arbitrator,
+                                        rich_judges=rich_judges,
+                                        visual_judge=visual_judge,
+                                        task=task,
+                                    ),
+                                    timeout=eval_timeout,
+                                )
                             break
                         except asyncio.TimeoutError:
                             last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
@@ -1011,6 +1063,15 @@ async def _run(
                         request_id=request_id,
                     )
             res["index"] = idx
+            if task.mode == "operation":
+                res["execution_mode"] = execution_mode
+                res["evaluation_status"] = ("not_evaluated" if extract_only else "done") if not res.get("error") else "error"
+                res["frame_set_id"] = item_dict.get("frame_set_id")
+                res["frame_sets"] = [row.get("frame_set_id") for row in frame_items(item_dict) if row.get("frame_set_id")]
+                if snapshot:
+                    res["policy_hash"] = snapshot.get("policy_hash")
+                if res.get("error"):
+                    res.setdefault("failure_stage", preparation_failure_stage or ("extraction" if extract_only or last_error and not item_dict.get("frames") else "evaluation"))
             res["duration_s"] = round(time.perf_counter() - started, 1)
             query_images = list(item_dict.get("query_images") or [])
             if query_images:
@@ -1081,7 +1142,7 @@ async def _run(
                     "错误": res.get("error"),
                 },
                 progress=100,
-                progress_message="评测失败" if failed else "评测完成",
+                progress_message=("抽帧失败" if failed else "抽帧完成，待评估") if extract_only else ("评测失败" if failed else "评测完成"),
                 progress_status="error" if failed else "done",
             )
             await task.publish(
@@ -1842,6 +1903,15 @@ def refresh_task_summary(task: Task, cfg: AppConfig) -> dict:
 
 
 def _summarize_operation(task: Task, cfg: AppConfig) -> dict:
+    if task.options.get("execution_mode") == "extract_only":
+        rows = active_results(task.items, task.results)
+        ready = [row for row in rows if not row.get("error")]
+        return {
+            "mode": "operation", "execution_mode": "extract_only", "total": len(rows),
+            "done": len(ready), "failed": len(rows) - len(ready), "evaluated": 0,
+            "prepared": len(ready), "correctness_dist": {}, "completion_rate": None,
+            "frame_count": sum(row.get("frame_count", 0) for row in ready),
+        }
     if task.options.get("operation_layout") == "multi_group":
         results = task.results
         group_rows = [

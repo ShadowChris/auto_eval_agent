@@ -96,6 +96,12 @@ python -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502
 
 裁判调用明细默认开启，写入 `runs/judge_calls/YYYY-MM-DD/{task_id}/judge_calls.jsonl`，保存每轮 LLM 响应、工具完整返回和对话历史。可在 `.env` 设 `AUTO_EVAL_JUDGE_TRACE_ENABLED=false` 关闭，或通过 `AUTO_EVAL_JUDGE_TRACE_DIR` 覆盖默认根目录。旧默认值 `AUTO_EVAL_JUDGE_TRACE=runs/judge_calls.jsonl` 会自动使用新结构，其他自定义文件路径仍兼容精确写入。详见 [项目文档 §9 Q7](docs/项目文档.md)。
 
+新调用在 `llm_rounds[].reasoning_content` 单独保存服务端返回的原生思考文本，
+`thinking` 记录请求模式与实际思考证据，`thinking_summary` 汇总思考 Token 和原文记录情况。
+正文中的 `<analysis>` 仍属于 `content`，不作为原生思考已开启的证据。
+旧日志下载时可根据已有 `reasoning_tokens` 确认思考，但缺失的原文无法补回；
+无思考原文且无正数 Token 时标记为未确认，不等于关闭。字段说明见[任务类评测文档](docs/操作类评测.md#裁判原生思考日志)。
+
 ---
 
 ## 目录

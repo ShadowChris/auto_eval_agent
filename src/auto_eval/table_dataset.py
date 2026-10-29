@@ -631,7 +631,8 @@ def convert_table(
         item["video_path"] = video_path
         if video_mapping_warning:
             row_warnings.append(video_mapping_warning)
-        if not _video_exists(video_path, project_root=project_root):
+        # URL 延迟到开始评估时下载、校验，导入时不作本地存在性判断。
+        if not video_path.lower().startswith(("http://", "https://")) and not _video_exists(video_path, project_root=project_root):
             recovered_video_path = _recover_video_path(
                 row,
                 sequence=sequence or id_suffix,
