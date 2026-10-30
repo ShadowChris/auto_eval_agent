@@ -8,13 +8,43 @@
 
 ## 1. 确认环境
 
-激活平时运行项目的 Conda/venv 环境，进入项目根目录：
+激活平时运行项目的 Conda/venv 环境，进入项目根目录，在普通用户终端执行
+下面的命令，**不要在这些查询命令前加 sudo**：
 
 ```bash
+# 运行用户 → User
 whoami
-pwd
+
+# 项目根目录的绝对路径 → WorkingDirectory
+pwd -P
+
+# 当前环境的 Python → ExecStart 开头的可执行文件路径
 python -c "import sys; print(sys.executable)"
+
+# 同一环境的 bin 目录 → Environment 中 PATH 的第一段
+python -c "import os, sys; print(os.path.dirname(sys.executable))"
 ```
+
+命令输出与配置字段的对应关系：
+
+| 查询内容 | 输出示例 | service 中怎么填 |
+| --- | --- | --- |
+| `whoami` | `eval` | `User=eval` |
+| `pwd -P` | `/opt/auto_eval_agent` | `WorkingDirectory=/opt/auto_eval_agent` |
+| `sys.executable` | `/opt/miniconda3/envs/eval/bin/python` | 替换 `ExecStart=` 后的 Python 路径，其余启动参数保留 |
+| `os.path.dirname(sys.executable)` | `/opt/miniconda3/envs/eval/bin` | 替换 `Environment="PATH=..."` 的第一段，后面的系统命令目录保留 |
+
+其中 `User` 是 Linux 用户名，不是 Conda 环境名，也不是服务名。
+Python 路径应指向实际安装项目依赖的环境；不需要把 `conda activate` 写进 service。
+例如 Python 的查询结果是 `.../envs/eval/bin/python`，PATH 第一段就是
+`.../envs/eval/bin`，不要把 Python 文件本身填进 PATH。
+
+其余字段可以先保持模板默认值，无需另外查询：
+
+- `Description`：服务说明文字，可自定义，不影响服务名称。
+- `--port 8502`：Web 端口；需要换端口时手动修改，不要与其他服务冲突。
+- `--host 0.0.0.0`：允许远程访问；`--workers 1` 保持单 Web 进程，不是评估并发数。
+- `Restart=always`、`RestartSec=5`、`WantedBy=multi-user.target`：保留自动拉起和开机自启配置。
 
 依赖须安装在这个 Python 环境中。首次部署可在项目根目录执行：
 
@@ -32,7 +62,7 @@ cp -i deploy/auto-eval-operation.service.template deploy/auto-eval-operation.ser
 vi deploy/auto-eval-operation.service
 ```
 
-根据第 1 步的输出，替换三类示例值：
+根据第 1 步的对应表，修改以下字段：
 
 - `User`：运行项目的普通用户。
 - `WorkingDirectory`：项目根目录的绝对路径。
