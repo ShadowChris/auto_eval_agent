@@ -1,0 +1,23 @@
+# 模板：先复制为 auto-eval-operation.service，再修改用户和路径后安装。
+# 下列 ubuntu 和 /home/ubuntu/... 均为示例，不能原样用于其他环境。
+# 不使用自动替换脚本，按同目录 README.md 手动修改即可。
+[Unit]
+Description=Auto Eval Operation Web Service
+
+[Service]
+# 使用日常运行项目的普通用户；需能读取数据、.env 并写入 runs/。
+User=ubuntu
+# 项目根目录，等同于启动前 cd 到这里。
+WorkingDirectory=/home/ubuntu/auto_eval_agent
+# 把 Python 环境的 bin 加入 PATH，供抽帧时查找 FFmpeg 等命令。
+Environment="PATH=/home/ubuntu/miniconda3/envs/auto_eval/bin:/usr/local/bin:/usr/bin:/bin"
+# 使用环境中 Python 的绝对路径，无需 conda activate；-u 让日志及时输出。
+# 0.0.0.0 允许远程访问；workers=1 是 Web 进程数，不是评估并发数。
+ExecStart=/home/ubuntu/miniconda3/envs/auto_eval/bin/python -u -m uvicorn auto_eval.web.server:app --host 0.0.0.0 --port 8502 --workers 1
+# 进程退出后等待 5 秒重新启动；手动 systemctl stop 不会触发重启。
+Restart=always
+RestartSec=5
+
+[Install]
+# 配合 systemctl enable，实现开机自启。
+WantedBy=multi-user.target
