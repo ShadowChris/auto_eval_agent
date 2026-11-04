@@ -36,9 +36,19 @@ _CONTEXT_PREFIX = "@context:"
 MAX_QUERY_IMAGES = 4
 
 
-def _query_images(obj: dict) -> list[str]:
-    """读取可选用户输入图片数组；数据集最多四张，Web 手动上传目前单图。"""
+def operation_query_images(obj: dict) -> list[str]:
+    """读取可选图片路径/链接；标准数组优先，兼容单图字段。"""
     value = obj.get("query_images")
+    if value is None or value == []:
+        for field in ("query_image_path", "attachment_path"):
+            single = obj.get(field)
+            if single is None or single == "":
+                continue
+            if not isinstance(single, str):
+                raise ValueError(f"{field} 必须是图片路径或 HTTP/HTTPS 链接字符串")
+            if single.strip():
+                value = [single]
+                break
     if value is None:
         return []
     if not isinstance(value, list):
@@ -257,7 +267,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item.update(video_times)
             if mode == "operation":
                 try:
-                    query_images = _query_images(obj)
+                    query_images = operation_query_images(obj)
                 except ValueError as exc:
                     errors.append(f"第 {ln} 行 {exc}")
                     continue

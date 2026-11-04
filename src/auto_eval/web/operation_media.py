@@ -6,10 +6,14 @@ import json
 import math
 import os
 import re
+import tempfile
+import time
 from numbers import Real
 from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote, urlsplit
+
+import httpx
 
 from ..media import (
     DEFAULT_TASK_START_TIME,
@@ -20,6 +24,7 @@ from ..media import (
 )
 from ..config import VisualModeProfile
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from .parse_input import operation_query_images
 from .remote_video import is_remote_video_url, local_video_input
 
 
@@ -28,6 +33,8 @@ QUERY_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_QUERY_IMAGES = 4
 MAX_QUERY_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_QUERY_IMAGE_PIXELS = 25_000_000
+QUERY_IMAGE_DOWNLOAD_TIMEOUT_S = 30
+QUERY_IMAGE_DOWNLOAD_TOTAL_S = 60
 _TASK_TIME_FIELDS = ("task_start_time", "task_end_time")
 _CONTENT_TIME_FIELDS = ("content_start_time", "content_end_time")
 
@@ -98,7 +105,10 @@ def resolve_operation_query_image_path(
     *,
     base_dir: Path = PROJECT_ROOT,
 ) -> Path:
-    """解析并校验任务类用户输入图片，不允许越过录屏媒体根目录。"""
+    """读取可信用户的图片链接；本地图片仍按原有媒体根目录校验。"""
+    raw_path = raw_path.strip()
+    if raw_path.lower().startswith(("http://", "https://")):
+        return _download_operation_query_image(raw_path, base_dir=base_dir)
     candidate = Path(raw_path).expanduser()
     roots = operation_video_roots(base_dir)
     if candidate.is_absolute():
@@ -145,6 +155,65 @@ def resolve_operation_query_image_path(
     return candidate
 
 
+def _download_operation_query_image(url: str, *, base_dir: Path) -> Path:
+    """直接下载 HTTP/HTTPS 图片，不做域名或内网限制；保留可供历史预览的副本。"""
+    from PIL import Image, UnidentifiedImageError
+
+    directory = base_dir.resolve() / "runs" / "uploads" / "query_images" / "remote"
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    destination: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory, prefix="remote_", suffix=".part", delete=False) as handle:
+            temporary = Path(handle.name)
+            started = time.monotonic()
+            with httpx.stream(
+                "GET", url, follow_redirects=True,
+                timeout=httpx.Timeout(QUERY_IMAGE_DOWNLOAD_TIMEOUT_S, connect=10),
+            ) as response:
+                response.raise_for_status()
+                content_length = response.headers.get("content-length", "")
+                if content_length.isdigit() and int(content_length) > MAX_QUERY_IMAGE_BYTES:
+                    raise ValueError("用户输入图片超过 10MB 限制")
+                size = 0
+                for chunk in response.iter_bytes():
+                    if time.monotonic() - started > QUERY_IMAGE_DOWNLOAD_TOTAL_S:
+                        raise ValueError("用户输入图片下载超时")
+                    size += len(chunk)
+                    if size > MAX_QUERY_IMAGE_BYTES:
+                        raise ValueError("用户输入图片超过 10MB 限制")
+                    handle.write(chunk)
+        # 用实际图片格式确定后缀，支持带签名参数、无扩展名及跳转的链接。
+        with Image.open(temporary) as image:
+            suffix = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}.get(image.format)
+            if suffix is None:
+                raise ValueError("不支持的用户输入图片格式；支持 JPEG、PNG、WEBP")
+        destination = temporary.with_suffix(suffix)
+        temporary.replace(destination)
+        result = resolve_operation_query_image_path(str(destination), base_dir=base_dir)
+        destination = None  # 校验通过的完整图片留下供模型和历史预览使用。
+        return result
+    except httpx.HTTPStatusError as exc:
+        raise ValueError(
+            f"用户输入图片下载失败：HTTP {exc.response.status_code} {exc.response.reason_phrase}"
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise ValueError("用户输入图片下载超时") from exc
+    except httpx.InvalidURL as exc:
+        raise ValueError("用户输入图片链接无效") from exc
+    except httpx.RequestError as exc:
+        raise ValueError(f"用户输入图片下载失败：{type(exc).__name__}") from exc
+    except Image.DecompressionBombError as exc:
+        raise ValueError("用户输入图片尺寸无效或像素数超过 2500 万") from exc
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError("用户输入图片无法解析：链接未返回有效图片或本地副本无法保存") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        if destination is not None:
+            destination.unlink(missing_ok=True)
+
+
 def prepare_operation_query_images(
     item: dict,
     *,
@@ -152,14 +221,23 @@ def prepare_operation_query_images(
 ) -> dict:
     """把 query_images 归一为已校验的绝对路径，快照中不保存 base64。"""
     prepared = dict(item)
-    raw_images = list(item.get("query_images") or [])
+    raw_images = operation_query_images(item)
     if len(raw_images) > MAX_QUERY_IMAGES:
         raise ValueError(f"query_images 最多支持 {MAX_QUERY_IMAGES} 张")
     if raw_images:
-        prepared["query_images"] = [
-            str(resolve_operation_query_image_path(str(path), base_dir=base_dir))
-            for path in raw_images
-        ]
+        paths: list[str] = []
+        downloaded: list[Path] = []
+        try:
+            for raw in raw_images:
+                path = resolve_operation_query_image_path(raw, base_dir=base_dir)
+                paths.append(str(path))
+                if raw.lower().startswith(("http://", "https://")):
+                    downloaded.append(path)
+        except Exception:
+            for path in downloaded:
+                path.unlink(missing_ok=True)
+            raise
+        prepared["query_images"] = paths
     else:
         prepared.pop("query_images", None)
     return prepared
