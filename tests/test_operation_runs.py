@@ -258,6 +258,7 @@ async def test_fork_does_not_mutate_source_and_preserves_time_ids_and_inputs(run
     assert not child.results[0].get("error"), child.results
     if mode != "extract_only":
         assert child.results[0]["correctness"] == "ok"
+        assert child.results[0]["frame_count"] == 1
         assert observed_times == [parent.created_at]
         assert child.options["evaluation_snapshot"]["policy_hash"] == evaluation_snapshot(cfg)["policy_hash"]
     else:

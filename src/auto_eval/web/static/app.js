@@ -1064,7 +1064,7 @@ createApp({
         if (loadedTaskOptions.value.execution_mode === "extract_only") return [
           { key: "item_id", label: "题号（ID）" }, { key: "query", label: "操作意图" },
           ...contextCols, { key: "preparation_status", label: "抽帧状态" },
-          { key: "frame_count", label: "帧数" }, { key: "frame_set_id", label: "抽帧版本" },
+          { key: "frame_count", label: "抽帧张数" }, { key: "frame_set_id", label: "抽帧版本" },
           { key: "evaluation_status", label: "评估状态" }, { key: "duration_s", label: "耗时（秒）" },
         ];
       if (mode.value === "operation")
@@ -1074,6 +1074,7 @@ createApp({
           ...queryImageCols,
           ...contextCols,
           { key: "answer", label: "Agent 自述" },
+          { key: "frame_count", label: "抽帧张数" },
           ...routeCols,
           { key: "correctness", label: "完成判定" },
           { key: "issue_types", label: "问题类型" },
@@ -1173,7 +1174,7 @@ createApp({
       const compact = c.rubricDim
         || [
           "correctness", "winner", "total", "used_search", "truncated", "arbitrated",
-          "agree", "latency_s", "bidirectional_consistent", "is_low_level",
+          "agree", "latency_s", "bidirectional_consistent", "is_low_level", "frame_count",
           "execution_routes",
           "card_presence", "card_count", "superlink_presence",
           "superlink_count", "answer_coverage", "needs_review", "problem_solved",

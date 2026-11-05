@@ -1053,6 +1053,7 @@ async def _run(
             res["index"] = idx
             if task.mode == "operation":
                 res["execution_mode"] = execution_mode
+                res["frame_count"] = sum(len(row.get("frames") or []) for row in frame_items(item_dict))
                 res["evaluation_status"] = ("not_evaluated" if extract_only else "done") if not res.get("error") else "error"
                 res["frame_set_id"] = item_dict.get("frame_set_id")
                 res["frame_sets"] = [row.get("frame_set_id") for row in frame_items(item_dict) if row.get("frame_set_id")]

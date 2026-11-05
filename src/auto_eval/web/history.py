@@ -51,6 +51,7 @@ from .operation_export_fields import (
     operation_result_identity_fields,
     operation_user_result_display_row as _operation_user_result_display_row,
 )
+from .operation_runs import frame_items
 
 
 HISTORY_DIR = RUNS_DIR / "web_history"
@@ -907,6 +908,14 @@ def _with_operation_compat(data: dict) -> dict:
 
     normalized = dict(data)
     results = [normalize_row(original) for original in data.get("results") or []]
+    # 与抽帧清单共用原始帧列表；旧快照读取时补齐，不回写磁盘。
+    items = data.get("items") or []
+    for row in results:
+        index = row.get("index")
+        if str(index).isdigit() and 0 <= int(index) < len(items):
+            row["frame_count"] = sum(
+                len(item.get("frames") or []) for item in frame_items(items[int(index)])
+            )
     normalized["results"] = results
     summary = dict(data.get("summary") or {})
     current_results = [
@@ -1163,6 +1172,7 @@ _OPERATION_EXPORT_COLUMNS = (
     "来源批次ID",
     "query_images",
     "query_image_count",
+    "抽帧张数",
     "context",
     "answer",
     "Provider",
@@ -1287,6 +1297,7 @@ def _operation_export_rows(
             "query_image_count": result.get("query_image_count") or len(
                 item.get("query_images") or []
             ),
+            "抽帧张数": len(item.get("frames") or []),
             "video_path": source_video_path,
             "分享链接": _first_export_value(
                 source.get("分享链接"),

@@ -1240,7 +1240,7 @@
                   <div
                     v-else
                     class="cell-clamp"
-                    :class="{'cell-full': c.key==='item_id', 'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
+                    :class="{'cell-full': c.key==='item_id', 'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent','frame_count'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
                   >{{ cell(r, c) }}</div>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
