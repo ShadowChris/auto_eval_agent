@@ -30,33 +30,18 @@ def remote_config_file(tmp_path, monkeypatch):
     return path
 
 
-def test_allowed_hosts_falls_back_to_yaml_when_env_unset(remote_config_file):
-    assert remote_video.load_remote_video_config().allowed_hosts == ("internal.test",)
+@pytest.mark.parametrize("env", [None, "", "*", "other.internal", "https://old.test/a"])
+def test_legacy_allowlist_configuration_is_ignored(remote_config_file, monkeypatch, env):
+    if env is not None:
+        monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", env)
+    assert remote_video.load_remote_video_config().max_size_mb == 500
 
 
-def test_allowed_hosts_env_overrides_yaml_and_normalizes_values(remote_config_file, monkeypatch):
-    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", " Other.INTERNAL , 10.20.30.40,other.internal, ,2001:0db8::1 ")
-    assert remote_video.load_remote_video_config().allowed_hosts == (
-        "other.internal", "10.20.30.40", "2001:db8::1",
-    )
-
-
-@pytest.mark.parametrize("value", ["", " ", ", ,"])
-def test_empty_allowed_hosts_env_clears_yaml_allowlist(remote_config_file, monkeypatch, value):
-    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", value)
-    assert remote_video.load_remote_video_config().allowed_hosts == ()
-
-
-@pytest.mark.parametrize("value", [
-    "https://internal.test/a?token=secret", "internal.test:9000", "10.20.30.40:9000",
-    "*.internal.test", "10.0.0.0/8", "internal.test/file", "user@internal.test",
-    "internal test", "[2001:db8::1]",
-])
-def test_invalid_allowed_hosts_env_has_actionable_error(remote_config_file, monkeypatch, value):
-    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", value)
-    with pytest.raises(ValueError, match="REMOTE_VIDEO_ALLOWED_HOSTS") as error:
+@pytest.mark.parametrize("content", ["max_size_mb: 0", "connect_timeout_s: true", "unknown_field: 1"])
+def test_other_remote_video_config_validation_is_preserved(remote_config_file, content):
+    remote_config_file.write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError):
         remote_video.load_remote_video_config()
-    assert "secret" not in str(error.value)
 
 
 @pytest.fixture
@@ -79,7 +64,8 @@ def network(monkeypatch):
     return install
 
 
-def test_env_allowlist_is_applied_to_redirected_download(remote_config_file, monkeypatch, tmp_path, network):
+@pytest.mark.parametrize("env", [None, "", "other.internal", "*"])
+def test_redirect_to_internal_host_needs_no_allowlist(remote_config_file, monkeypatch, tmp_path, network, env):
     requests = []
 
     def handler(request):
@@ -88,7 +74,8 @@ def test_env_allowlist_is_applied_to_redirected_download(remote_config_file, mon
             return httpx.Response(302, headers={"location": "http://internal.test/video.mp4"})
         return httpx.Response(200, content=b"video")
 
-    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", "internal.test")
+    if env is not None:
+        monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", env)
     network(handler)
     result = remote_video.download_remote_video("https://cdn.test/a", tmp_path)
     assert result.read_bytes() == b"video"
@@ -96,21 +83,18 @@ def test_env_allowlist_is_applied_to_redirected_download(remote_config_file, mon
     assert requests[-1].headers["host"] == "internal.test"
 
 
-def test_empty_env_blocks_previously_yaml_allowed_internal_host(remote_config_file, monkeypatch, tmp_path, network):
-    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", "")
-    network(lambda _: pytest.fail("不应发送未放行的内网请求"))
-    with pytest.raises(ValueError, match="REMOTE_VIDEO_ALLOWED_HOSTS"):
-        remote_video.download_remote_video("http://internal.test/video.mp4", tmp_path)
-
-
-def test_ipv6_allowlist_matches_equivalent_url_address(remote_config_file, monkeypatch, tmp_path, network):
-    monkeypatch.setenv("REMOTE_VIDEO_ALLOWED_HOSTS", "2001:db8::1")
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:9000/a", "http://169.254.169.254/a", "http://internal.test/a",
+    "http://10.20.30.40/a", "http://192.168.1.2/a", "https://cdn.test/a",
+    "http://[::1]:9000/a", "http://[fd00::1]/a", "http://[2001:db8::1]/a",
+])
+def test_all_hosts_are_allowed_by_default(tmp_path, network, url):
     network(lambda _: httpx.Response(200, content=b"video"))
-    result = remote_video.download_remote_video("http://[2001:0db8::1]/video.mp4", tmp_path)
+    result = remote_video.download_remote_video(url, tmp_path)
     assert result.read_bytes() == b"video"
 
 
-def test_download_preserves_signed_query_and_pins_checked_ip(tmp_path, network):
+def test_download_preserves_signed_query_host_and_tls_server_name(tmp_path, network):
     requests = []
     def handler(request):
         requests.append(request)
@@ -125,28 +109,39 @@ def test_download_preserves_signed_query_and_pins_checked_ip(tmp_path, network):
     assert not (tmp_path / "video.part").exists()
 
 
-@pytest.mark.parametrize("url", ["http://127.0.0.1/a", "http://169.254.169.254/a", "http://internal.test/a", "https://user:password@cdn.test/a"])
-def test_unsafe_urls_are_blocked_before_request(tmp_path, network, url):
-    network(lambda _: pytest.fail("不应发送不安全请求"))
+@pytest.mark.parametrize("url", [
+    "file:///tmp/a.mp4", "ftp://cdn.test/a", "obs://bucket/a",
+    "https:///", "https://user:password@cdn.test/a",
+])
+def test_invalid_urls_are_still_blocked_before_request(tmp_path, network, url):
+    network(lambda _: pytest.fail("不应发送无效请求"))
     with pytest.raises(ValueError):
         remote_video.download_remote_video(url, tmp_path)
 
 
-def test_redirect_target_is_checked_and_explicit_internal_host_can_be_allowed(tmp_path, network):
+@pytest.mark.parametrize("target", ["file:///tmp/a", "https://user:password@cdn.test/a"])
+def test_redirect_still_validates_url_format(tmp_path, network, target):
     requests = []
     def handler(request):
         requests.append(request)
-        if len(requests) == 1:
-            return httpx.Response(302, headers={"location": "http://internal.test/file.mp4"})
-        return httpx.Response(200, content=b"video")
+        return httpx.Response(302, headers={"location": target})
     network(handler)
-    with pytest.raises(ValueError, match="非公网"):
+    with pytest.raises(ValueError):
         remote_video.download_remote_video("https://cdn.test/file.mp4", tmp_path)
     assert len(requests) == 1
-    requests.clear()
-    cfg = replace(remote_video.RemoteVideoConfig(), allowed_hosts=("internal.test",))
-    assert remote_video.download_remote_video("https://cdn.test/file.mp4", tmp_path, config=cfg).is_file()
-    assert requests[-1].url.host == "10.0.0.1"
+
+
+@pytest.mark.parametrize("addresses", [[], None])
+def test_unresolvable_hosts_have_clear_errors(tmp_path, monkeypatch, network, addresses):
+    network(lambda _: pytest.fail("域名无法解析时不应发送请求"))
+    def dns(*args, **kwargs):
+        if addresses is None:
+            raise remote_video.socket.gaierror("not found")
+        return addresses
+    monkeypatch.setattr(remote_video.socket, "getaddrinfo", dns)
+    with pytest.raises(ValueError, match="域名无法解析"):
+        remote_video.download_remote_video("http://missing.test/a", tmp_path)
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("status,body,headers,expected", [

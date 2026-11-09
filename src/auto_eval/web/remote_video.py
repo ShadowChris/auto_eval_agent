@@ -5,9 +5,7 @@ import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
-import ipaddress
 import math
-import os
 from pathlib import Path
 import shutil
 import socket
@@ -45,51 +43,21 @@ class RemoteVideoConfig:
     max_attempts: int = 3
     retry_delay_s: float = 1
     stale_after_hours: float = 24
-    allowed_hosts: tuple[str, ...] = ()
-
-
-def _normalize_allowed_hosts(values: object, source: str) -> tuple[str, ...]:
-    message = f"{source} 必须填写域名或 IP，不含协议、端口、路径或通配符"
-    if not isinstance(values, (list, tuple)):
-        raise ValueError(message)
-    hosts: list[str] = []
-    for value in values:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(message)
-        host = value.strip().lower()
-        if any(char.isspace() or char in "/\\*?#@[]%" for char in host):
-            raise ValueError(message)
-        try:
-            host = str(ipaddress.ip_address(host))
-        except ValueError:
-            if ":" in host:
-                raise ValueError(message) from None
-            try:
-                host = httpx.URL(f"http://{host}").host
-            except httpx.InvalidURL:
-                raise ValueError(message) from None
-            if not host:
-                raise ValueError(message)
-        hosts.append(host)
-    return tuple(dict.fromkeys(hosts))
 
 
 def load_remote_video_config() -> RemoteVideoConfig:
     data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
     data = data or {}
-    known = {field.name for field in fields(RemoteVideoConfig)}
-    if not isinstance(data, dict) or set(data) - known:
+    if not isinstance(data, dict):
         raise ValueError("remote_video.yaml 配置字段无效")
-    # 未设置时兼容 YAML；显式留空会清空白名单，而不是意外回退到旧配置。
-    env_hosts = os.environ.get("REMOTE_VIDEO_ALLOWED_HOSTS")
-    if env_hosts is not None:
-        values = [part.strip() for part in env_hosts.split(",") if part.strip()]
-        data["allowed_hosts"] = _normalize_allowed_hosts(values, "REMOTE_VIDEO_ALLOWED_HOSTS")
-    else:
-        data["allowed_hosts"] = _normalize_allowed_hosts(data.get("allowed_hosts", ()), "allowed_hosts")
+    # 可信用户场景默认允许所有主机；忽略旧配置，升级时无需清理 YAML 或 .env。
+    data.pop("allowed_hosts", None)
+    known = {field.name for field in fields(RemoteVideoConfig)}
+    if set(data) - known:
+        raise ValueError("remote_video.yaml 配置字段无效")
     data.setdefault("download_concurrency", load_pipeline_config().download_concurrency)
     cfg = RemoteVideoConfig(**data)
-    for name in known - {"allowed_hosts"}:
+    for name in known:
         value = getattr(cfg, name)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ValueError(f"远程视频配置 {name} 必须是有限数字")
@@ -116,7 +84,8 @@ def video_reference_for_log(value: str) -> str:
         return "<无效视频 URL>"
 
 
-def _checked_addresses(url: str, cfg: RemoteVideoConfig) -> tuple[httpx.URL, list[str]]:
+def _resolve_video_addresses(url: str) -> tuple[httpx.URL, list[str]]:
+    """解析 HTTP/HTTPS 视频地址，不限制域名或公网/内网 IP。"""
     try:
         parsed = httpx.URL(url)
         if parsed.scheme not in {"http", "https"} or not parsed.host or parsed.userinfo:
@@ -127,14 +96,8 @@ def _checked_addresses(url: str, cfg: RemoteVideoConfig) -> tuple[httpx.URL, lis
                 type=socket.SOCK_STREAM,
             )
         ))
-        host = parsed.host.lower()
-        try:
-            host = str(ipaddress.ip_address(host))
-        except ValueError:
-            pass
-        allowed = host in {host.lower() for host in cfg.allowed_hosts}
-        if not addresses or (not allowed and any(not ipaddress.ip_address(ip).is_global for ip in addresses)):
-            raise ValueError("视频链接指向非公网地址；内网 OBS 请在 .env 配置 REMOTE_VIDEO_ALLOWED_HOSTS（或 YAML allowed_hosts）")
+        if not addresses:
+            raise ValueError("视频 URL 无效或域名无法解析")
         return parsed, addresses
     except (httpx.InvalidURL, socket.gaierror) as exc:
         raise ValueError("视频 URL 无效或域名无法解析") from exc
@@ -169,10 +132,10 @@ def download_remote_video(
             _check_stop(cancel, deadline)
             current_url = url.strip()
             try:
-                # 禁用环境代理，确保连接到已经校验的 IP；HTTPS 保留原域名用于证书校验。
+                # 保留原有直连方式；HTTPS 保留原域名用于证书校验。
                 with httpx.Client(trust_env=False, follow_redirects=False) as client:
                     for redirect in range(cfg.max_redirects + 1):
-                        parsed, addresses = _checked_addresses(current_url, cfg)
+                        parsed, addresses = _resolve_video_addresses(current_url)
                         remaining = max(0.1, deadline - time.monotonic())
                         pinned = parsed.copy_with(host=addresses[attempt % len(addresses)])
                         request = client.build_request(
