@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
+
+logger = logging.getLogger(__name__)
 
 from ..config import load_config
 from ..media import probe_duration
@@ -44,6 +47,7 @@ from .video_prepare import (
     resolve_operation_video_path,
 )
 from .runner import (
+    all_items_healthy,
     build_rerun_batches,
     reset_item_progress,
     run_eval,
@@ -51,8 +55,14 @@ from .runner import (
     spawn_background,
 )
 from . import scheduler
-from .scheduler import EVAL_SCHEDULER, MODEL_LIMITER, PIPELINE_LIMITER
+from .scheduler import (
+    EVAL_SCHEDULER,
+    MODEL_LIMITER,
+    PIPELINE_LIMITER,
+    PREPARE_LIMITER,
+)
 from .tasks import (
+    ItemGroupingError,
     TASKS,
     get_task,
     get_task_async,
@@ -60,6 +70,7 @@ from .tasks import (
     new_task,
     peek_task,
     peek_task_async,
+    retire_task,
 )
 
 # auto_eval_agent/ 目录（src/auto_eval/web/server.py 往上 4 层）
@@ -261,11 +272,36 @@ def _settings_payload(*, persisted: bool | None = None) -> dict:
             for e in cfg().endpoints
         ],
         "queue": MODEL_LIMITER.stats(),       # 兼容键：模型调用级（速率/在途/排队）
-        "pipeline": PIPELINE_LIMITER.stats(),  # 预处理并发级
+        "pipeline": PIPELINE_LIMITER.stats(),  # 整题流水线准入
+        "prepare": PREPARE_LIMITER.stats(),    # 视频下载/探测/抽帧并发
+        "process_memory": _process_memory_status(),
     }
     if persisted is not None:
         payload["persisted"] = persisted
     return payload
+
+
+def _process_memory_status() -> dict[str, int | None]:
+    """Read Linux process memory without adding psutil as a runtime dependency."""
+    rss: int | None = None
+    peak: int | None = None
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8")
+    except OSError:
+        return {"rss_bytes": None, "peak_rss_bytes": None}
+    for line in status.splitlines():
+        key, _, value = line.partition(":")
+        if key not in {"VmRSS", "VmHWM"}:
+            continue
+        parts = value.split()
+        if not parts or not parts[0].isdigit():
+            continue
+        size = int(parts[0]) * 1024
+        if key == "VmRSS":
+            rss = size
+        else:
+            peak = size
+    return {"rss_bytes": rss, "peak_rss_bytes": peak}
 
 
 @app.get("/api/settings")
@@ -487,19 +523,24 @@ async def api_eval_stop(task_id: str):
 
 @app.post("/api/eval/items")
 async def api_eval_items(req: EvalItemsReq):
-    """向 task 批量更新/追加 items：按 id 匹配，命中原位替换、未命中追加末尾。
+    """向 task 批量更新/追加 items，并把整次更新作为一个队列 job。
 
-    task_id 不存在则用传入 id 新建任务（upsert）。本次全部 items 作为一个
-    串行会话在后台评测（批次间并行、后完成者按 index 覆盖）；接口不流式，
-    立即返回合并摘要，结果经 GET /api/eval/item/result 轮询获取。
+    请求内按 is_start/is_end 切 session；没有标记时每条独立。按 id 命中则
+    原位替换并重评该轮所在 session 的后缀，未命中则追加。接口只返回排队
+    状态、task_id 和请求 query id，结果经任务/单题接口轮询。
     """
     task_id = _validate_param_id(req.task_id, "task_id")
     if not req.items:
         raise HTTPException(400, "items 为空")
     _validate_batch_item_ids(req.items)
     app_cfg = cfg()
-    task = get_task(task_id)
+    task = await get_task_async(task_id)
     created = task is None
+    if task is not None and (
+        task.active_runs > 0
+        or task.status in {"pending", "queued", "running"}
+    ):
+        raise HTTPException(409, "该任务已在运行或排队，结束或取消后才能提交更新")
     mode = req.mode if created else task.mode
     if created:
         if req.mode is None:
@@ -520,29 +561,100 @@ async def api_eval_items(req: EvalItemsReq):
             dict(req.options),
             dataset_name=req.dataset_name.strip(),
             task_id=task_id,
+            persist=False,
         )
-    batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
+    try:
+        batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
+    except ItemGroupingError as exc:
+        if created:
+            TASKS.pop(task.id, None)
+        raise HTTPException(422, str(exc)) from exc
+    query_ids = [item["id"] for item in req.items]
+    batches = build_rerun_batches(task, [idx for idx, _ in batch])
+    rerun_ids = [
+        task.items[idx]["id"]
+        for rb in batches
+        for idx, _ in rb.batch
+    ]
     save_task(task)  # items 定义立即落快照；结果仍在各题完成后才覆盖合并
     effective_options = {**task.options, **req.options}
-    task.active_runs += 1  # R1：提交时同步 pin（同 api_eval；run_update_batch 的 finally 负责解除）
+    reset_item_progress(task, sorted({idx for rb in batches for idx, _ in rb.batch}))
+    prior_status = task.status if task.status in {"done", "error"} else "done"
 
-    async def _start_later():
-        # 先把合并结果响应出去，再启动可能较重的评测（与 /api/eval 同模式）。
-        await asyncio.sleep(0.05)
-        await run_update_batch(
-            task,
-            app_cfg,
-            batch,
-            options=effective_options,
-            manage_status=created,
-        )
+    async def run_items_job(parent: Task, _cfg: object) -> None:
+        # enqueue 的 pin 只保护排队期；开跑后由每个 session 批各自 pin。
+        parent.active_runs = max(0, parent.active_runs - 1)
+        if created:
+            parent.status = "running"
+            parent.error = None
+            await parent.publish(
+                "start", {"total": len(parent.items), "mode": parent.mode}
+            )
+            save_task(parent)
+        else:
+            parent.status = prior_status
+        for _rb in batches:
+            parent.active_runs += 1
+        failures = await asyncio.gather(*[
+            run_update_batch(
+                parent,
+                _cfg,
+                rb.batch,
+                options=effective_options,
+                manage_status=False,
+                initial_summary=rb.initial_summary,
+                initial_turn=rb.initial_turn,
+                mark_interrupted=not created,
+            )
+            for rb in batches
+        ], return_exceptions=True)
+        if created:
+            if parent.stopped:
+                parent.status = "error"
+                parent.error = parent.error or "用户停止评测，保留已完成结果"
+                event = "error"
+                payload = {"message": parent.error, "stopped": True}
+            elif all_items_healthy(parent):
+                parent.status = "done"
+                parent.error = None
+                event = "done"
+                payload = {
+                    "summary": parent.summary,
+                    "total": len(parent.items),
+                }
+            else:
+                parent.status = "error"
+                parent.error = parent.error or "部分题目评测失败"
+                event = "error"
+                payload = {"message": parent.error}
+            save_task(parent)
+            parent._fanout(event, payload)
+            retire_task(parent)
+        else:
+            for result in failures:
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "更新批异常: task_id=%s",
+                        parent.id,
+                        exc_info=(
+                            type(result),
+                            result,
+                            result.__traceback__,
+                        ),
+                    )
 
-    spawn_background(_start_later())
+    queue_position = EVAL_SCHEDULER.enqueue(
+        task, app_cfg, run_items_job, kind="items"
+    )
     return {
         "task_id": task.id,
+        "status": task.status,
+        "query_ids": query_ids,
+        "queue_position": queue_position,
         "created": created,
         "replaced_ids": replaced_ids,
         "added_ids": added_ids,
+        "rerun_ids": rerun_ids,
         "total_items": len(task.items),
     }
 

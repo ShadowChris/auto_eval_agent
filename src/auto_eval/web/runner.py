@@ -34,12 +34,18 @@ from .video_prepare import (
     prepare_session_rich_content_item,
     prepare_session_visual_compare_item,
 )
-from .scheduler import MODEL_LIMITER, PIPELINE_LIMITER, get_settings
+from .scheduler import (
+    MODEL_LIMITER,
+    PIPELINE_LIMITER,
+    PREPARE_LIMITER,
+    get_settings,
+)
 from .tasks import EvalStopped, Task, retire_task, upsert_result_by_index
 
 
 logger = logging.getLogger(__name__)
 MAX_PROGRESS_EVENTS_PER_ITEM = 100
+_PREPARE_TASKS: set[asyncio.Task] = set()
 
 
 # 持久化节流：普通调用走 debounce（默认 2s，环境变量可调）或每 N 题强刷一次，
@@ -152,6 +158,53 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
         media=item.get("media") or [],
         metadata=meta,
     )
+
+
+async def _run_prepare_job(
+    prepare_call: Callable[..., dict],
+    item: dict,
+    *,
+    timeout_s: float,
+    **kwargs,
+) -> dict:
+    """Limit video preparation and retain the slot until the thread exits."""
+    await PREPARE_LIMITER.acquire()
+    try:
+        worker = asyncio.create_task(
+            asyncio.to_thread(prepare_call, item, **kwargs)
+        )
+    except BaseException:
+        PREPARE_LIMITER.release()
+        raise
+    _PREPARE_TASKS.add(worker)
+    abandoned = False
+
+    def finish(done: asyncio.Task) -> None:
+        _PREPARE_TASKS.discard(done)
+        try:
+            result = done.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        else:
+            if abandoned and isinstance(result, dict):
+                try:
+                    cleanup_item_video_downloads(result)
+                except Exception:
+                    logger.exception("cleanup abandoned video download failed")
+        finally:
+            PREPARE_LIMITER.release()
+
+    worker.add_done_callback(finish)
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(worker),
+            timeout=timeout_s,
+        )
+    except BaseException:
+        abandoned = True
+        raise
 
 
 def _mark_interrupted_if_stuck(task: Task) -> bool:
@@ -417,16 +470,16 @@ def _make_item_evaluator(
                         if task.mode == "compare"
                         else prepare_session_rich_content_item
                     )
-                    prepared = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            prepare_call,
-                            item_dict,
-                            session_name=task.session_name,
-                            item_index=idx,
-                            total_items=len(task.items),
-                            profile=rich_profile,
+                    prepared = await _run_prepare_job(
+                        prepare_call,
+                        item_dict,
+                        timeout_s=float(
+                            runtime_options.get("video_prepare_timeout_s") or 300
                         ),
-                        timeout=float(runtime_options.get("video_prepare_timeout_s") or 300),
+                        session_name=task.session_name,
+                        item_index=idx,
+                        total_items=len(task.items),
+                        profile=rich_profile,
                     )
                     item_dict.clear()
                     item_dict.update(prepared)
@@ -843,6 +896,11 @@ def _all_items_healthy(task: Task) -> bool:
     return all(i in latest and not latest[i].get("error") for i in range(len(task.items)))
 
 
+def all_items_healthy(task: Task) -> bool:
+    """更新 job 收尾使用的公开判定，语义同 ``_all_items_healthy``。"""
+    return _all_items_healthy(task)
+
+
 async def _run_update_batch_body(
     task: Task,
     cfg: AppConfig,
@@ -989,12 +1047,15 @@ async def run_update_batch(
     manage_status: bool = False,
     initial_summary: str = "",
     initial_turn: int = 0,
+    mark_interrupted: bool = True,
 ) -> None:
     """后台更新批公共入口（实现见 _run_update_batch_body）。
 
     pin 契约（R1）同 run_eval：调用方在提交时同步 `active_runs += 1`。
     外层负责退休前最后一次落盘、从 TASKS 注册表退休；并行批次共享同一活
-    对象（计数 pin），全部结束（idle）时才退休。
+    对象（计数 pin），全部结束（idle）时才退休。`mark_interrupted=False`
+    供上层 job 自行收敛 running→done/error 时使用，避免多批 job 在最后一批
+    误判为服务中断。
     """
     try:
         await _run_update_batch_body(
@@ -1006,7 +1067,11 @@ async def run_update_batch(
         idle = task.active_runs <= 0
         if idle:
             await _cleanup_task_video_downloads(task)
-        interrupted = _mark_interrupted_if_stuck(task) if idle else False
+        interrupted = (
+            _mark_interrupted_if_stuck(task)
+            if idle and mark_interrupted
+            else False
+        )
         if idle and task.stopped:
             # 用户停止：非崩溃终态，保留已完成结果。manage_status 批的 error
             # 终态已在 body 发过，此处只兜底非 manage_status 批并跳过 heal——

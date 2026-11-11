@@ -44,7 +44,7 @@
 
   <div v-show="page==='eval'">
   <details class="settings-section" @toggle="onSettingsToggle">
-    <summary>系统设置（模型限流 {{ sysSettings.queue.limit }}/每2秒 · 在途 {{ sysSettings.queue.running }}/{{ sysSettings.max_in_flight }} · 排队 {{ sysSettings.queue.queued }} · 等待容量 {{ sysSettings.waiting_capacity }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }} · 端点 {{ settingsEndpointDisplay }}{{ sysSettings.model ? ' / ' + sysSettings.model : '' }}）</summary>
+    <summary>系统设置（模型限流 {{ sysSettings.queue.limit }}/每2秒 · 在途 {{ sysSettings.queue.running }}/{{ sysSettings.max_in_flight }} · 排队 {{ sysSettings.queue.queued }} · 抽帧 {{ sysSettings.prepare.running }}/{{ sysSettings.prepare.limit }} · 单题超时 {{ sysSettings.eval_timeout_s }}s · 裁判 {{ settingsJudgeDisplay }} · 端点 {{ settingsEndpointDisplay }}{{ sysSettings.model ? ' / ' + sysSettings.model : '' }}）</summary>
     <div class="row">
       <span class="lbl">每2秒请求数：</span>
       <input type="number" min="1" max="64" v-model.number="settingsForm.concurrency" style="width:70px">
@@ -56,9 +56,9 @@
       <span class="hint">同时进行中的模型请求最大数（默认 50）；模型服务商有在途并发限制，超出会排队等待在途名额。</span>
     </div>
     <div class="row">
-      <span class="lbl">等待容量：</span>
+      <span class="lbl">预处理并发：</span>
       <input type="number" min="0" max="256" v-model.number="settingsForm.waiting_capacity" style="width:70px">
-      <span class="hint">「抽帧中 + 已抽帧待评」的总名额（默认 10，封顶已备好关键帧的内存）；流水线总准入 = 最大在途 + 等待容量。</span>
+      <span class="hint">同时下载和抽帧的视频数（默认 10）；整题流水线总准入 = 最大在途 + 预处理并发。</span>
     </div>
     <div class="row">
       <span class="lbl">单题超时：</span>

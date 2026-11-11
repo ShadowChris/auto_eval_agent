@@ -1,11 +1,14 @@
 """全局调度：跨任务共享的模型限流（速率+在途）+ 预处理并发 + 运行时设置。
 
-两级闸门，获取顺序恒为 PIPELINE → MODEL，无反向嵌套：
+三级闸门，获取顺序恒为 PIPELINE → PREPARE → MODEL，无反向嵌套：
 - PIPELINE_LIMITER（上限 = max_in_flight + waiting_capacity）：流水线准入，
   整题（预处理 + 等模型槽 + 模型调用）持有——界定「抽帧中 + 已抽帧等模型」
-  ≤ waiting_capacity、在途 ≤ max_in_flight，从而已准备好的关键帧总内存被封顶
+  总量 ≤ max_in_flight + waiting_capacity、在途 ≤ max_in_flight，
+  从而已准备好的关键帧总内存被封顶
   （防止抽完帧堆在模型闸前等太久导致内存暴涨）。已带 frames 的重跑题不走预处理，
   仅等模型、仍可占名额。
+- PREPARE_LIMITER（上限 = max(1, waiting_capacity)）：只限制同时进行的
+  视频下载、探测和抽帧数，避免启动一批任务时把所有视频同时送进 FFmpeg。
 - MODEL_LIMITER（速率 = concurrency 令牌/每 RATE_WINDOW_S 秒 + 最大在途 =
   max_in_flight）：模型调用级限流，每次实际模型请求（含重试的每一次尝试）
   同时满足「一个速率令牌」与「一个在途名额」才发出——速率限制每窗口请求数
@@ -317,6 +320,7 @@ class TokenBucketRateLimiter:
 MODEL_LIMITER: ResizableLimiter | TokenBucketRateLimiter = TokenBucketRateLimiter(
     DEFAULT_CONCURRENCY, DEFAULT_MAX_IN_FLIGHT
 )
+PREPARE_LIMITER = ResizableLimiter(max(1, DEFAULT_WAITING_CAPACITY))
 PIPELINE_LIMITER = ResizableLimiter(
     DEFAULT_MAX_IN_FLIGHT + DEFAULT_WAITING_CAPACITY
 )
@@ -335,6 +339,11 @@ def _sync_pipeline_limit() -> None:
     )
 
 
+def _sync_prepare_limit() -> None:
+    """预处理并发沿用 waiting_capacity；0 仍保留一个工作槽以继续推进。"""
+    PREPARE_LIMITER.set_limit(max(1, _settings.waiting_capacity))
+
+
 def apply_settings(
     *,
     concurrency: int | None = None,
@@ -349,12 +358,10 @@ def apply_settings(
 
     concurrency = 模型调用速率（每 RATE_WINDOW_S 秒的令牌数）→ MODEL_LIMITER.set_rate；
     max_in_flight = 模型最大在途（模型服务商并发限制）→ MODEL_LIMITER.set_max_in_flight；
-    waiting_capacity = 「预处理并发 + 预处理后等模型」的额度 → PIPELINE_LIMITER。
-    流水线准入 = max_in_flight + waiting_capacity（整题持有至模型结束），
-    从而在途 ≤ max_in_flight、「抽帧中 + 已抽帧等模型」≤ waiting_capacity——
-    关键帧内存被该名额封顶。max_in_flight 或 waiting_capacity 任一变化都重算
-    PIPELINE 上限。waiting_capacity=0 时 pipeline = max_in_flight（最严不排队，
-    预处理也要等模型释放，ResizableLimiter 再 clamp 到 >=1）。
+    waiting_capacity = 同时进行的视频预处理上限 → PREPARE_LIMITER；同时参与
+    PIPELINE_LIMITER 上限计算。流水线准入 = max_in_flight + waiting_capacity
+    （整题持有至模型结束），从而模型在途和关键帧总准入都被封顶。
+    waiting_capacity=0 时 pipeline = max_in_flight，预处理限流器 clamp 到 >=1。
     """
     global _settings
     if concurrency is not None:
@@ -372,6 +379,7 @@ def apply_settings(
         _settings.waiting_capacity = min(
             MAX_WAITING_CAPACITY, max(MIN_WAITING_CAPACITY, int(waiting_capacity))
         )
+        _sync_prepare_limit()
         _sync_pipeline_limit()
     if eval_timeout_s is not None:
         _settings.eval_timeout_s = min(
@@ -461,7 +469,8 @@ def persist_settings(path: Path | None = None) -> bool:
 # ---- 任务级单消费者 FIFO 调度器（移植自 compare）----
 # 全量评测 /api/eval 与重跑 /api/eval/rerun 走这里：全局一次只跑一张表，多张排队。
 # 每个任务内部仍由自己的组并发 + 上面的全局 MODEL_LIMITER 控制模型调用。
-# 增量更新 update-batch 不排队，仍走后台 spawn_background。
+# 全量评测、手动重跑、增量更新 update-batch 共用一个单消费者 FIFO；
+# queue 只保证 task 级串行，任务内部仍按 session 组并发。
 
 RunEval = Callable[[Task, object], Awaitable[None]]
 
@@ -469,7 +478,7 @@ RunEval = Callable[[Task, object], Awaitable[None]]
 @dataclass
 class _QueuedEval:
     job_id: str
-    kind: str            # "initial" | "retry"
+    kind: str            # "initial" | "retry" | "items"
     task: Task
     cfg: object
     runner: RunEval

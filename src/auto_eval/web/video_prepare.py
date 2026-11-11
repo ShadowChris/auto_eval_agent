@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import time
 import uuid
 from numbers import Real
 from pathlib import Path
@@ -33,6 +34,7 @@ _VIDEO_CONTENT_SUFFIXES = {
     "video/x-matroska": ".mkv",
     "video/x-msvideo": ".avi",
 }
+_DEFAULT_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def _safe_name(value: str, fallback: str) -> str:
@@ -81,6 +83,17 @@ def download_remote_video(
             timeout_s = 120.0
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         timeout_s = 120.0
+    try:
+        max_bytes = int(
+            os.getenv(
+                "AUTO_EVAL_VIDEO_MAX_DOWNLOAD_BYTES",
+                str(_DEFAULT_MAX_DOWNLOAD_BYTES),
+            )
+        )
+    except ValueError:
+        max_bytes = _DEFAULT_MAX_DOWNLOAD_BYTES
+    if max_bytes <= 0:
+        max_bytes = _DEFAULT_MAX_DOWNLOAD_BYTES
     timeout = httpx.Timeout(
         connect=min(30.0, timeout_s),
         read=timeout_s,
@@ -96,6 +109,12 @@ def download_remote_video(
             timeout=timeout,
         ) as response:
             response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            if content_length and content_length.isdigit():
+                if int(content_length) > max_bytes:
+                    raise ValueError(
+                        f"网络视频超过下载上限 {max_bytes} bytes：{url}"
+                    )
             suffix = _remote_video_suffix(
                 str(response.url), response.headers.get("content-type", "")
             )
@@ -103,12 +122,19 @@ def download_remote_video(
             final_path = output_dir / f"{stem}_{uuid.uuid4().hex}{suffix}"
             part_path = output_dir / f".{final_path.name}.part"
             size = 0
+            deadline = time.monotonic() + timeout_s
             with part_path.open("wb") as output:
                 for chunk in response.iter_bytes():
                     if not chunk:
                         continue
+                    if time.monotonic() > deadline:
+                        raise ValueError(f"网络视频下载超过总时限：{url}")
                     output.write(chunk)
                     size += len(chunk)
+                    if size > max_bytes:
+                        raise ValueError(
+                            f"网络视频超过下载上限 {max_bytes} bytes：{url}"
+                        )
             if size <= 0:
                 raise ValueError(f"下载的视频为空：{url}")
             part_path.replace(final_path)

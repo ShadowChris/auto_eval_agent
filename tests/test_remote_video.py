@@ -68,6 +68,42 @@ def test_download_remote_video_streams_to_local_file(tmp_path, monkeypatch):
     assert calls[0][2]["follow_redirects"] is True
 
 
+def test_download_remote_video_enforces_size_limit(tmp_path, monkeypatch):
+    class FakeResponse:
+        url = "https://cdn.example.test/oversized.mp4"
+        headers = {"content-type": "video/mp4"}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self):
+            yield b"123"
+            yield b"456"
+
+    class FakeStream:
+        def __enter__(self):
+            return FakeResponse()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setenv("AUTO_EVAL_VIDEO_MAX_DOWNLOAD_BYTES", "5")
+    monkeypatch.setattr(
+        video_prepare.httpx,
+        "stream",
+        lambda *args, **kwargs: FakeStream(),
+    )
+
+    with pytest.raises(ValueError, match="下载上限"):
+        video_prepare.download_remote_video(
+            "https://cdn.example.test/oversized.mp4",
+            tmp_path / "downloads",
+            timeout_s=30,
+        )
+
+    assert list((tmp_path / "downloads").glob("*")) == []
+
+
 def test_prepare_remote_video_preserves_url_and_reports_temporary_file(tmp_path):
     source_url = "https://cdn.example.test/videos/weather.mp4?token=abc"
     used_paths = []

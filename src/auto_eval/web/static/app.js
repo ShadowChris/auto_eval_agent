@@ -77,7 +77,8 @@ createApp({
       endpoints: [],
       models: [],
       queue: { limit: 10, running: 0, queued: 0 },       // 模型限流：limit=每2秒请求数，running=在途，max_in_flight=在途上限
-      pipeline: { limit: 10, running: 0, queued: 0 },     // 预处理并发级
+      pipeline: { limit: 60, running: 0, queued: 0 },     // 整题流水线准入
+      prepare: { limit: 10, running: 0, queued: 0 },      // 视频下载/探测/抽帧并发
     });
     const settingsForm = ref({ concurrency: 10, max_in_flight: 50, waiting_capacity: 10, eval_timeout_s: 300, judges: [], active_endpoint: "", model: "" });
     const settingsSaving = ref(false);

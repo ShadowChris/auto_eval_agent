@@ -141,6 +141,7 @@ def new_task(
     dataset_name: str = "",
     *,
     task_id: str = "",
+    persist: bool = True,
 ) -> Task:
     task_id = task_id or uuid.uuid4().hex[:12]
     created_at = time.time()
@@ -155,22 +156,175 @@ def new_task(
     )
     TASKS[task_id] = t
     _enforce_capacity()
-    save_task(t)
+    if persist:
+        save_task(t)
     return t
+
+
+class ItemGroupingError(ValueError):
+    """请求内的 is_start/is_end 分组与已有 session 归属冲突。"""
+
+
+def _marker_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {
+            "1", "true", "yes", "y", "start", "end", "是",
+        }
+    return bool(value)
+
+
+def _split_incoming_sessions(incoming: list[dict]) -> list[list[dict]]:
+    """按 is_start/is_end 切请求内 session；没有任何真值标记时逐条独立。
+
+    与 CSV 导入的边界归一化保持一致：后一条 is_start=True 会补前一条
+    is_end=True；前一条 is_end=True 会补后一条 is_start=True。
+    """
+    starts = [_marker_truthy(item.get("is_start")) for item in incoming]
+    ends = [_marker_truthy(item.get("is_end")) for item in incoming]
+    if not any(starts) and not any(ends):
+        return [[item] for item in incoming]
+
+    for i in range(len(incoming) - 1):
+        if starts[i + 1]:
+            ends[i] = True
+        elif ends[i]:
+            starts[i + 1] = True
+
+    groups: list[list[dict]] = []
+    current: list[dict] | None = None
+    for i, item in enumerate(incoming):
+        if starts[i] or current is None:
+            if current:
+                groups.append(current)
+            current = []
+        current.append(item)
+        if ends[i]:
+            groups.append(current)
+            current = None
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _existing_group_members(task: Task) -> dict[str, list[int]]:
+    members: dict[str, list[int]] = {}
+    for i, item in enumerate(task.items):
+        group = item.get("session_group")
+        if isinstance(group, str) and group:
+            members.setdefault(group, []).append(i)
+    for indexes in members.values():
+        indexes.sort(key=lambda i: (
+            task.items[i].get("turn_index")
+            if isinstance(task.items[i].get("turn_index"), int)
+            else i,
+            i,
+        ))
+    return members
+
+
+def _resolve_incoming_group(
+    task: Task,
+    group: list[dict],
+    id_to_index: dict[str, int],
+) -> str | None:
+    explicit = {
+        str(item["session_group"]).strip()
+        for item in group
+        if isinstance(item.get("session_group"), str)
+        and str(item["session_group"]).strip()
+    }
+    if len(explicit) > 1:
+        raise ItemGroupingError("同一 is_start/is_end 分组内存在多个 session_group")
+
+    matched_groups = {
+        str(task.items[id_to_index[item["id"]]]["session_group"]).strip()
+        for item in group
+        if item.get("id") in id_to_index
+        and isinstance(task.items[id_to_index[item["id"]]].get("session_group"), str)
+        and str(task.items[id_to_index[item["id"]]]["session_group"]).strip()
+    }
+
+    if explicit:
+        target = next(iter(explicit))
+        if matched_groups and matched_groups != {target}:
+            raise ItemGroupingError(
+                "请求中的 session_group 与已有题目所属分组不一致"
+            )
+        return target
+    if len(matched_groups) > 1:
+        raise ItemGroupingError(
+            "同一 is_start/is_end 分组内的题目属于多个已有 session"
+        )
+    if matched_groups:
+        return next(iter(matched_groups))
+    if len(group) > 1:
+        return f"api-sess-{task.id}-{int(time.time() * 1000)}"
+    return None
+
+
+def _stamp_incoming_groups(task: Task, incoming: list[dict]) -> None:
+    """把请求内 session 归属写回 incoming：保留命中已有轮次的 turn_index，
+    新追加轮次排在已有组末尾；无分组的单题不写 session_group。"""
+    id_to_index: dict[str, int] = {}
+    for i, item in enumerate(task.items):
+        iid = item.get("id")
+        if isinstance(iid, str) and iid:
+            id_to_index.setdefault(iid, i)
+    members = _existing_group_members(task)
+    generated = 0
+    for group in _split_incoming_sessions(incoming):
+        target = _resolve_incoming_group(task, group, id_to_index)
+        if target is None:
+            item = group[0]
+            item.pop("session_group", None)
+            item["turn_index"] = 0
+            continue
+        if target.startswith("api-sess-") and target not in members:
+            if generated:
+                target = f"{target}-{generated}"
+            generated += 1
+        existing = members.get(target, [])
+        positions = {idx: pos for pos, idx in enumerate(existing)}
+        next_turn = len(existing)
+        for item in group:
+            iid = item["id"]
+            idx = id_to_index.get(iid)
+            turn: int | None = None
+            if idx is not None and task.items[idx].get("session_group") == target:
+                raw_turn = task.items[idx].get("turn_index")
+                if isinstance(raw_turn, int) and raw_turn >= 0:
+                    turn = raw_turn
+                elif idx in positions:
+                    turn = positions[idx]
+            if turn is None:
+                turn = next_turn
+                next_turn += 1
+            item["session_group"] = target
+            item["turn_index"] = turn
 
 
 def merge_items_by_id(
     task: Task, incoming: list[dict]
 ) -> tuple[list[tuple[int, dict]], list[str], list[str]]:
-    """按显式 id 合并更新批 items：命中则 incoming dict 整体替换 task.items[i]
-    （同下标），未命中追加到末尾。仅携带非空字符串 id 的存量条目参与匹配；
-    存量重复 id 以最早位置为准。返回 (批内 (index, item) 按提交顺序列表,
-    replaced_ids, added_ids)。函数内无 await，单请求内原子。"""
+    """按 id 合并更新批 items，并按 is_start/is_end 写入 session 归属。
+
+    命中 id 时 incoming dict 整体替换 task.items[i]（同下标），未命中追加到
+    末尾。没有任何 is_start/is_end 标记时每条视为独立单轮；有标记时同组
+    共享 session_group，组内顺序即 turn_index。命中已有 session 的请求沿用
+    原分组，后续轮次由调用方按 session 后缀重跑。
+
+    返回 (批内 (index, item) 按提交顺序列表, replaced_ids, added_ids)。
+    """
     id_to_index: dict[str, int] = {}
     for i, it in enumerate(task.items):
         iid = it.get("id")
         if isinstance(iid, str) and iid:
             id_to_index.setdefault(iid, i)
+    _stamp_incoming_groups(task, incoming)
     replaced: list[str] = []
     added: list[str] = []
     batch: list[tuple[int, dict]] = []
