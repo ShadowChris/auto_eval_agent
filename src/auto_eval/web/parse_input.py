@@ -22,6 +22,7 @@ from numbers import Real
 from typing import Literal
 
 from ..media import DEFAULT_TASK_START_TIME
+from ..query_images import attachment_image_fields, attachment_image_urls
 
 Mode = Literal[
     "single",
@@ -37,18 +38,13 @@ MAX_QUERY_IMAGES = 4
 
 
 def operation_query_images(obj: dict) -> list[str]:
-    """读取可选图片路径/链接；标准数组优先，兼容单图字段。"""
+    """保留显式多图/上传图片；附件默认读取域名/IP 地址，不读取 attachment_path。"""
     value = obj.get("query_images")
     if value is None or value == []:
-        for field in ("query_image_path", "attachment_path"):
-            single = obj.get(field)
-            if single is None or single == "":
-                continue
-            if not isinstance(single, str):
-                raise ValueError(f"{field} 必须是图片路径或 HTTP/HTTPS 链接字符串")
-            if single.strip():
-                value = [single]
-                break
+        single = obj.get("query_image_path")
+        if single is not None and not isinstance(single, str):
+            raise ValueError("query_image_path 必须是图片路径或 HTTP/HTTPS 链接字符串")
+        value = [single] if single and single.strip() else attachment_image_urls(obj)[:1]
     if value is None:
         return []
     if not isinstance(value, list):
@@ -267,6 +263,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item.update(video_times)
             if mode == "operation":
                 try:
+                    item.update(attachment_image_fields(obj))
                     query_images = operation_query_images(obj)
                 except ValueError as exc:
                     errors.append(f"第 {ln} 行 {exc}")

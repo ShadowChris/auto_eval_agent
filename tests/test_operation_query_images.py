@@ -296,7 +296,7 @@ def test_table_import_maps_single_query_image_path(tmp_path: Path) -> None:
     assert result.rows[0]["query_image_path"] == "data/images/address.png"
 
 
-def test_table_import_maps_attachment_path_and_preserves_source_column(tmp_path: Path) -> None:
+def test_table_import_preserves_attachment_path_but_does_not_use_it_as_an_image(tmp_path: Path) -> None:
     pd = pytest.importorskip("pandas")
     source = tmp_path / "cases.csv"
     pd.DataFrame([{
@@ -308,7 +308,7 @@ def test_table_import_maps_attachment_path_and_preserves_source_column(tmp_path:
 
     result = convert_table(source, input_prefix="附件任务", project_root=tmp_path)
 
-    assert result.rows[0]["query_images"] == ["data/images/attachment.png"]
+    assert "query_images" not in result.rows[0]
     assert result.rows[0]["attachment_path"] == "data/images/attachment.png"
 
 
@@ -330,6 +330,7 @@ def test_table_image_columns_use_first_nonempty_value_per_row(tmp_path: Path) ->
             "query_images": "",
             "query_image_path": "",
             "attachment_path": "data/images/fallback.png",
+            "attachment_url_ip": "http://10.0.0.2/fallback.png",
             "video_path": "data/videos/simple_004.mp4",
         },
     ]).to_csv(source, index=False, encoding="utf-8-sig")
@@ -337,7 +338,7 @@ def test_table_image_columns_use_first_nonempty_value_per_row(tmp_path: Path) ->
     result = convert_table(source, input_prefix="图片优先级", project_root=tmp_path)
 
     assert result.rows[0]["query_images"] == ["data/images/explicit.png"]
-    assert result.rows[1]["query_images"] == ["data/images/fallback.png"]
+    assert result.rows[1]["query_images"] == ["http://10.0.0.2/fallback.png"]
 
 
 def test_operation_exports_preserve_query_image_paths() -> None:

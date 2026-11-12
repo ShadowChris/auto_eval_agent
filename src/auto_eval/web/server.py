@@ -42,10 +42,11 @@ from ..config import ExpertKnowledgeBase, load_config
 from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
 from ..media import extract_scene_keyframes, probe_duration
 from ..paths import RUNS_DIR
+from ..query_images import attachment_image_fields
 from ..report.operation import OPERATION_REPORT_ASSETS, build_operation_report_html
 from ..table_dataset import convert_table
 from ..llm_stream import ProviderStreamError, build_openai_client, stream_chat_completion
-from .parse_input import Mode, parse_jsonl, parse_text
+from .parse_input import Mode, operation_query_images, parse_jsonl, parse_text
 from .history import (
     build_operation_comparison_xlsx,
     build_xlsx,
@@ -591,18 +592,8 @@ def _append_preview_value(item: dict, *fields: str):
 
 def _append_new_item_preview(item: dict, position: int, key: str) -> dict:
     """返回可安全展示的新增题目摘要，避免把整份 source_data 原样回传。"""
-    raw_images = _append_preview_value(
-        item,
-        "query_images",
-        "query_image_path",
-        "attachment_path",
-    )
-    if isinstance(raw_images, (list, tuple)):
-        query_images = [str(value) for value in raw_images if str(value or "").strip()]
-    elif raw_images is None:
-        query_images = []
-    else:
-        query_images = [str(raw_images)]
+    query_images = operation_query_images(item)
+    attachments = attachment_image_fields(item)
     return {
         "incoming_position": position,
         "incoming_no": position + 1,
@@ -612,6 +603,7 @@ def _append_new_item_preview(item: dict, position: int, key: str) -> dict:
         "context": str(_append_preview_value(item, "context") or ""),
         "video_path": str(_append_preview_value(item, "video_path") or ""),
         "query_images": query_images,
+        **attachments,
         "task_start_time": _append_preview_value(item, "task_start_time"),
         "task_end_time": _append_preview_value(item, "task_end_time"),
     }

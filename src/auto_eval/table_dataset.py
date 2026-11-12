@@ -40,6 +40,8 @@ from typing import Any
 
 import pandas as pd
 
+from .query_images import ATTACHMENT_URL_FIELDS, attachment_image_urls
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,7 +62,6 @@ INTERACTION_LOCATION_LABEL = "交互发生位置"
 VIDEO_PATH_COLUMN = "video_path"
 QUERY_IMAGES_COLUMN = "query_images"
 QUERY_IMAGE_PATH_COLUMN = "query_image_path"
-ATTACHMENT_PATH_COLUMN = "attachment_path"
 VIDEO_DIRECTORY_COLUMN = "文件路径"
 VIDEO_FILENAME_COLUMN = "原文件名"
 DEFAULT_VIDEO_PREFIX = "data/"
@@ -505,7 +506,6 @@ def convert_table(
     has_video_path_column = VIDEO_PATH_COLUMN in df.columns
     has_query_images_column = QUERY_IMAGES_COLUMN in df.columns
     has_query_image_path_column = QUERY_IMAGE_PATH_COLUMN in df.columns
-    has_attachment_path_column = ATTACHMENT_PATH_COLUMN in df.columns
     direct_standard_columns = tuple(
         column
         for column, present in (
@@ -576,13 +576,17 @@ def convert_table(
                 for column, present in (
                     (QUERY_IMAGES_COLUMN, has_query_images_column),
                     (QUERY_IMAGE_PATH_COLUMN, has_query_image_path_column),
-                    (ATTACHMENT_PATH_COLUMN, has_attachment_path_column),
                 )
                 if present
             ),
         )
         try:
             query_images = _table_query_images(raw_query_images)
+            if not query_images:
+                query_images = attachment_image_urls({
+                    field: _json_value(row.get(field))
+                    for field in ATTACHMENT_URL_FIELDS if field in df.columns
+                })[:1]
         except ValueError as exc:
             query_images = []
             row_warnings.append(f"invalid_query_images:{exc}")

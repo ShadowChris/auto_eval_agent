@@ -174,7 +174,7 @@ def test_failed_second_image_cleans_only_new_remote_files(tmp_path, mock_image_h
     _assert_no_downloads(tmp_path)
 
 
-@pytest.mark.parametrize("field", ["attachment_path", "query_image_path"])
+@pytest.mark.parametrize("field", ["attachment_url_domain", "attachment_url_ip", "query_image_path"])
 def test_jsonl_and_direct_preparation_accept_single_image_aliases(tmp_path, mock_image_http, field):
     url = "https://example.test/input.jpg"
     raw = {"id": "001", "query": "识别图片", "video_path": "data/video.mp4", field: url}
@@ -202,7 +202,7 @@ def test_standard_array_keeps_priority_over_single_image_aliases():
 def test_table_import_keeps_url_and_does_not_download_until_preparation(tmp_path, mock_image_http, suffix):
     pd = pytest.importorskip("pandas")
     url = "https://example.test/input.jpg?signature=abc"
-    frame = pd.DataFrame([{"id": "001", "query": "识别图片", "video_path": "__missing_video__", "attachment_path": url}])
+    frame = pd.DataFrame([{"id": "001", "query": "识别图片", "video_path": "__missing_video__", "attachment_url_domain": url}])
     source = tmp_path / f"input{suffix}"
     if suffix == ".csv":
         frame.to_csv(source, index=False)
@@ -214,7 +214,7 @@ def test_table_import_keeps_url_and_does_not_download_until_preparation(tmp_path
     assert not errors
     assert calls == []
     prepared = operation_media.prepare_operation_query_images(items[0], base_dir=tmp_path)
-    assert prepared["source_data"]["attachment_path"] == url
+    assert prepared["source_data"]["attachment_url_domain"] == url
     assert prepared["source_data"]["query_images"] == [url]
     assert len(calls) == 1
 

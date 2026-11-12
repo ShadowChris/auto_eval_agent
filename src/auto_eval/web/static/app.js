@@ -435,9 +435,9 @@ createApp({
       query: item.query || "",
       context: item.context || "",
       video_path: item.videoPath || "",
-      query_images: (item.queryImages || []).length
-        ? [...item.queryImages]
-        : (item.attachmentPath ? [item.attachmentPath] : []),
+      query_images: [...(item.queryImages || [])],
+      attachment_url_domain: item.attachmentUrlDomain || "",
+      attachment_url_ip: item.attachmentUrlIp || "",
       task_start_time: item.taskStartTime,
       task_end_time: item.taskEndTime,
     })));
@@ -1587,7 +1587,8 @@ createApp({
         queryImagePreview: "",
         queryImageUploading: false,
         queryImageError: "",
-        attachmentPath: "",
+        attachmentUrlDomain: "",
+        attachmentUrlIp: "",
         context: "",
         category: "",
         videoName: "",
@@ -1611,14 +1612,11 @@ createApp({
         ? `${value} 秒`
         : `未设置（使用默认${boundary}时间）`;
     }
-    function formatAttachmentPath(item) {
-      const path = String(item?.attachmentPath || "").trim();
-      if (!path) return "未提供";
-      const normalize = (value) => String(value || "").trim().replaceAll(String.fromCharCode(92), "/");
-      const isUsed = (item?.queryImages || []).some(
-        (imagePath) => normalize(imagePath) === normalize(path),
-      );
-      return `${path}${isUsed ? "（已作为用户图片导入）" : "（未作为当前用户图片使用）"}`;
+    function formatAttachmentUrls(item) {
+      const domain = String(item?.attachmentUrlDomain || "").trim();
+      const ip = String(item?.attachmentUrlIp || "").trim();
+      if (!domain && !ip) return "未提供附件图片链接";
+      return `attachment_url_domain：${domain || "未提供"}；attachment_url_ip：${ip || "未提供"}（同一张图片，域名优先、IP 备用）`;
     }
     function releaseQueryImagePreviews(item) {
       const url = item?.queryImagePreview;
@@ -1694,6 +1692,8 @@ createApp({
       const it = opItems.value[i];
       releaseQueryImagePreviews(it);
       it.queryImages = [];
+      it.attachmentUrlDomain = "";
+      it.attachmentUrlIp = "";
       it.queryImageName = "";
       it.queryImagePreview = "";
       it.queryImageError = "";
@@ -1744,7 +1744,8 @@ createApp({
               query: item.query || "",
               queryImages,
               queryImageName: queryImages.map((path) => String(path || "").split(/[\\/]/).pop()).join("、"),
-              attachmentPath: String(item.attachment_path ?? item.source_data?.attachment_path ?? ""),
+              attachmentUrlDomain: String(item.attachment_url_domain ?? item.source_data?.attachment_url_domain ?? ""),
+              attachmentUrlIp: String(item.attachment_url_ip ?? item.source_data?.attachment_url_ip ?? ""),
               context: item.context || "",
               category: item.category === "default" ? "" : (item.category || ""),
               videoName: String(item.video_path || "").split(/[\\/]/).pop(),
@@ -2031,6 +2032,8 @@ createApp({
             item.category = "operation";
             item.answer = (it.answer || "").trim();
             if ((it.queryImages || []).length) item.query_images = [...it.queryImages];
+            item.attachment_url_domain = it.attachmentUrlDomain || "";
+            item.attachment_url_ip = it.attachmentUrlIp || "";
           } else {
             // rich_content / rich_content_quality
             item.category = (it.category || "").trim() || "default";
@@ -4250,7 +4253,7 @@ createApp({
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize, resultQueryImagePreviewIndex, resultQueryImagePreviewItemIndex,
       skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, resultActionWidths, fallbackStat,
       operationGroups, groupAlignment, groupAligning, multiGroupColumns, multiGroupResult, displayArray, groupRoleLabel,
-      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit, formatOptionalTaskTime, formatAttachmentPath,
+      formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit, formatOptionalTaskTime, formatAttachmentUrls,
       trunc, switchMode, onFile, onOpManifestFile, clearImportedOperationDataset,
       setAllImportedDatasetSelections, setImportedPreviewPage,
       onOperationGroupFile, addOperationGroup, removeOperationGroup, alignOperationGroups, importWarningIds, doParse, submit, cell, cellTitle, isNA, columnWidth, isFrozenResultColumn, frozenResultColumnStyle, exportCsv, exportJson, exportJsonl, exportXlsx, exportFrames, resultWarnings, itemArtifactUrl, itemVideoIsRemote, resultQueryImageCount, queryImagePreviewUrl, resultQueryImageFilename, openQueryImagePreview, closeQueryImagePreview, moveResultQueryImagePreview, addOpItem, removeOpItem, onOpVideo, onQueryImage, removeQueryImage, onOpDrop,
