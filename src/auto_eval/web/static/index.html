@@ -1095,7 +1095,7 @@
           <thead><tr><th>选择</th><th>#</th><th>case_id / Query</th><th>策略 / 图片数</th><th v-for="group in multiGroupColumns" :key="group.group_id">{{ groupRoleLabel(group.group_role) }}｜{{ group.group_name }}<small>{{ group.dataset_name }}</small></th></tr></thead>
           <tbody><tr v-for="(result,index) in pagedResults" :key="result.index ?? index" :class="{'result-error':result.error}">
             <td><input type="checkbox" :checked="isRerunSelected(result)" :disabled="running" @change="setRerunSelected(result,$event.target.checked)"></td>
-            <td>{{ (resultPage-1)*resultPageSize+index+1 }}</td>
+            <td>{{ resultPageOffset+index+1 }}</td>
             <td class="multi-case-cell"><strong>{{ result.case_id || result.item_id }}</strong><div>{{ result.query }}</div><div class="err" v-if="result.alignment_warnings?.length">{{ result.alignment_warnings.join('；') }}</div><div class="err" v-if="result.error">{{ result.error }}</div></td>
             <td><div>{{ result.evaluation_strategy || '—' }}</div><div>{{ result.input_image_count || result.frame_count || 0 }} 张</div><div>总耗时 {{ result.duration_s!=null ? formatProgressElapsed(result.duration_s) : '—' }}</div><frame-preview :task-id="taskId" :item-index="Number(result.index)"></frame-preview><div v-if="result.failure_stage" class="err">失败阶段：{{ result.failure_stage }}</div><button v-if="!running" type="button" class="result-action-button" @click="rerunOne(result)">重跑 Case</button></td>
             <td v-for="group in multiGroupColumns" :key="'cell-'+group.group_id" class="multi-result-cell">
@@ -1159,6 +1159,7 @@
           <button @click="clearDimensionDrillDown">清除</button>
         </span>
         <span class="result-count">共 {{ filteredResults.length }} 条</span>
+        <span v-if="hasConversationResults" class="result-count">同一会话按轮次相邻展示，分页不拆分会话。</span>
       </div>
       <div class="result-table-wrap">
         <table class="grid results compact-results" :style="{ width: resultTableWidth + 'px' }">
@@ -1191,11 +1192,18 @@
           </thead>
           <tbody>
             <template v-for="(r,i) in pagedResults" :key="r.index ?? i">
+              <tr v-if="resultConversationHeading(r)" class="result-conversation-heading">
+                <td colspan="99">
+                  <strong>多轮会话 · {{ resultConversationHeading(r).id }}</strong>
+                  <span>已显示 {{ resultConversationHeading(r).visible }} / {{ resultConversationHeading(r).total }} 轮</span>
+                  <span v-if="resultConversationHeading(r).visible < resultConversationHeading(r).total">（其余轮次尚未完成或未匹配当前筛选）</span>
+                </td>
+              </tr>
               <tr :class="{'result-error':r.error}">
                 <td class="result-select-column" :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}">
                   <input type="checkbox" :checked="isRerunSelected(r)" :disabled="running" @change="setRerunSelected(r, $event.target.checked)">
                 </td>
-                <td :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'42px'} : {}"><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
+                <td :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'42px'} : {}"><div class="cell-clamp cell-center">{{ resultPageOffset+i+1 }}</div></td>
                 <td
                   v-for="(c,columnIndex) in resultCols"
                   :key="c.key"
@@ -1247,6 +1255,7 @@
                     class="cell-clamp"
                     :class="{'cell-full': c.key==='item_id', 'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent','frame_count'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
                   >{{ cell(r, c) }}</div>
+                  <small v-if="c.key==='item_id' && resultTurnLabel(r)" class="result-turn-label">{{ resultTurnLabel(r) }}</small>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
                   <div v-for="(video,videoIndex) in itemVideoLinks(r)" :key="videoIndex" class="row-video-item">
@@ -1289,7 +1298,7 @@
       </div>
       <div class="pagination" v-if="filteredResults.length">
         <span class="page-size">
-          每页
+          {{ hasConversationResults ? '每页目标' : '每页' }}
           <select v-model.number="resultPageSize" @change="changeResultPageSize">
             <option :value="10">10</option>
             <option :value="20">20</option>
@@ -1297,6 +1306,7 @@
           </select>
           条
         </span>
+        <span v-if="hasConversationResults" class="result-count">本页 {{ pagedResults.length }} 条，会话不拆页</span>
         <template v-if="pageCount>1">
           <button @click="changePage(-1)" :disabled="resultPage<=1">上一页</button>
           <template v-for="page in paginationPages(resultPage, pageCount)" :key="'result-page-'+page">
