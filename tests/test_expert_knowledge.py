@@ -30,7 +30,7 @@ def test_operation_expert_knowledge_loads_separately_from_policy() -> None:
     knowledge = config.expert_knowledge["operation"]
 
     assert knowledge.name == "任务类专家经验"
-    assert knowledge.version == 9
+    assert knowledge.version == 14
     assert any(
         "来电播报功能" in rule
         for category in knowledge.categories
@@ -47,7 +47,7 @@ def test_operation_expert_knowledge_loads_separately_from_policy() -> None:
         for rule in category.rules
     )
     assert any(
-        "常规系统设置、设备操控及系统内置应用的常规管理任务默认" in rule
+        "所有 Query 默认具备对应执行能力，包括第三方应用业务" in rule
         for category in knowledge.categories
         for rule in category.rules
     )
@@ -76,6 +76,9 @@ def test_rendered_knowledge_contains_facts_but_not_management_fields() -> None:
 
     assert "【专家经验】" in rendered
     assert "判断能力范围时，专家经验优先于 Agent 自述" in rendered
+    assert "产品知识本身不证明本次操作已经发生" in rendered
+    assert "该标志本身就是完成证据" in rendered
+    assert "不能代替任务完成证据" not in rendered
     assert "### 已确认支持的能力" in rendered
     assert "支持打开来电播报" in rendered
     assert "capabilities" not in rendered
