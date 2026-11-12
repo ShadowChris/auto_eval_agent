@@ -163,7 +163,13 @@ def extract_failed_subset(
         )
 
     source_rows = _read_jsonl(dataset_path)
-    source_ids = {_text(row.get("id")) for row in source_rows}
+    from auto_eval.operation_conversation import group_operation_items, normalize_operation_items
+
+    per_round = "evaluation_scope" in frame.columns and any(frame["evaluation_scope"] == "latest_turn")
+    source_cases = normalize_operation_items(source_rows) if per_round else group_operation_items(source_rows)
+    source_ids = {_text(row.get("id")) for row in source_rows} | {
+        _text(case.get("id")) for case in source_cases
+    }
     missing_ids = sorted(set(selected) - source_ids)
     if missing_ids:
         preview = "、".join(missing_ids[:20])
@@ -176,19 +182,29 @@ def extract_failed_subset(
     output_rows: list[dict[str, Any]] = []
     query_mismatch_ids: list[str] = []
     ordered_items: list[FailedSubsetItem] = []
-    for source_row in source_rows:
+    expanded_selection = dict(selected)
+    for case in ([] if per_round else source_cases):
+        turns = case.get("turns") or []
+        selected_item = selected.get(_text(case.get("id"))) or next(
+            (selected[_text(turn.get("id"))] for turn in turns if _text(turn.get("id")) in selected), None
+        )
+        if selected_item:
+            for turn in turns:
+                expanded_selection[_text(turn.get("id"))] = selected_item
+    for source_row in (source_cases if per_round else source_rows):
         item_id = _text(source_row.get("id"))
-        failed_item = selected.get(item_id)
+        failed_item = expanded_selection.get(item_id)
         if failed_item is None:
             continue
-        output_row = dict(source_row)
-        if failed_item.sequence:
+        output_row = {**(source_row.get("source_data") or {}), **source_row} if per_round else dict(source_row)
+        if failed_item.sequence and item_id in selected:
             output_row.setdefault(SEQUENCE_COLUMN, failed_item.sequence)
         source_query = _text(source_row.get(QUERY_COLUMN))
-        if failed_item.query and source_query != failed_item.query:
+        if item_id in selected and failed_item.query and source_query != failed_item.query:
             query_mismatch_ids.append(item_id)
         output_rows.append(output_row)
-        ordered_items.append(failed_item)
+        if failed_item not in ordered_items:
+            ordered_items.append(failed_item)
 
     output_path = (
         output_path.expanduser().resolve()

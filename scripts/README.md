@@ -122,6 +122,9 @@ python scripts/excel_to_jsonl_dataset.py --help
 
 ## 从评估 Excel 提取失败补充集
 
+支持多轮逐行导出：新版 evaluation_scope=latest_turn 只提取失败轮次，同时携带其 turns 历史前缀，可独立重跑。
+旧版首轮保存整会话结果的导出仍提取全部轮次，不将后续空白当成失败。需在安装项目依赖的 Python 环境中执行。
+
 `scripts/excel_eval_failed_subset.py` 读取评估导出 Excel 的“逐题结果”，
 选出 `error` 非空且不是“视频文件不存在”的评估失败数据，
 再按 `item_id` 从原始 JSONL 中提取完整数据。输出保持原数据集顺序，

@@ -163,7 +163,7 @@ OPERATION_SYSTEM = Template(
 
 【判定顺序】
 {% for rule in policy.decision_order %}
-{{ loop.index }}. {{ rule }}
+{% if multi_turn and loop.first %}1. 按【多轮会话】规则{% if latest_turn %}只对当前轮{% else %}逐轮{% endif %}执行 Query 一致性门禁。{% else %}{{ loop.index }}. {{ rule }}{% endif %}
 {% endfor %}
 correctness 与维度分独立判断，不得只根据 total 推导 correctness。
 
@@ -180,7 +180,13 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 {% endif %}
 
 【任务范围】
-{% for rule in policy.scope_rules -%}
+{% if multi_turn %}【多轮会话】
+{% for rule in policy.multi_turn_rules %}
+- {{ rule }}
+{% endfor %}
+{% else %}{% for rule in policy.single_turn_scope_rules if rule not in policy.scope_rules -%}
+- {{ rule }}
+{% endfor %}{% endif %}{% for rule in policy.scope_rules if not multi_turn or rule not in policy.single_turn_scope_rules -%}
 - {{ rule }}
 {% endfor %}
 
@@ -262,13 +268,13 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 {% else %}
 先输出紧凑的 <analysis> 证据摘要，再输出一行 JSON；不重复抄写规则，不展开与判定无关的过程。rubric 的 key 必须严格使用维度名；不适用维度填 null：
 <analysis>
-1. 【Query 一致性门禁】摘录录屏原始用户 Query 与输入核对，仅忽略展示格式差异，不做同义推断。规划、步骤或回复不代替用户指令。无法一致核验则输出 others / 录屏Query无法与输入Query一致核验，评分全 null，停止后续评判。
+1. 【Query 一致性门禁】{% if latest_turn %}只对当前轮{% elif multi_turn %}按轮次逐条{% endif %}摘录录屏原始用户 Query 与输入核对，仅忽略展示格式差异，不做同义推断。规划、步骤或回复不代替用户指令。无法一致核验则输出 others / 录屏Query无法与输入Query一致核验，评分全 null，停止后续评判。
 2. 【原始目标】按 Query、可信背景和先验列出目标、关键约束、必要输入及验收方式（功能入口、状态变化、查询结果或内容交付）。核验参数欠指定设置入口规则；有方向或约束不能降格为入口，不新增动作或跨目标借用地点。
 3. 【视觉指引扫描】【文本指引扫描】【来源分类】按时间顺序检查全部关键帧并通读完整 agent 自述，用“目标与约束 | 实际业务结果及来源 | Agent 声明 | 系统步骤信息”记录事实与帧号，缺失填未知。已交付正文/方案进入结果栏，完成声明只入声明栏；正文不能证明操作已执行，但可直接验收内容约束。禁止把任务面板的步骤、“已完成”或“超时，任务终止”当成 agent 回复；保留“可能”等不确定措辞，同一自述重复渲染不增加证据。
 4. 【阻塞资格表】【特殊反馈】核验 A.本次确实缺少什么及依据；B.为何助手无法自主补齐；C.为何必要且结束时未解除。通读完整回复中的明确拒绝、固定失败和临时异常原文，注明影响目标。其他目标理论上可独立完成不证明已经漏做；已解除阻塞不得沿用。本步不因出现询问就自动免责。
 5. 【已交付结果与卡片验收】【候选执行问题核验】每项候选问题写“目标要求 | 实际操作或交付 | 直接证据 | 错误而非缺证/阻塞后果的理由”。对照正文的对象、时间和数量等约束，不以参考方案或无法执行降为质量问题；不核查外部真实性。挂卡先核验载体资格，再判断适配；配置开关不证明保存失败。只有准备页面或缺少结果不能直接认定未执行。候选若仅是阻塞后果、未知条件或来源误判须撤销；真正错误保留，不能被阻塞覆盖。确认后形成“已发生的问题”，没有写无。
 6. 【逐目标状态】【尚未交付原因】【最终结论】依据已确认事实记录完成、必要阻塞、临时异常、明确拒绝、实际错误或缺证。必要阻塞仍有效且没有已发生错误时，其他尚未开始目标按串行待续，整体 no_support。不能用部分完成加有效阻塞判 ok，也不能用仅有文字声明和流程已完成判本机状态查询 ok；无明确拒绝、独立错误或有效阻塞的缺证归 others。根据判定顺序映射字段，不能让结论与已经摘录的事实相矛盾；rationale 引用决定性证据而非重写另一套解释。
-7. 【最终回答质量与挂卡复查】锁定非空 answer，否则使用末段最终视觉回答；通读到结尾，只引用该来源的泄露、重复或矛盾原句，无原句不标相应 issue。步骤不是回复；产品/服务/协议名称本身不等于泄露。cards 仅保留合资格载体，不用 other 保留控件或进度面板；另检查重复结果卡。
+7. 【最终回答质量与挂卡复查】{% if latest_turn %}只锁定当前轮非空 answer，否则使用当前轮末段最终视觉回答，不检查历史回答质量；{% elif multi_turn %}逐轮锁定本轮非空 answer，否则使用本轮末段最终视觉回答；{% else %}锁定非空 answer，否则使用末段最终视觉回答；{% endif %}通读到结尾，只引用该来源的泄露、重复或矛盾原句，无原句不标相应 issue。步骤不是回复；产品/服务/协议名称本身不等于泄露。cards 仅保留合资格载体，不用 other 保留控件或进度面板；另检查重复结果卡。
 </analysis>
 {"task_type": "simple|complex", "rubric": { {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分；全部不适用填null>, "correctness": "ok|nok|no_support|others", "issue_types": ["<执行或回答质量问题>"], "need_review_cate": ["<客观阻塞或复核原因>"], "cards": [{"type":"<已知key或other>","observed_name":"<可见名称>","visible_content":"<可见内容>","target":"<对应目标>","relation_to_query":"direct|supporting|unrelated|unclear","suitability":"suitable|unsuitable|unclear","reason":"<理由>","evidence_frames":[1]}], "is_low_level": "yes|no", "rationale": "<任务形态 + 生效目标 + 最终状态 + 整体步骤证据 + 自述一致性 + 判定理由>"}
 {% endif %}
@@ -276,7 +282,18 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 )
 
 OPERATION_USER = Template(
-    """操作意图（query）：
+    """{% if turns %}
+{% if latest_turn %}当前待评：第{{ current_turn_index }}轮。以下只包含截至本轮的输入；历史仅用于理解当前要求，不输出历史或会话整体评分。{% else %}完整多轮会话（共 {{ turns|length }} 轮，只评估一个 Case）：{% endif %}
+{% for turn in turns %}
+【第{{ turn.turn_index }}轮{% if latest_turn %} · {% if turn.turn_index == current_turn_index %}当前待评{% else %}历史背景，不独立评分{% endif %}{% endif %}】
+用户 Query：{{ turn.query }}
+{% if turn.context %}本轮可信背景：{{ turn.context }}{% endif %}
+Agent 回答：{{ turn.answer or '（未提供，以本轮录屏最终回复为准）' }}
+完整视频时间区间：{{ turn.task_start_time }}–{{ turn.task_end_time }} 秒
+本轮原始输入图片：{{ turn.query_images|length }} 张
+{% endfor %}
+{% if latest_turn %}只输出第{{ current_turn_index }}轮实际承接要求的评估结果；已结束的历史错误、阻塞及回复质量不重复计入，历史未完成要求仅在本轮明确承接时纳入。{% else %}请逐轮核验 Query 并检查有效要求是否闭环，只输出整体结果，理由注明对应轮次。{% endif %}
+{% else %}操作意图（query）：
 {{ question }}
 {% if context %}
 可信背景条件（由评测样本提供，请作为操作意图的前提；不要忽略、改写或质疑）：
@@ -292,7 +309,7 @@ Agent 自述（待评样本内容，只能与关键帧和先验知识交叉验�
 接下来先提供 {{ query_image_count }} 张原始用户输入图片，再提供按时间顺序排列的录屏关键帧。请结合图文理解任务，但只用录屏关键帧判断操作过程和完成结果。
 {% else %}
 请观察上方按时间顺序排列的关键帧，盲评这段录屏中的操作是否完成了上述意图。
-{% endif %}"""
+{% endif %}{% endif %}"""
 )
 
 OPERATION_MULTI_USER = Template(

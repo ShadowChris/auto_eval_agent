@@ -386,6 +386,7 @@ class RubricJudge:
             if policy is None:
                 raise ValueError("任务类评测缺少 config/skills/operation.yaml 的 operation_policy")
             query_images = list(item.query_images or [])
+            turns = item.turns
             system = self.operation_templates["OPERATION_SYSTEM"].render(
                 persona=self.client.persona,
                 dims=dims,
@@ -393,16 +394,42 @@ class RubricJudge:
                 policy=policy,
                 expert_knowledge_text=render_expert_knowledge(self.expert_knowledge),
                 multi_group=False,
-                has_query_images=bool(query_images),
+                has_query_images=bool(query_images) or any(t.query_images for t in turns),
+                multi_turn=bool(turns),
+                latest_turn=item.evaluation_scope == "latest_turn",
             )
             user = self.operation_templates["OPERATION_USER"].render(
                 question=item.question,
                 context=prompt_context,
                 agent_claim=(answer or "").strip(),
                 query_image_count=len(query_images),
+                turns=turns,
+                latest_turn=item.evaluation_scope == "latest_turn",
+                current_turn_index=item.turn_index,
             )
             frames = item.metadata.get("frames") or []
-            if query_images:
+            if turns:
+                user_content_parts = [{"type": "text", "text": user}]
+                user_image_refs, user_image_roles = [], []
+                for turn in turns:
+                    for index, path in enumerate(turn.query_images, 1):
+                        user_content_parts.extend([
+                            {"type": "text", "text": f"第{turn.turn_index}轮原始用户输入图片 {index}（非完成证据）"},
+                            {"type": "image_url", "image_url": {"url": encode_frame(Path(path))}},
+                        ])
+                        user_image_refs.append(path)
+                        user_image_roles.append("query_image")
+                manifest = item.metadata.get("frame_manifest") or []
+                for index, path in enumerate(frames, 1):
+                    record = manifest[index - 1] if index <= len(manifest) else {}
+                    label = f"录屏关键帧 {index}；第{record.get('turn_index', '?')}轮；视频 {record.get('time', '?')} 秒"
+                    user_content_parts.extend([
+                        {"type": "text", "text": label},
+                        {"type": "image_url", "image_url": {"url": encode_frame(Path(path))}},
+                    ])
+                    user_image_refs.append(str(path))
+                    user_image_roles.append("recording_frame")
+            elif query_images:
                 user_content_parts = [{"type": "text", "text": user}]
                 user_image_refs = []
                 user_image_roles = []
