@@ -73,12 +73,16 @@ def test_grouping_and_sources_are_lossless_and_idempotent():
     lambda r: r[1].pop("is_start"),
     lambda r: r[1].update(query=""),
 ])
-def test_invalid_conversation_is_rejected_as_a_whole(change):
+def test_invalid_conversation_is_retained_with_local_errors_or_recovery_warning(change):
     source = rows()
     change(source)
     items, errors = parse_jsonl("\n".join(json.dumps(row) for row in source), "operation")
-    assert not items
-    assert errors
+    assert len(items) == len(source)
+    assert [item["id"] for item in items] == ["t1", "t2"]
+    assert errors or any(item.get("input_warnings") for item in items)
+    for item in items:
+        if item.get("input_error"):
+            assert not item.get("turns")
 
 
 def test_middle_round_and_legacy_single_compatibility():

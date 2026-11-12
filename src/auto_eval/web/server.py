@@ -1326,9 +1326,9 @@ async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
     if req.mode == "operation":
-        from ..operation_conversation import normalize_operation_items
+        from ..operation_conversation import normalize_operation_batch
         try:
-            req = req.model_copy(update={"items": normalize_operation_items(req.items)})
+            req = req.model_copy(update={"items": normalize_operation_batch(req.items)})
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
     if req.mode != "operation" and "execution_mode" in req.options:
@@ -1970,9 +1970,9 @@ async def api_prepare_operation(req: OperationPrepareReq):
     """批量准备本地/远程任务视频，复用阶段资源上限，逐条隔离错误。"""
     if not req.items:
         raise HTTPException(400, "items 为空")
-    from ..operation_conversation import normalize_operation_items
+    from ..operation_conversation import normalize_operation_batch
     try:
-        req = req.model_copy(update={"items": normalize_operation_items(req.items)})
+        req = req.model_copy(update={"items": normalize_operation_batch(req.items)})
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     concurrency = max(1, min(int(req.concurrency or 2), 8))
@@ -1981,6 +1981,8 @@ async def api_prepare_operation(req: OperationPrepareReq):
     async def prepare_one(index: int, item: dict) -> tuple[int, dict | None, str | None]:
         async with semaphore:
             try:
+                if item.get("input_error"):
+                    raise ValueError(item["input_error"])
                 prepared = await run_video_preparation(_prepare_operation_item, item)
                 return index, prepared, None
             except Exception as exc:
