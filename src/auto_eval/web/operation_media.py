@@ -6,7 +6,10 @@ import json
 import math
 import os
 import re
+import shutil
+import subprocess
 import tempfile
+import threading
 import time
 from numbers import Real
 from pathlib import Path
@@ -21,10 +24,11 @@ from ..media import (
     KeyframeConfig,
     extract_scene_keyframes,
     probe_duration,
+    resolve_ffmpeg_executable,
 )
 from ..config import VisualModeProfile
 from ..paths import PROJECT_ROOT, RUNS_DIR
-from .parse_input import operation_query_images
+from ..operation_conversation import OPERATION_ROUND_FRAME_VERSION, operation_query_images
 from .remote_video import is_remote_video_url, local_video_input
 
 
@@ -37,6 +41,7 @@ QUERY_IMAGE_DOWNLOAD_TIMEOUT_S = 30
 QUERY_IMAGE_DOWNLOAD_TOTAL_S = 60
 _TASK_TIME_FIELDS = ("task_start_time", "task_end_time")
 _CONTENT_TIME_FIELDS = ("content_start_time", "content_end_time")
+_WINDOW_LOCKS = [threading.Lock() for _ in range(64)]
 
 
 def _safe_name(value: str, fallback: str) -> str:
@@ -221,6 +226,25 @@ def prepare_operation_query_images(
 ) -> dict:
     """把 query_images 归一为已校验的绝对路径，快照中不保存 base64。"""
     prepared = dict(item)
+    if item.get("turns"):
+        turns = []
+        downloaded: list[Path] = []
+        try:
+            for turn in item["turns"]:
+                originals = operation_query_images(turn)
+                normalized = prepare_operation_query_images(turn, base_dir=base_dir)
+                turns.append(normalized)
+                downloaded.extend(Path(path) for raw, path in zip(originals, normalized.get("query_images") or []) if raw.lower().startswith(("http://", "https://")))
+        except Exception:
+            for path in downloaded:
+                path.unlink(missing_ok=True)
+            raise
+        prepared["turns"] = turns
+        if item.get("evaluation_scope") == "latest_turn":
+            prepared["query_images"] = list(turns[-1].get("query_images") or [])
+        else:
+            prepared.pop("query_images", None)
+        return prepared
     raw_images = operation_query_images(item)
     if len(raw_images) > MAX_QUERY_IMAGES:
         raise ValueError(f"query_images 最多支持 {MAX_QUERY_IMAGES} 张")
@@ -331,6 +355,15 @@ def _operation_timing(
         "task_start_time": effective_start,
         "task_end_time": task_end,
     }
+    if item.get("turns"):
+        cache_payload["window_sampling_version"] = OPERATION_ROUND_FRAME_VERSION
+        for turn in item["turns"]:
+            if turn["task_end_time"] > duration:
+                raise ValueError(f"第 {turn['turn_index']} 轮结束时间超出视频时长，无法可靠划分轮次")
+        cache_payload["turn_windows"] = [
+            [turn["task_start_time"], turn["task_end_time"]]
+            for turn in item["turns"]
+        ]
     cache_key = json.dumps(
         cache_payload,
         ensure_ascii=True,
@@ -338,6 +371,81 @@ def _operation_timing(
         separators=(",", ":"),
     )
     return supplied, cache_key, warnings, ignored_fields
+
+
+def _extract_bounded_round(video: Path, directory: Path, *, task_start_time: float,
+                           task_end_time: float, max_frames: int) -> list[Path]:
+    """Physically exclude future frames before seeking near a turn boundary."""
+    length = task_end_time - task_start_time
+    with tempfile.TemporaryDirectory(prefix="ae_round_") as temporary:
+        clip = Path(temporary) / "window.mp4"
+        subprocess.run([
+            resolve_ffmpeg_executable(), "-v", "error", "-y", "-ss", str(task_start_time),
+            "-i", str(video), "-t", str(length), "-map", "0:v:0", "-an",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-threads", "1",
+            "-fps_mode", "vfr", str(clip),
+        ], check=True, capture_output=True)
+        frames = extract_scene_keyframes(clip, directory, task_start_time=0,
+            task_end_time=length, max_frames=max_frames)
+    metadata_path = directory / "keyframes.json"
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        for record in metadata.get("selected") or []:
+            record["time"] = round(float(record["time"]) + task_start_time, 3)
+        metadata.update(video=str(video), window_start=task_start_time, window_end=task_end_time)
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+    return frames
+
+
+def _conversation_extractor(item: dict, extract_fn: Callable, runs_dir: Path = RUNS_DIR) -> Callable:
+    """复用单窗算法，分轮保护证据，再统一全局帧号和绝对时间。"""
+    turns = item.get("turns") or []
+    if not turns:
+        return extract_fn
+
+    def extract(video: Path, out_dir: Path, **kwargs) -> list[Path]:
+        candidates: list[tuple[float, int, Path, dict]] = []
+        for directory in out_dir.glob("turn_*"):
+            if directory.is_dir() and re.fullmatch(r"turn_\d+", directory.name):
+                shutil.rmtree(directory)
+        # 固定单窗预算：同一历史轮次在不同前缀中复用完全相同的证据。
+        budget = 20
+        stat = video.stat()
+        for turn in turns:
+            fingerprint = json.dumps([item.get("_remote_video_identity") or str(video.resolve()),
+                stat.st_size, stat.st_mtime_ns, KEYFRAME_ALGORITHM_VERSION,
+                turn["task_start_time"], turn["task_end_time"], budget, OPERATION_ROUND_FRAME_VERSION])
+            digest = hashlib.sha256(fingerprint.encode()).hexdigest()
+            turn_dir = runs_dir / "videos" / "conversation_windows" / digest
+            with _WINDOW_LOCKS[int(digest[:8], 16) % len(_WINDOW_LOCKS)]:
+                window_fn = _extract_bounded_round if extract_fn is extract_scene_keyframes else extract_fn
+                frames = _extract_frames(video, turn_dir, extract_fn=window_fn, cache_key=fingerprint,
+                    extract_kwargs={"task_start_time": turn["task_start_time"],
+                        "task_end_time": turn["task_end_time"], "max_frames": budget})
+            if not frames:
+                raise ValueError(f"第 {turn['turn_index']} 轮抽帧失败")
+            metadata_file = turn_dir / "keyframes.json"
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8")) if metadata_file.exists() else {}
+            selected = metadata.get("selected") or []
+            for index, path in enumerate(frames):
+                record = dict(selected[index]) if index < len(selected) else {}
+                timestamp = record.get("time", turn["task_start_time"])
+                candidates.append((float(timestamp), turn["turn_index"], path, record))
+        paths, records = [], []
+        for timestamp, turn_index, path, record in sorted(candidates, key=lambda row: (row[0], row[1])):
+            target = out_dir / f"kf_{len(paths) + 1:03d}.jpg"
+            shutil.copy2(path, target)
+            paths.append(target)
+            records.append({**record, "index": len(paths), "time": timestamp, "turn_index": turn_index})
+        (out_dir / "keyframes.json").write_text(json.dumps({
+            "algorithm_version": KEYFRAME_ALGORITHM_VERSION,
+            "video": str(video), "selected_count": len(records),
+            "turn_windows": [[t["task_start_time"], t["task_end_time"]] for t in turns],
+            "selected": records,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        return paths
+
+    return extract
 
 
 def _rich_content_timing(
@@ -436,6 +544,9 @@ def _prepared_operation_item(
         normalized_item.pop(field, None)
     normalized_item.update(supplied_times)
     prepared = _prepared_item(normalized_item, video_path, frames, duration)
+    if item.get("turns") and frames:
+        metadata = json.loads((frames[0].parent / "keyframes.json").read_text(encoding="utf-8"))
+        prepared["frame_manifest"] = metadata.get("selected") or []
     if warnings:
         prepared["video_prepare_warnings"] = warnings
     return prepared
@@ -501,7 +612,7 @@ def prepare_cached_operation_item(
     frames = _extract_frames(
         video_path,
         frame_dir,
-        extract_fn=extract_fn,
+        extract_fn=_conversation_extractor(item, extract_fn, runs_dir),
         cache_key=cache_key,
         extract_kwargs=extract_kwargs,
     )
@@ -560,7 +671,7 @@ def prepare_session_operation_item(
     frames = _extract_frames(
         video_path,
         frame_dir,
-        extract_fn=extract_fn,
+        extract_fn=_conversation_extractor(item, extract_fn, runs_dir),
         cache_key=cache_key,
         extract_kwargs=extract_kwargs,
     )

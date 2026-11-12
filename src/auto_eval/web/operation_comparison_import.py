@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from ..analysis.operation_comparison import _match_rows
+from ..operation_conversation import fold_conversation_export_rows
 from ..analysis.operation_statistics import (
     OPERATION_CORRECTNESS,
     normalize_operation_issue_types,
@@ -51,6 +52,10 @@ def import_operation_comparison_file(
         raise ValueError("评估结果文件为空")
 
     records, sheet, dataset_records = _read_records(content, suffix)
+    source_row_count = len(records)
+    records = fold_conversation_export_rows(records)
+    if dataset_records is not None:
+        dataset_records = fold_conversation_export_rows(dataset_records)
     if not records:
         raise ValueError("文件中没有可导入的数据行")
     rows: list[dict[str, Any]] = []
@@ -89,6 +94,7 @@ def import_operation_comparison_file(
             "format": suffix.lstrip(".").upper(),
             "sheet": sheet,
             "raw_count": len(records),
+            "source_row_count": source_row_count,
             "valid_count": valid_count,
             "invalid_count": len(records) - valid_count,
             "warning_count": len(warnings),

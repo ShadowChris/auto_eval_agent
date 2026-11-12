@@ -61,7 +61,7 @@ from .operation_media import (
 from .tasks import DEFAULT_OPERATION_CONCURRENCY, Task, prune_task_cache
 from .remote_video import run_video_preparation, video_reference_for_log
 from .video_pipeline import stage_slot, video_item_scope
-from .operation_runs import freeze_frames, verify_frames, frame_items, frozen_evaluation_config, evaluation_snapshot
+from .operation_runs import freeze_frames, verify_frames, frame_items, frozen_evaluation_config, evaluation_snapshot, validate_conversation_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,8 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
     meta = dict(item.get("metadata") or {})
     if item.get("frames"):
         meta["frames"] = item["frames"]  # operation：抽好的关键帧路径，裁判读取后 encode 成 image_url
+    if item.get("frame_manifest"):
+        meta["frame_manifest"] = item["frame_manifest"]
     return EvalItem(
         id=item.get("id", f"q{idx}"),
         question=item["query"],
@@ -149,6 +151,9 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
         trace=item.get("trace"),
         media=item.get("media") or [],
         query_images=item.get("query_images") or [],
+        turns=item.get("turns") or [],
+        evaluation_scope=item.get("evaluation_scope") or ("conversation" if item.get("turns") else "single"),
+        turn_index=item.get("turn_index"),
         metadata=meta,
     )
 
@@ -579,6 +584,8 @@ async def _run(
     if execution_mode == "full" and "execution_mode" in task.options:
         _prepare_rerun_items(task, active_item_indices(task.items) if item_indices is None else item_indices)
     snapshot = task.options.get("evaluation_snapshot") if task.mode == "operation" else None
+    if task.mode == "operation":
+        validate_conversation_snapshot(task.items, task.options)
     if snapshot and not extract_only:
         cfg = frozen_evaluation_config(cfg, snapshot)
     judges_cfg = [] if extract_only else _selected_judge_configs(task, cfg)
@@ -736,7 +743,7 @@ async def _run(
                     and not _is_multi_group_operation(item_dict)
                     and any(
                         item_dict.get(field)
-                        for field in ("query_images", "query_image_path", "attachment_path")
+                        for field in ("query_images", "query_image_path", "attachment_path", "turns")
                     )
                 ):
                     try:
@@ -747,6 +754,8 @@ async def _run(
                         item_dict["query_images"] = prepared_images.get(
                             "query_images", []
                         )
+                        if prepared_images.get("turns"):
+                            item_dict["turns"] = prepared_images["turns"]
                     except Exception as exc:
                         last_error = exc
                         preparation_failure_stage = "query_images"
@@ -785,6 +794,8 @@ async def _run(
                             group_item["query_images"] = prepared_images.get(
                                 "query_images", []
                             )
+                            if prepared_images.get("turns"):
+                                group_item["turns"] = prepared_images["turns"]
                         except Exception as exc:
                             group_item["prepare_error"] = (
                                 f"用户输入图片校验失败：{type(exc).__name__}: {exc}"
@@ -1062,6 +1073,12 @@ async def _run(
                     res.setdefault("failure_stage", preparation_failure_stage or ("extraction" if extract_only or last_error and not item_dict.get("frames") else "evaluation"))
             res["duration_s"] = round(time.perf_counter() - started, 1)
             query_images = list(item_dict.get("query_images") or [])
+            if item_dict.get("turns"):
+                image_turns = item_dict["turns"][-1:] if item_dict.get("evaluation_scope") == "latest_turn" else item_dict["turns"]
+                query_images = [path for turn in image_turns for path in turn.get("query_images") or []]
+                res.update(case_id=item_dict.get("case_id") or item_dict.get("id"), turn_count=item_dict.get("turn_count") or len(item_dict["turns"]))
+                if item_dict.get("evaluation_scope") == "latest_turn":
+                    res.update(evaluation_scope="latest_turn", turn_index=item_dict["turn_index"])
             if query_images:
                 res["query_images"] = query_images
                 res["query_image_count"] = len(query_images)
@@ -1299,7 +1316,7 @@ async def _eval_operation_groups(
     use_joint = (
         requested_strategy.startswith("multi_group") and len(evaluable) >= 2
         and not any(
-            (variant.get("item") or {}).get("query_images")
+            ((variant.get("item") or {}).get("query_images") or (variant.get("item") or {}).get("turns"))
             for variant in evaluable
         )
     )

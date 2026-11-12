@@ -69,7 +69,11 @@ def operation_result_identity_fields(
 
 def operation_user_result_display_row(row: dict[str, Any]) -> dict[str, Any]:
     """按统一顺序生成带用户可见表头的任务类评估结果行。"""
-    return {
+    displayed = {
         OPERATION_RESULT_FIELD_LABELS.get(field, field): row.get(field, "")
         for field in OPERATION_USER_RESULT_COLUMNS
     }
+    for key in ("case_id", "turn_index", "turn_count", "is_result_row", "evaluation_scope"):
+        if key in row:
+            displayed[key] = row[key]
+    return displayed

@@ -38,6 +38,7 @@ from ..judges.trace_storage import (
     trace_path_reference,
 )
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from ..operation_conversation import conversation_export_snapshot
 from .dataset_revision import (
     active_result_count,
     active_total,
@@ -494,6 +495,8 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
         item_fields = {
             "id", "query", "question", "context", "category", "source_line",
             "query_images",
+            "turn_count",
+            "turn_index", "evaluation_scope",
             "case_id", "evaluation_strategy", "alignment_status",
             "alignment_warnings", "group_variants", "image_input",
             "dataset_status", "dataset_revision", "dataset_source_batch_id",
@@ -714,6 +717,9 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
     ``evaluation`` 与 ``eval_run``，避免覆盖源数据自带的 status/error。
     """
     snapshot = _with_operation_compat(snapshot)
+    case_eval_run = _jsonl_eval_run(snapshot)
+    if snapshot.get("mode") == "operation" and any(item.get("turns") for item in snapshot.get("items") or []):
+        snapshot = conversation_export_snapshot(snapshot)
     if (
         snapshot.get("mode") == "operation"
         and (snapshot.get("options") or {}).get("operation_layout") == "multi_group"
@@ -734,7 +740,7 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
         if item_id:
             by_item_id[item_id] = result
 
-    eval_run = _jsonl_eval_run(snapshot)
+    eval_run = case_eval_run
     item_progress = snapshot.get("item_progress") or {}
     rows: list[dict] = []
     for index, item in enumerate(items):
@@ -789,6 +795,14 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
                 "source_batch_id": item.get("dataset_source_batch_id") or "",
             },
         })
+        if item.get("is_result_row") is False:
+            row["evaluation"] = None
+        if item.get("evaluation_scope") == "latest_turn":
+            row.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "evaluation_scope")})
+            # A round export is independently reusable, including continuation rows
+            # whose original video_path was intentionally blank.
+            row["video_path"] = _project_relative_path(item.get("video_path"))
+            row["turns"] = [{key: value for key, value in turn.items() if key != "source_data"} for turn in item["turns"]]
         rows.append(row)
     return rows
 
@@ -959,6 +973,9 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     传入 cfg 时，会按 skill 配置保留完整的维度列，N/A 的维度也会导出并在单元格填"N/A"。
     """
     snapshot = _with_operation_compat(snapshot)
+    case_snapshot = snapshot
+    if snapshot.get("mode") == "operation" and any(item.get("turns") for item in snapshot.get("items") or []):
+        snapshot = conversation_export_snapshot(snapshot)
     results = _results_with_identity(snapshot)
     aligned_results = _aligned_results(snapshot, results)
     summary = snapshot.get("summary") or {}
@@ -1015,7 +1032,7 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
                 for row in rows["逐题结果"]
             ]
     frame_rows = _frame_manifest_rows(
-        snapshot,
+        case_snapshot,
         include_original_video=mode != "operation",
     )
     if frame_rows:
@@ -1035,11 +1052,11 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
     if mode == "operation":
         # 任务类只有一个固定垂域，不再生成重复的按垂域拆分表、
         # 失败表和通用垂域统计表。失败与告警仍在“逐题结果”原行展示。
-        rows["运行汇总"] = [_operation_run_summary(snapshot)]
+        rows["运行汇总"] = [_operation_run_summary(case_snapshot)]
         if multi_operation and (summary.get("group_summaries") or []):
             rows["实验组汇总"] = list(summary["group_summaries"])
         if not multi_operation:
-            rows["统计分布"] = _operation_statistics_export_rows(snapshot)
+            rows["统计分布"] = _operation_statistics_export_rows(case_snapshot)
         return rows
     rows["运行信息"] = [_run_info(snapshot)]
     if mode == "compare":
@@ -1339,7 +1356,14 @@ def _operation_export_rows(
             values["route_evidence"] = json.dumps(
                 values["route_evidence"], ensure_ascii=False
             )
-        export.append({key: values[key] for key in _OPERATION_EXPORT_COLUMNS})
+        exported = {key: values[key] for key in _OPERATION_EXPORT_COLUMNS}
+        if "is_result_row" in item:
+            exported.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "is_result_row")})
+            if not item["is_result_row"]:
+                _clear_conversation_evaluation(exported)
+        if item.get("evaluation_scope") == "latest_turn":
+            exported.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "evaluation_scope")})
+        export.append(exported)
     return export
 
 
@@ -1471,8 +1495,41 @@ def _operation_user_result_rows(
                 item.get("duration"),
             ),
         }
-        rows.append({key: values[key] for key in _OPERATION_USER_RESULT_COLUMNS})
+        # Explicit empty results are authoritative. Old evaluation columns in
+        # the input belong in 数据集明细, not in a new/failed/pending verdict.
+        for key in values:
+            if key in result and _is_operation_evaluation_field(key):
+                value = result[key]
+                values[key] = "；".join(str(part) for part in value) if isinstance(value, (list, tuple, set)) else value
+        if item.get("is_result_row") is False:
+            _clear_conversation_evaluation(values)
+        projected = {key: values[key] for key in _OPERATION_USER_RESULT_COLUMNS}
+        if "is_result_row" in item:
+            projected.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "is_result_row")})
+        if item.get("evaluation_scope") == "latest_turn":
+            projected.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "evaluation_scope")})
+        rows.append(projected)
     return rows
+
+
+_OPERATION_EVALUATION_FIELDS = frozenset({
+    "correctness", "judge_correctness", "issue_types", "need_review_cate", "rationale",
+    "is_low_level", "total", "latency_s", "task_type", "cards", "card_presence", "card_types",
+    "card_suitability", "card_suitability_reason", "execution_routes", "route_status", "route_evidence",
+    "route_rationale", "链路类型", "error", "评估状态", "video_prepare_warnings",
+    "Provider", "Provider ID", "模型", "Provider版本", "重跑次数", "最后重跑时间",
+})
+
+
+def _is_operation_evaluation_field(key: str) -> bool:
+    return key in _OPERATION_EVALUATION_FIELDS or key.startswith(("维度_", "理由_"))
+
+
+def _clear_conversation_evaluation(row: dict) -> None:
+    """Continuation blanks are not pending/failed evaluations, even with source scores."""
+    for key in row:
+        if _is_operation_evaluation_field(key):
+            row[key] = ""
 
 
 def _operation_multi_case_results(snapshot: dict) -> dict[int, dict]:
@@ -1827,6 +1884,8 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
                 "录屏时长（秒）": item.get("duration") or "",
             })
         row.update(media_fields)
+        if item.get("evaluation_scope") == "latest_turn":
+            row.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "evaluation_scope")})
         rows.append(row)
     return rows
 
@@ -1910,6 +1969,7 @@ def _frame_manifest_rows(
                 "帧序号": frame_index,
                 "帧项目相对路径": _project_relative_path(frame),
                 "时间点": info.get("time", ""),
+                **({"轮次": info.get("turn_index", "")} if item.get("turns") else {}),
                 "来源": info.get("source", ""),
                 "保留原因": info.get("keep_reason", ""),
                 "抽帧状态": "已生成" if frame.is_file() else "文件缺失",
@@ -2237,6 +2297,8 @@ def operation_comparison_batch(snapshot: dict, *, include_source_data: bool = Fa
             source.get("index")
             if "index" in source else item.get("index", "")
         )
+        if item.get("turns"):
+            source = {**source, "turns": [dict(turn.get("source_data") or turn) for turn in item["turns"]]}
         export_row = dict(export_by_index.get(position) or {})
         # 对比导出的每个数据组与单数据组“评估结果”复用同一字段投影，
         # 同时保留报告仍在使用的内部导出字段。
@@ -2260,7 +2322,7 @@ def operation_comparison_batch(snapshot: dict, *, include_source_data: bool = Fa
             "export": export_row,
             "input_data": {
                 key: source[key]
-                for key in ("context", "query_images", "query_image_path", "attachment_path")
+                for key in ("context", "query_images", "query_image_path", "attachment_path", "turns")
                 if key in source
             },
         }

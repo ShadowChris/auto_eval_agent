@@ -22,6 +22,7 @@ from numbers import Real
 from typing import Literal
 
 from ..media import DEFAULT_TASK_START_TIME
+from ..operation_conversation import MAX_QUERY_IMAGES, operation_query_images
 
 Mode = Literal[
     "single",
@@ -33,36 +34,6 @@ Mode = Literal[
     "rich_content_quality",
 ]
 _CONTEXT_PREFIX = "@context:"
-MAX_QUERY_IMAGES = 4
-
-
-def operation_query_images(obj: dict) -> list[str]:
-    """读取可选图片路径/链接；标准数组优先，兼容单图字段。"""
-    value = obj.get("query_images")
-    if value is None or value == []:
-        for field in ("query_image_path", "attachment_path"):
-            single = obj.get(field)
-            if single is None or single == "":
-                continue
-            if not isinstance(single, str):
-                raise ValueError(f"{field} 必须是图片路径或 HTTP/HTTPS 链接字符串")
-            if single.strip():
-                value = [single]
-                break
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("query_images 必须是图片路径字符串数组")
-    if len(value) > MAX_QUERY_IMAGES:
-        raise ValueError(f"query_images 最多支持 {MAX_QUERY_IMAGES} 张")
-    images: list[str] = []
-    for index, path in enumerate(value, start=1):
-        if not isinstance(path, str) or not path.strip():
-            raise ValueError(f"query_images 第 {index} 项必须是非空图片路径")
-        normalized = path.strip()
-        if normalized not in images:
-            images.append(normalized)
-    return images
 
 
 def _json_safe_source(value):
@@ -188,6 +159,43 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
 
 
 def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
+    if mode != "operation":
+        return _parse_jsonl_rows(content, mode)
+    from ..operation_conversation import normalize_operation_items, has_turn_markers
+
+    raw_rows = []
+    try:
+        for line, text in enumerate(content.splitlines(), 1):
+            if not text.strip():
+                continue
+            value = json.loads(text)
+            raw_rows.append((line, value))
+    except json.JSONDecodeError:
+        # Do not skip a damaged round in a marked conversation.
+        if '"is_start"' in content or '"turns"' in content:
+            return [], [f"第 {line} 行 JSON 错误，多轮数据未导入"]
+        return _parse_jsonl_rows(content, mode)
+    if not any(isinstance(row, dict) and (has_turn_markers(row) or "turns" in row) for _, row in raw_rows):
+        return _parse_jsonl_rows(content, mode)
+    invalid = next((line for line, row in raw_rows if not isinstance(row, dict)), None)
+    if invalid is not None:
+        return [], [f"第 {invalid} 行必须是 JSON 对象，多轮数据未导入"]
+    try:
+        grouped = normalize_operation_items([
+            {**row, "source_line": line, "source_data": _source_data_with_flat_metadata(row)}
+            for line, row in raw_rows
+        ])
+        parsed, errors = _parse_jsonl_rows("\n".join(json.dumps(row, ensure_ascii=False) for row in grouped), mode)
+        if not errors:
+            for item, original in zip(parsed, grouped):
+                item["source_data"] = original.get("source_data") or _source_data_with_flat_metadata(original)
+                item["source_line"] = original.get("source_line", item.get("source_line"))
+        return ([], errors) if errors else (parsed, [])
+    except ValueError as exc:
+        return [], [str(exc)]
+
+
+def _parse_jsonl_rows(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     """解析 jsonl；任务类（录屏）的任务起止时间为可选秒数，空值使用默认策略。"""
     items: list[dict] = []
     errors: list[str] = []
@@ -302,5 +310,11 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
             item["category"] = obj["category"]
         # 原始字段仅用于历史追溯和导出，不会进入 EvalItem 或裁判 prompt。
         item["source_data"] = _source_data_with_flat_metadata(obj)
+        if mode == "operation" and obj.get("turns"):
+            for key in ("turns", "case_id", "turn_count", "turn_index", "evaluation_scope"):
+                if key in obj:
+                    item[key] = obj[key]
+            item["source_data"] = obj.get("source_data") or item["source_data"]
+            item["source_line"] = obj.get("source_line", ln)
         items.append(item)
     return items, errors

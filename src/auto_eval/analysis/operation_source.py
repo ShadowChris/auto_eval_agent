@@ -24,6 +24,17 @@ def _shared_inputs(row: dict[str, Any]) -> dict[str, Any]:
         for key, value in metadata.items():
             source.setdefault(str(key), value)
     inputs = {}
+    if isinstance(source.get("turns"), list):
+        inputs["turns"] = []
+        for turn in source["turns"]:
+            if not isinstance(turn, dict):
+                continue
+            round_inputs = _shared_inputs({"source_data": turn})
+            inputs["turns"].append({
+                "query": " ".join(str(turn.get("query") or turn.get("question") or "").split()),
+                "context": round_inputs.get("context", ""),
+                "query_images": round_inputs.get("query_images", []),
+            })
     if "context" in source:
         inputs["context"] = str(source["context"] or "").strip()
     image_fields = ("query_images", "query_image_path", "attachment_path")

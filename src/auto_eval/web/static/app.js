@@ -433,13 +433,21 @@ createApp({
       key: importedPreviewKey(item, index),
       incoming_id: String(item.id || `第${index + 1}条`),
       query: item.query || "",
-      context: item.context || "",
+      context: (item.turns || []).length
+        ? item.turns.filter(turn => turn.context).map(turn => `第${turn.turn_index}轮：${turn.context}`).join("\n")
+        : (item.context || ""),
       video_path: item.videoPath || "",
-      query_images: (item.queryImages || []).length
+      query_images: (item.turns || []).length
+        ? item.turns.flatMap(turn => turn.query_images || [])
+        : (item.queryImages || []).length
         ? [...item.queryImages]
         : (item.attachmentPath ? [item.attachmentPath] : []),
       task_start_time: item.taskStartTime,
       task_end_time: item.taskEndTime,
+      turn_count: item.turnCount || (item.turns || []).length || 1,
+      turn_index: item.turnIndex,
+      evaluation_scope: item.evaluationScope,
+      turn_windows: (item.turns || []).map(turn => [turn.task_start_time, turn.task_end_time]),
     })));
     const importedPreviewPageCount = computed(() => Math.max(
       1,
@@ -1755,6 +1763,11 @@ createApp({
               contentEndTime: item.content_end_time ?? null,
               sourceLine: item.source_line ?? null,
               sourceData: item.source_data || null,
+              turns: item.turns || [],
+              caseId: item.case_id || "",
+              turnIndex: item.turn_index ?? null,
+              turnCount: item.turn_count ?? null,
+              evaluationScope: item.evaluation_scope || "",
             };
           });
           importedDatasetSelections.value = Object.fromEntries(
@@ -2030,6 +2043,13 @@ createApp({
             item.category = "operation";
             item.answer = (it.answer || "").trim();
             if ((it.queryImages || []).length) item.query_images = [...it.queryImages];
+            if ((it.turns || []).length) {
+              item.turns = it.turns;
+              item.case_id = it.caseId || item.id;
+              if (it.evaluationScope) item.evaluation_scope = it.evaluationScope;
+              if (it.turnIndex != null) item.turn_index = it.turnIndex;
+              if (it.turnCount != null) item.turn_count = it.turnCount;
+            }
           } else {
             // rich_content / rich_content_quality
             item.category = (it.category || "").trim() || "default";
@@ -2963,6 +2983,9 @@ createApp({
     }
 
     function formatAppendPreviewTimeRange(row) {
+      if (row?.turn_windows?.length) {
+        return row.turn_windows.map(([start, end], index) => `第${index + 1}轮：${start}–${end} 秒`).join("；");
+      }
       const start = row?.task_start_time;
       const end = row?.task_end_time;
       const hasStart = start !== null && start !== undefined && String(start).trim() !== "";

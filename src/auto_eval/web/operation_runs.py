@@ -13,12 +13,14 @@ import tempfile
 from ..config import AppConfig, DomainSkill, EnsembleConfig, ExpertKnowledgeBase, RubricDim
 from ..judges import prompts
 from ..paths import RUNS_DIR
+from ..operation_conversation import OPERATION_ROUND_FRAME_VERSION
 
 
 EXECUTION_MODES = {"full", "extract_only", "evaluate_only"}
 FRAME_FIELDS = {
     "frames", "frame_count", "frame_set_id", "frame_manifest_path", "image_input",
     "prepare_error", "video_prepare_warnings", "_remote_video_identity",
+    "frame_manifest",
 }
 
 
@@ -26,6 +28,27 @@ def frame_items(item: dict) -> list[dict]:
     if item.get("group_variants"):
         return [variant["item"] for variant in item["group_variants"] if isinstance(variant.get("item"), dict)]
     return [item]
+
+
+def validate_conversation_snapshot(items: list[dict], options: dict) -> None:
+    """旧规则快照不能静默用于新多轮 Case，也不能无提示改写历史标准。"""
+    snapshot = options.get("evaluation_snapshot")
+    if options.get("execution_mode") == "extract_only" or not snapshot:
+        return
+    if not any(row.get("turns") for item in items for row in frame_items(item)):
+        return
+    policy = (snapshot.get("operation_skill") or {}).get("operation_policy") or {}
+    templates = snapshot.get("templates") or {}
+    if not policy.get("multi_turn_rules") or "turns" not in templates.get("OPERATION_USER", ""):
+        raise ValueError("目标评估集的历史规则快照不支持多轮，请新建评估集；未修改原数据")
+    if any(row.get("evaluation_scope") == "latest_turn" for item in items for row in frame_items(item)):
+        if policy.get("multi_turn_evaluation_scope") != "latest_turn" or "current_turn_index" not in templates.get("OPERATION_USER", ""):
+            raise ValueError("目标历史采用整会话评估，不能混入逐轮口径；请新建评估集")
+    if policy.get("multi_turn_evaluation_scope") == "latest_turn" and any(
+        row.get("turns") and row.get("evaluation_scope") != "latest_turn"
+        for item in items for row in frame_items(item)
+    ):
+        raise ValueError("旧整会话输入不能套用逐轮规则，请重新导入数据并抽帧新建逐轮评估集；原历史未修改")
 
 
 def _digest(path: Path) -> str:
@@ -68,6 +91,21 @@ def verify_frame_item(item: dict, runs_dir: Path = RUNS_DIR) -> None:
             metadata_path = directory / "keyframes.json"
             if metadata_path.is_symlink() or json.loads(metadata_path.read_text(encoding="utf-8")) != manifest["metadata"]:
                 raise ValueError("抽帧元数据发生变化，请重新抽帧创建新任务")
+        if item.get("turns"):
+            metadata = manifest.get("metadata") or {}
+            expected_windows = [[t["task_start_time"], t["task_end_time"]] for t in item["turns"]]
+            if metadata.get("turn_windows") != expected_windows:
+                raise ValueError("多轮时间窗与抽帧版本不一致，请重新抽帧")
+            if item.get("frame_manifest") != metadata.get("selected"):
+                raise ValueError("多轮帧映射与抽帧版本不一致，请重新抽帧")
+            if item.get("evaluation_scope") == "latest_turn":
+                key = (manifest.get("extraction") or {}).get("cache_key") or ""
+                try:
+                    extraction = json.loads(key.split(":remote:", 1)[0])
+                except (TypeError, ValueError, AttributeError):
+                    extraction = {}
+                if not isinstance(extraction, dict) or extraction.get("window_sampling_version") != OPERATION_ROUND_FRAME_VERSION:
+                    raise ValueError("多轮抽帧采用旧时间窗策略，可能包含后轮画面；请重新抽帧新建逐轮评估")
         expected = [directory / f"kf_{index + 1:03d}.jpg" for index in range(len(records))]
         if [str(path) for path in expected] != item.get("frames"):
             raise ValueError("抽帧列表与版本清单不一致")

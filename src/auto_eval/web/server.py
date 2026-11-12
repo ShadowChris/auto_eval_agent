@@ -92,7 +92,7 @@ from .operation_groups import align_operation_groups
 from .comparison_uploads import ComparisonUploadStore
 from .frame_preview import create_frame_preview_router
 from .pipeline_config import current_pipeline_config, save_pipeline_config
-from .operation_runs import EXECUTION_MODES, evaluation_snapshot, fork_items
+from .operation_runs import EXECUTION_MODES, evaluation_snapshot, fork_items, validate_conversation_snapshot
 from .remote_video import cleanup_stale_video_downloads, is_remote_video_url, run_video_preparation
 from .operation_comparison_import import (
     SUPPORTED_SUFFIXES as COMPARISON_IMPORT_SUFFIXES,
@@ -518,6 +518,11 @@ def _normalize_single_operation_item(raw_item: dict) -> dict:
     )
     if errors:
         raise HTTPException(422, errors[0].replace("第 1 行 ", "item."))
+    if raw_item.get("turns") and items:
+        latest = items[-1]
+        latest["id"] = item_id.strip()
+        latest["source_data"] = {**latest.get("source_data", {}), "id": item_id.strip()}
+        return latest
     if len(items) != 1:
         raise HTTPException(422, "item 不是有效的任务类录屏数据")
     return items[0]
@@ -546,6 +551,10 @@ def _normalized_dataset_identity(value) -> str | None:
 
 def _dataset_item_keys(item: dict) -> set[str]:
     """返回题目的全部稳定标识，兼容表格原始列与标准字段。"""
+    if item.get("evaluation_scope") == "latest_turn":
+        return {str(item.get("id") or "").strip()} - {""}
+    if item.get("turns"):
+        return {str(item.get("case_id") or item.get("id") or "").strip()} - {""}
     source = item.get("source_data")
     source = source if isinstance(source, dict) else {}
     keys: set[str] = set()
@@ -559,6 +568,10 @@ def _dataset_item_keys(item: dict) -> set[str]:
 
 def _dataset_item_key(item: dict) -> str | None:
     """返回用于提示的主标识；表格优先原始 index/序号。"""
+    if item.get("evaluation_scope") == "latest_turn":
+        return str(item.get("id") or "").strip() or None
+    if item.get("turns"):
+        return str(item.get("case_id") or item.get("id") or "").strip() or None
     source = item.get("source_data")
     source = source if isinstance(source, dict) else {}
     for field in ("index", "序号", "id"):
@@ -1312,6 +1325,12 @@ def api_align_operation_groups(req: OperationGroupsAlignReq):
 async def api_eval(req: EvalReq):
     if not req.items:
         raise HTTPException(400, "items 为空")
+    if req.mode == "operation":
+        from ..operation_conversation import normalize_operation_items
+        try:
+            req = req.model_copy(update={"items": normalize_operation_items(req.items)})
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     if req.mode != "operation" and "execution_mode" in req.options:
         raise HTTPException(422, "分阶段执行模式目前仅支持任务类")
     app_cfg = cfg()
@@ -1373,6 +1392,11 @@ async def api_eval(req: EvalReq):
         raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if req.mode == "operation":
+        try:
+            validate_conversation_snapshot(req.items, task_options)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     if append_task is None:
         task = new_task(
             req.mode,
@@ -1445,6 +1469,19 @@ async def api_eval(req: EvalReq):
                 )
             resolutions = dict(req.conflict_resolutions)
 
+        from ..operation_conversation import validate_round_prefixes
+        prospective = list(task.items)
+        for entry in merge_preview["_entries"]:
+            incoming_item = req.items[int(entry["incoming_position"])]
+            existing_index = entry["existing_index"]
+            if existing_index is None:
+                prospective.append(incoming_item)
+            elif resolutions.get(str(entry["key"]), "keep_existing") != "keep_existing":
+                prospective[existing_index] = incoming_item
+        try:
+            validate_round_prefixes(prospective)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         _ensure_dataset_tracking(task)
         batch_no = max(
             [int(batch.get("batch_no") or 0) for batch in task.dataset_batches],
@@ -1737,6 +1774,11 @@ async def api_eval_single(req: SingleEvalReq):
     dataset_name = req.dataset_name.strip()
     task = get_task(task_id)
     rerun_attempt = None
+    if task is not None:
+        try:
+            validate_conversation_snapshot([item], task.options)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     if task is None:
         task = new_task(
             "operation",
@@ -1775,6 +1817,12 @@ async def api_eval_single(req: SingleEvalReq):
             ),
             None,
         )
+        from ..operation_conversation import validate_round_prefixes
+        prospective = [existing for index, existing in enumerate(task.items) if index != item_index] + [item]
+        try:
+            validate_round_prefixes(prospective)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         if item_index is None:
             task.items.append(item)
             item_index = len(task.items) - 1
@@ -1922,6 +1970,11 @@ async def api_prepare_operation(req: OperationPrepareReq):
     """批量准备本地/远程任务视频，复用阶段资源上限，逐条隔离错误。"""
     if not req.items:
         raise HTTPException(400, "items 为空")
+    from ..operation_conversation import normalize_operation_items
+    try:
+        req = req.model_copy(update={"items": normalize_operation_items(req.items)})
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     concurrency = max(1, min(int(req.concurrency or 2), 8))
     semaphore = asyncio.Semaphore(concurrency)
 
@@ -2922,6 +2975,7 @@ async def api_operation_fork(task_id: str, req: OperationForkReq):
         items = await asyncio.to_thread(
             fork_items, source, indices, reuse_frames=req.action == "reuse_frames", runs_dir=RUNS_DIR,
         )
+        validate_conversation_snapshot(items, options)
     except (ValueError, KeyError, OSError) as exc:
         raise HTTPException(422, f"无法新建版本：{exc}") from exc
     suffix = "复用帧评估" if req.action == "reuse_frames" else "重抽帧"
@@ -3226,6 +3280,8 @@ def api_export_item(
 
     if format in {"query_image", "query-image"}:
         raw_images = list(item.get("query_images") or [])
+        if item.get("turns"):
+            raw_images = [path for turn in item["turns"] for path in turn.get("query_images") or []]
         if image_index < 0 or image_index >= len(raw_images):
             raise HTTPException(404, "该条结果没有对应的原输入图片")
         try:
