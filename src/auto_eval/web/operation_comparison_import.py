@@ -416,6 +416,8 @@ def _standard_export(
         "video_url_domain": ("video_url_domain",),
         "video_url_ip": ("video_url_ip",),
         "录屏时长": ("录屏时长", "耗时", "录屏时长（秒）", "duration"),
+        "task_start_time": ("task_start_time",),
+        "task_end_time": ("task_end_time",),
     }
     export = {}
     for output_key, candidates in aliases.items():

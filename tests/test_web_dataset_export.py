@@ -180,6 +180,8 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
         "video_url_domain",
         "video_url_ip",
         "录屏时长",
+        "task_start_time",
+        "task_end_time",
     ]
     assert user_results[0]["session_id"] == "session-001"
     assert user_results[0]["id"] == "op_1"
@@ -388,7 +390,10 @@ def test_operation_xlsx_contains_two_statistics_tables(tmp_path: Path) -> None:
     assert workbook.sheetnames[0] == "评估结果"
     result_sheet = workbook["评估结果"]
     assert result_sheet.freeze_panes is None
-    assert result_sheet.auto_filter.ref == "A1:AF4"
+    from openpyxl.utils import get_column_letter
+
+    end_column = get_column_letter(len(history._OPERATION_USER_RESULT_COLUMNS))
+    assert result_sheet.auto_filter.ref == f"A1:{end_column}4"
     assert result_sheet.sheet_view.showGridLines is None
     assert result_sheet["A1"].fill.patternType is None
     assert result_sheet["A1"].alignment.wrap_text is None
