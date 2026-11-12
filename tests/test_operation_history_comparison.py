@@ -517,10 +517,15 @@ def test_history_comparison_api_and_xlsx_export(monkeypatch) -> None:
     assert baseline_values["录屏时长"] == 12.5
     merged_ranges = {str(value) for value in detail_sheet.merged_cells.ranges}
     assert "A1:D1" in merged_ranges
-    assert "E1:AJ1" in merged_ranges
-    assert "AK1:BP1" in merged_ranges
+    from openpyxl.utils import get_column_letter
+
+    first_end = get_column_letter(4 + field_count)
+    second_start = get_column_letter(5 + field_count)
+    second_end = get_column_letter(4 + 2 * field_count)
+    assert f"E1:{first_end}1" in merged_ranges
+    assert f"{second_start}1:{second_end}1" in merged_ranges
     assert detail_sheet.freeze_panes == "E3"
-    assert detail_sheet.auto_filter.ref.startswith("A2:BP")
+    assert detail_sheet.auto_filter.ref.startswith(f"A2:{second_end}")
     assert detail_sheet["A3"].border.left.style == "thin"
     assert detail_sheet["D3"].alignment.wrap_text is False
 
