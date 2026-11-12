@@ -447,6 +447,8 @@ createApp({
       turn_count: item.turnCount || (item.turns || []).length || 1,
       turn_index: item.turnIndex,
       evaluation_scope: item.evaluationScope,
+      input_error: item.inputError || "",
+      input_warnings: item.inputWarnings || [],
       turn_windows: (item.turns || []).map(turn => [turn.task_start_time, turn.task_end_time]),
     })));
     const importedPreviewPageCount = computed(() => Math.max(
@@ -1771,6 +1773,8 @@ createApp({
               turnIndex: item.turn_index ?? null,
               turnCount: item.turn_count ?? null,
               evaluationScope: item.evaluation_scope || "",
+              inputError: item.input_error || "",
+              inputWarnings: item.input_warnings || [],
             };
           });
           importedDatasetSelections.value = Object.fromEntries(
@@ -1974,8 +1978,8 @@ createApp({
       }
       if (isVideoMode.value)
         return !opPreparing.value && opItems.value.some(
-          (it, index) => it.query.trim()
-            && ((it.frames || []).length || it.videoPath)
+          (it, index) => (it.inputError || (it.query.trim()
+            && ((it.frames || []).length || it.videoPath)))
             && (
               !hasImportedOperationDataset.value
               || importedDatasetSelections.value[String(index)] !== false
@@ -2020,8 +2024,8 @@ createApp({
         }
       } else if (isVideoMode.value) {
         const valid = opItems.value.map((it, sourceIndex) => ({ it, sourceIndex })).filter(
-          ({ it, sourceIndex }) => it.query.trim()
-            && ((it.frames || []).length || it.videoPath)
+          ({ it, sourceIndex }) => (it.inputError || (it.query.trim()
+            && ((it.frames || []).length || it.videoPath)))
             && (
               !hasImportedOperationDataset.value
               || importedDatasetSelections.value[String(sourceIndex)] !== false
@@ -2045,11 +2049,13 @@ createApp({
           if (mode.value === "operation") {
             item.category = "operation";
             item.answer = (it.answer || "").trim();
+            if (it.inputError) item.input_error = it.inputError;
+            if ((it.inputWarnings || []).length) item.input_warnings = [...it.inputWarnings];
             if ((it.queryImages || []).length) item.query_images = [...it.queryImages];
             item.attachment_url_domain = it.attachmentUrlDomain || "";
             item.attachment_url_ip = it.attachmentUrlIp || "";
-            if ((it.turns || []).length) {
-              item.turns = it.turns;
+            if ((it.turns || []).length || it.evaluationScope === "latest_turn") {
+              if ((it.turns || []).length) item.turns = it.turns;
               item.case_id = it.caseId ?? item.id;
               if (it.conversationId) item.conversation_id = it.conversationId;
               if (it.evaluationScope) item.evaluation_scope = it.evaluationScope;
@@ -3706,12 +3712,12 @@ createApp({
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
     function resultWarnings(result) {
-      const direct = result?.video_prepare_warnings;
-      if (Array.isArray(direct) && direct.length) return direct.filter(Boolean).map(String);
       const index = Number(result?.index);
-      if (!Number.isInteger(index) || index < 0) return [];
-      const itemWarnings = items.value[index]?.video_prepare_warnings;
-      return Array.isArray(itemWarnings) ? itemWarnings.filter(Boolean).map(String) : [];
+      const item = Number.isInteger(index) && index >= 0 ? items.value[index] : null;
+      return [...new Set([
+        ...(result?.input_warnings || item?.input_warnings || []),
+        ...(result?.video_prepare_warnings || item?.video_prepare_warnings || []),
+      ].filter(Boolean).map(String))];
     }
     function itemArtifactUrl(result, format) {
       const index = Number(result && result.index);

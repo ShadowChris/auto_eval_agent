@@ -129,7 +129,7 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _table_query_images(value: Any) -> list[str]:
+def _table_query_images(value: Any, *, strict: bool = False) -> list[str]:
     """表格单元格支持单路径；query_images 也可填写 JSON 字符串数组。"""
     if _is_empty(value):
         return []
@@ -145,6 +145,8 @@ def _table_query_images(value: Any) -> list[str]:
     images: list[str] = []
     for image in values:
         if _is_empty(image):
+            if strict:
+                raise ValueError("query_images 数组中的图片路径不能为空")
             continue
         if not isinstance(image, str):
             raise ValueError("query_images 中的图片路径必须是字符串")
@@ -506,6 +508,10 @@ def convert_table(
     has_video_path_column = VIDEO_PATH_COLUMN in df.columns
     has_query_images_column = QUERY_IMAGES_COLUMN in df.columns
     has_query_image_path_column = QUERY_IMAGE_PATH_COLUMN in df.columns
+    multi_turn_table = any(
+        column in df.columns and any(not _is_empty(value) for value in df[column])
+        for column in ("is_start", "is_end")
+    )
     direct_standard_columns = tuple(
         column
         for column, present in (
@@ -542,7 +548,7 @@ def convert_table(
                 id_suffix = f"excel_row_{source_row:04d}"
                 row_warnings.append(f"missing_{id_source_column}")
             item_id = f"{prefix}_{id_suffix}"
-        if item_id in used_ids:
+        if item_id in used_ids and not multi_turn_table:
             first_row = used_ids[item_id]
             raise ValueError(
                 f"输入或生成的 id 重复：{item_id}，首次出现在第 {first_row} 行，"
@@ -580,8 +586,9 @@ def convert_table(
                 if present
             ),
         )
+        marked = any(not _is_empty(row.get(key)) for key in ("is_start", "is_end"))
         try:
-            query_images = _table_query_images(raw_query_images)
+            query_images = _table_query_images(raw_query_images, strict=marked)
             if not query_images:
                 query_images = attachment_image_urls({
                     field: _json_value(row.get(field))
@@ -590,7 +597,7 @@ def convert_table(
         except ValueError as exc:
             query_images = []
             row_warnings.append(f"invalid_query_images:{exc}")
-        if query_images:
+        if query_images or has_query_images_column:
             item[QUERY_IMAGES_COLUMN] = query_images
 
         if has_answer_column:
@@ -625,6 +632,17 @@ def convert_table(
         ):
             item.pop("task_end_time", None)
             row_warnings.append("invalid_task_time_order")
+
+        # Single-round conversion keeps its established warning/default policy.
+        # Multi-round invalid inputs must not turn into synthetic queries, absent
+        # images or default windows before the batch can isolate their dependents.
+        if marked:
+            blocking = [warning for warning in row_warnings if warning == "missing_query"
+                        or warning.startswith(("invalid_query_images", "invalid_task_"))]
+            if blocking:
+                item["input_error"] = "多轮原始输入无效：" + "；".join(blocking)
+            if "missing_query" in row_warnings:
+                item["query"] = ""
 
         video_path, video_mapping_warning = _build_video_path(
             row,

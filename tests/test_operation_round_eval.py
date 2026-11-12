@@ -265,7 +265,10 @@ def test_non_object_cannot_silently_split_marked_conversation(broken):
     rows = source_rows()
     rows.insert(1, broken)
     items, errors = parse_jsonl("\n".join(json.dumps(row) for row in rows), "operation")
-    assert items == [] and errors
+    assert len(items) == 4 and len(errors) == 3
+    assert not items[0].get("input_error")
+    assert all(row.get("input_error") and not row.get("turns") for row in items[1:])
+    assert items[1]["source_data"]["raw_value"] == broken
 
 
 def test_new_rounds_cannot_append_to_whole_conversation_policy():

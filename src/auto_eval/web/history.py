@@ -804,7 +804,11 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
             # A round export is independently reusable, including continuation rows
             # whose original video_path was intentionally blank.
             row["video_path"] = _project_relative_path(item.get("video_path"))
-            row["turns"] = [{key: value for key, value in turn.items() if key != "source_data"} for turn in item["turns"]]
+            if item.get("turns"):
+                row["turns"] = [{key: value for key, value in turn.items() if key != "source_data"} for turn in item["turns"]]
+        for field in ("input_error", "input_warnings"):
+            if item.get(field):
+                row[field] = item[field]
         rows.append(row)
     return rows
 

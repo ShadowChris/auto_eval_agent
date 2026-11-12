@@ -245,12 +245,180 @@ def normalize_operation_items(items: list[dict]) -> list[dict]:
     return output
 
 
-def validate_round_prefixes(items: list[dict]) -> None:
-    """Reject conflicting historical inputs, including partial append/overwrite."""
+def normalize_operation_batch(items: list[dict]) -> list[dict]:
+    """Recover batch boundaries without discarding rows or relaxing evidence checks.
+
+    The strict normalizer above remains useful for validating a single explicit
+    prefix. Here a bad round invalidates its dependent prefixes, not other cases.
+    Failed rows never contain partially valid ``turns`` for a judge to consume.
+    """
+    output: list[dict] = []
+    pending: list[dict] = []
+
+    def serializable(value: Any) -> Any:
+        # Python's JSON decoder also accepts NaN/Infinity. Retain their literal
+        # meaning for diagnosis, but do not break HTTP/history JSON serialization.
+        if isinstance(value, float) and not math.isfinite(value):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: serializable(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [serializable(child) for child in value]
+        return value
+
+    def failed(row: dict, error: str, **fields: Any) -> dict:
+        result = dict(row)
+        result.setdefault("source_data", _source(row))
+        result.update(fields, input_error=error)
+        # Keep invalid values in source_data, not in the execution schema.
+        result["query"] = str(row.get("query") or row.get("question") or "")
+        result["video_path"] = str(row.get("video_path") or "")
+        for field in ("answer", "context"):
+            if not isinstance(result.get(field), str):
+                result.pop(field, None)
+        result.pop("turns", None)
+        return result
+
+    def emit(rows: list[dict], *, parent: dict | None = None, warning: str = "") -> None:
+        first = rows[0]
+        conversation_id = str((parent or {}).get("conversation_id") or first.get("id")
+                              or (parent or {}).get("id") or f"conversation_row_{len(output) + 1}")
+        # A complete recording may be provided on any round, but never guess
+        # between different recordings or replace invalid time windows.
+        candidates = [row.get("video_path") for row in [parent or {}, *rows]]
+        videos = {v.strip() for v in candidates if isinstance(v, str) and v.strip()
+                  and v.strip() != "__missing_video__"}
+        common_error = ""
+        if any(v is not None and not isinstance(v, str) for v in candidates):
+            common_error = "多轮 video_path 必须是字符串"
+        elif not videos:
+            common_error = "多轮会话未提供完整录屏 video_path"
+        elif len(videos) > 1:
+            common_error = "多轮会话存在不同的 video_path，无法确定完整录屏"
+        video = next(iter(videos)) if len(videos) == 1 else ""
+        warnings = [warning] if warning else []
+        if video and str(first.get("video_path") or "").strip() in ("", "__missing_video__") and not (parent or {}).get("video_path"):
+            warnings.append("首轮未提供录屏，已复用本会话其他轮唯一的完整录屏 video_path")
+        first_error = common_error
+        bad_index = 1 if common_error else 0
+        for index, row in enumerate(rows, 1):
+            fields = dict(conversation_id=conversation_id, turn_index=index,
+                          turn_count=len(rows), evaluation_scope="latest_turn")
+            try:
+                if first_error:
+                    raise ValueError(first_error if index == bad_index else
+                                     f"依赖第 {bad_index} 轮无效输入，无法评估当前历史前缀：{first_error}")
+                if row.get("input_error"):
+                    raise ValueError(row["input_error"])
+                # Validate all preceding rounds, including their original images.
+                conversation = _group(rows[:index], parent={**(parent or {}), "video_path": video},
+                                      fallback_id=conversation_id)
+                conversation["conversation_id"] = conversation_id
+                item = _round_item(conversation, index - 1, turn_count=len(rows))
+            except (ValueError, TypeError) as exc:
+                if not first_error:
+                    first_error, bad_index = str(exc), index
+                item = failed(row, str(exc), **fields)
+                item["id"] = row.get("id") or f"{conversation_id}_turn_{index:03d}"
+                item["video_path"] = video or item["video_path"]
+            if warnings:
+                item["input_warnings"] = list(dict.fromkeys([*(item.get("input_warnings") or []), *warnings]))
+            output.append(item)
+
+    def flush(warning: str = "") -> None:
+        if pending:
+            emit(pending, warning=warning)
+            pending.clear()
+
+    for position, original in enumerate(items, 1):
+        original = serializable(original)
+        row = dict(original) if isinstance(original, dict) else {
+            "source_data": {"raw_value": original}, "input_error": "输入行必须是 JSON 对象",
+        }
+        row.setdefault("source_line", position)
+        if row.get("evaluation_scope") == "latest_turn" or row.get("turns") is not None:
+            flush("上一会话缺少 is_end=TRUE，已在下一条独立输入前结束")
+            if row.get("input_error"):
+                output.append(row)
+            elif row.get("evaluation_scope") == "latest_turn":
+                try:
+                    output.extend(normalize_operation_items([row]))
+                except (ValueError, TypeError) as exc:
+                    output.append(failed(row, f"当前轮历史前缀无效：{exc}"))
+            else:
+                turns = row.get("turns")
+                if not isinstance(turns, list) or not turns or not all(isinstance(t, dict) for t in turns):
+                    output.append(failed(row, "turns 必须是非空对象数组"))
+                else:
+                    emit(turns, parent=row)
+            continue
+        if not has_turn_markers(row) and not pending:
+            output.append(row)
+            continue
+        try:
+            start = marker_bool(row.get("is_start"))
+        except ValueError:
+            start = None
+        # An explicit new start is a reliable boundary even if its end marker
+        # is malformed. Never attach it to the preceding conversation.
+        if start is True:
+            flush("上一会话缺少 is_end=TRUE，已在下一条 is_start=TRUE 前结束")
+        try:
+            if start is None:
+                raise ValueError("is_start/is_end 必须是 TRUE/FALSE 或 1/0")
+            end = marker_bool(row.get("is_end"))
+        except ValueError as exc:
+            row = failed(row, str(row.get("input_error") or f"多轮标记无效：{exc}"))
+            if pending or start is True:
+                pending.append(row)
+            else:
+                output.append(row)
+            continue
+        if start:
+            if end:
+                output.append(row)  # Explicit standalone row keeps single-round defaults.
+                continue
+            pending.append(row)
+        elif not pending:
+            output.append(failed(row, "缺少对应的 is_start=TRUE，无法确定本轮历史上下文"))
+            continue
+        else:
+            pending.append(row)
+        if end:
+            flush()
+    flush("文件末尾缺少 is_end=TRUE，已按现有连续轮次结束会话")
+
+    # Do not let ambiguous execution ids overwrite one another in histories.
+    from collections import Counter
+
+    counts = Counter(str(row.get("id")) for row in output if row.get("id"))
+    reserved = set(counts)
     seen: dict[tuple[str, int], tuple] = {}
+    for position, row in enumerate(output, 1):
+        if row.get("id") and counts[str(row["id"])] > 1:
+            original_id = row["id"]
+            row = failed(row, f"id 重复：{original_id}；请修正原始 id 后重跑")
+            identifier = f"__invalid_row_{position}_{original_id}"
+            while identifier in reserved:
+                identifier += "_"
+            reserved.add(identifier)
+            row["id"] = identifier
+            output[position - 1] = row
+        if not row.get("input_error"):
+            try:
+                validate_round_prefixes([row], _seen=seen)
+            except (ValueError, TypeError) as exc:
+                output[position - 1] = failed(row, str(exc))
+    return output
+
+
+def validate_round_prefixes(items: list[dict], *, _seen: dict | None = None) -> None:
+    """Reject conflicting historical inputs, including partial append/overwrite."""
+    seen: dict[tuple[str, int], tuple] = {} if _seen is None else _seen
     for item in items:
         if item.get("evaluation_scope") != "latest_turn":
             continue
+        updates: dict[tuple[str, int], tuple] = {}
         for index, turn in enumerate(item.get("turns") or [], 1):
             original = turn.get("source_data") or turn
             signature = (turn.get("query"), turn.get("answer") or "", turn.get("context") or "",
@@ -259,7 +427,9 @@ def validate_round_prefixes(items: list[dict]) -> None:
             key = (str(item.get("conversation_id") or first_id or item.get("case_id") or item.get("id")), index)
             if key in seen and seen[key] != signature:
                 raise ValueError(f"会话 {key[0]} 第 {index} 轮历史输入不一致；修改前轮时请同步替换受影响后轮的前缀，或新建评估集")
-            seen[key] = signature
+            updates[key] = signature
+        # Invalid prefixes must not bind history for a subsequent valid item.
+        seen.update(updates)
 
 
 def conversation_export_snapshot(snapshot: dict) -> dict:

@@ -340,7 +340,7 @@
           <span v-if="opPreparing" class="running">正在解析数据集…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
           <span v-if="datasetName" class="hint">数据集：{{ datasetName }}</span>
-          <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
+          <span v-if="errors.length" class="err">⚠ {{ errors.length }} {{ mode==='operation' ? '条输入异常（已保留为失败行）' : '条未导入' }}</span>
         </div>
         <p v-if="mode==='operation'" class="hint">支持 JSONL、CSV、XLSX。表格必需列：<strong>query</strong>，以及 <strong>id / index / 序号</strong> 至少一列。非空 id 直接复用，缺失时按 index 或序号生成。视频优先读取 <strong>video_path</strong>；没有该列时使用<strong>原文件名</strong>拼接，<strong>文件路径</strong>可选。Excel 优先读取“合并数据”工作表。</p>
         <p v-if="mode==='operation'" class="hint">video_path 支持本地路径或 HTTP/HTTPS 视频直链；开始评估时临时下载，单题评估结束后删除临时原视频。下载或视频校验失败会显示在对应题目下方。</p>
@@ -381,7 +381,11 @@
                   <small v-if="row.turn_count > 1">多轮会话 · 当前第 {{ row.turn_index || row.turn_count }} / {{ row.turn_count }} 轮 · 本轮独立评估</small>
                   <small v-if="row.incoming_id && row.incoming_id !== row.key">id: {{ row.incoming_id }}</small>
                 </td>
-                <td><div class="append-preview-cell" :title="row.query">{{ row.query || '—' }}</div></td>
+                <td>
+                  <div class="append-preview-cell" :title="row.query">{{ row.query || '—' }}</div>
+                  <div v-if="row.input_error" class="err">输入异常（将保留为失败行）：{{ row.input_error }}</div>
+                  <div v-for="warning in row.input_warnings" :key="warning" class="hint">{{ warning }}</div>
+                </td>
                 <td><div class="append-preview-cell" :title="row.context">{{ row.context || '未提供' }}</div></td>
                 <td><div class="append-preview-cell append-path-cell" :title="row.video_path">{{ row.video_path || '未提供' }}</div></td>
                 <td><div class="append-preview-cell append-path-cell" :title="formatAppendPreviewImages(row.query_images)">{{ formatAppendPreviewImages(row.query_images) }}</div><small v-if="row.attachment_url_domain || row.attachment_url_ip" class="hint" :title="formatAttachmentUrls({attachmentUrlDomain:row.attachment_url_domain,attachmentUrlIp:row.attachment_url_ip})">域名链接：{{ row.attachment_url_domain ? '已提供' : '未提供' }} · IP 备用：{{ row.attachment_url_ip ? '已提供' : '未提供' }}</small></td>

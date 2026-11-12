@@ -162,38 +162,49 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
 def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     if mode != "operation":
         return _parse_jsonl_rows(content, mode)
-    from ..operation_conversation import normalize_operation_items, has_turn_markers
+    from ..operation_conversation import normalize_operation_batch, has_turn_markers
 
     raw_rows = []
-    try:
-        for line, text in enumerate(content.splitlines(), 1):
-            if not text.strip():
-                continue
+    for line, text in enumerate(content.splitlines(), 1):
+        if not text.strip():
+            continue
+        try:
             value = json.loads(text)
-            raw_rows.append((line, value))
-    except json.JSONDecodeError:
-        # Do not skip a damaged round in a marked conversation.
-        if '"is_start"' in content or '"turns"' in content:
-            return [], [f"第 {line} 行 JSON 错误，多轮数据未导入"]
+        except json.JSONDecodeError as exc:
+            value = {"input_error": f"JSON 错误：{exc}", "source_data": {"raw_text": text}}
+        if not isinstance(value, dict):
+            value = {"input_error": "输入行必须是 JSON 对象", "source_data": {"raw_value": value}}
+        raw_rows.append((line, value))
+    if not any(has_turn_markers(row) or "turns" in row or row.get("evaluation_scope") == "latest_turn"
+               or row.get("input_error") for _, row in raw_rows):
         return _parse_jsonl_rows(content, mode)
-    if not any(isinstance(row, dict) and (has_turn_markers(row) or "turns" in row) for _, row in raw_rows):
-        return _parse_jsonl_rows(content, mode)
-    invalid = next((line for line, row in raw_rows if not isinstance(row, dict)), None)
-    if invalid is not None:
-        return [], [f"第 {invalid} 行必须是 JSON 对象，多轮数据未导入"]
-    try:
-        grouped = normalize_operation_items([
-            {**row, "source_line": line, "source_data": _source_data_with_flat_metadata(row)}
-            for line, row in raw_rows
-        ])
-        parsed, errors = _parse_jsonl_rows("\n".join(json.dumps(row, ensure_ascii=False) for row in grouped), mode)
-        if not errors:
-            for item, original in zip(parsed, grouped):
+    grouped = normalize_operation_batch([
+        {**row, "source_line": line,
+         "source_data": row.get("source_data") or _source_data_with_flat_metadata(row)}
+        for line, row in raw_rows
+    ])
+    parsed, errors = [], []
+    for position, original in enumerate(grouped, 1):
+        item = dict(original)
+        if not item.get("input_error"):
+            valid, row_errors = _parse_jsonl_rows(json.dumps(item, ensure_ascii=False), mode)
+            if row_errors:
+                item["input_error"] = "；".join(row_errors)
+            else:
+                item = valid[0]
                 item["source_data"] = original.get("source_data") or _source_data_with_flat_metadata(original)
-                item["source_line"] = original.get("source_line", item.get("source_line"))
-        return ([], errors) if errors else (parsed, [])
-    except ValueError as exc:
-        return [], [str(exc)]
+                item["source_line"] = original.get("source_line", position)
+                if original.get("input_warnings"):
+                    item["input_warnings"] = original["input_warnings"]
+        if item.get("input_error"):
+            item.setdefault("id", f"__invalid_row_{position}")
+            item["query"] = str(item.get("query") or item.get("question") or "")
+            for field in ("context", "answer"):
+                if not isinstance(item.get(field), str):
+                    item.pop(field, None)
+            errors.append(f"第 {item.get('source_line', position)} 行（{item['id']}）：{item['input_error']}")
+        parsed.append(item)
+    return parsed, errors
 
 
 def _parse_jsonl_rows(content: str, mode: Mode) -> tuple[list[dict], list[str]]:

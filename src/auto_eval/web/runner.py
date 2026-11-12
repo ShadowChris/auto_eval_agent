@@ -731,7 +731,15 @@ async def _run(
                 last_error = None
                 res = None
                 preparation_failure_stage = None
-                if execution_mode == "evaluate_only":
+                if task.mode == "operation" and item_dict.get("input_error"):
+                    last_error = ValueError(item_dict["input_error"])
+                    preparation_failure_stage = "input_validation"
+                    log_event(
+                        "输入预检", "失败", level=logging.ERROR,
+                        details=error_details(last_error), progress=2,
+                        progress_message=str(last_error), progress_status="error",
+                    )
+                if last_error is None and execution_mode == "evaluate_only":
                     try:
                         await asyncio.to_thread(verify_frames, item_dict, RUNS_DIR)
                     except Exception as exc:
@@ -1077,6 +1085,12 @@ async def _run(
                 if item_dict.get("evaluation_scope") == "latest_turn":
                     res.update(evaluation_scope="latest_turn", turn_index=item_dict["turn_index"])
                     res["conversation_id"] = item_dict.get("conversation_id") or item_dict.get("case_id") or item_dict.get("id")
+            elif item_dict.get("evaluation_scope") == "latest_turn":
+                for field in ("case_id", "conversation_id", "turn_index", "turn_count", "evaluation_scope"):
+                    if field in item_dict:
+                        res[field] = item_dict[field]
+            if item_dict.get("input_warnings"):
+                res["input_warnings"] = list(item_dict["input_warnings"])
             if query_images:
                 res["query_images"] = query_images
                 res["query_image_count"] = len(query_images)
