@@ -75,7 +75,7 @@ def operation_user_result_display_row(row: dict[str, Any]) -> dict[str, Any]:
         OPERATION_RESULT_FIELD_LABELS.get(field, field): row.get(field, "")
         for field in OPERATION_USER_RESULT_COLUMNS
     }
-    for key in ("case_id", "turn_index", "turn_count", "is_result_row", "evaluation_scope"):
+    for key in ("case_id", "conversation_id", "turn_index", "turn_count", "is_result_row", "evaluation_scope"):
         if key in row:
             displayed[key] = row[key]
     return displayed

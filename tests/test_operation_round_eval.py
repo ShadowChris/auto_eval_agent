@@ -1,6 +1,7 @@
 """Each Query is evaluated against its inherited requirement, never future inputs."""
 import copy
 import hashlib
+import io
 import json
 import shutil
 import subprocess
@@ -8,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pandas as pd
+from fastapi.testclient import TestClient
 from PIL import Image
 
 from auto_eval.config import load_config
@@ -113,6 +116,137 @@ def test_generated_ids_and_structured_prefix_single_api():
     single = server._normalize_single_operation_item(dict(id="latest-call", video_path="data/all.mp4", turns=turns))
     assert single["id"] == "latest-call" and single["turn_index"] == 3
     assert normalize_operation_items([single])[0]["id"] == "latest-call"
+
+
+@pytest.mark.parametrize("business_ids", [["business-a", "business-b", "business-c"], ["", None, 0]])
+def test_business_case_ids_do_not_define_or_validate_round_groups(business_ids):
+    source = source_rows()
+    for row, case_id in zip(source, business_ids):
+        row["case_id"] = case_id
+        row["is_start"] = str(row["is_start"]).upper()
+        row["is_end"] = str(row["is_end"]).upper()
+        row["video_path"] = "https://example.com/full.mp4"
+    items = parsed(source)
+    assert [i["case_id"] for i in items] == business_ids
+    assert [i["source_data"]["case_id"] for i in items] == business_ids
+    assert [i["conversation_id"] for i in items] == ["r1"] * 3
+    assert [len(i["turns"]) for i in items] == [1, 2, 3]
+    assert normalize_operation_items(items) == items
+
+
+@pytest.mark.parametrize("with_ids", [True, False])
+def test_repeated_business_case_id_cannot_join_separate_marker_groups(with_ids):
+    first = source_rows()
+    second = [{**row, "id": "other-" + row["id"], "query": "另一会话：" + row["query"]} for row in source_rows()]
+    for row in first + second:
+        row["case_id"] = "same-business-id"
+        if not with_ids:
+            row.pop("id")
+    items = parsed(first + second)
+    assert len(items) == 6 and len({i["id"] for i in items}) == 6
+    assert len({i["conversation_id"] for i in items}) == 2
+    assert items[0]["conversation_id"] != items[3]["conversation_id"]
+    assert [len(i["turns"]) for i in items] == [1, 2, 3, 1, 2, 3]
+    assert all(i["case_id"] == "same-business-id" for i in items)
+    assert "另一会话" not in json.dumps(items[2], ensure_ascii=False)
+
+
+def test_explicit_turns_do_not_require_matching_business_case_ids():
+    source = source_rows()
+    for index, row in enumerate(source):
+        row["case_id"] = "business-" + str(index)
+    items = normalize_operation_items([dict(id="root",case_id="parent-business",video_path="data/all.mp4",turns=source)])
+    assert [i["case_id"] for i in items] == [r["case_id"] for r in source]
+    assert len({i["conversation_id"] for i in items}) == 1
+
+
+def test_single_api_retains_outer_business_case_id_without_using_it_as_group_key():
+    normalized = server._normalize_single_operation_item(dict(id="current-call",case_id="business-outer",
+        video_path="data/all.mp4",turns=source_rows()))
+    assert normalized["id"] == "current-call"
+    assert normalized["case_id"] == normalized["source_data"]["case_id"] == "business-outer"
+    assert normalized["conversation_id"] == "r1"
+    assert normalize_operation_items([normalized])[0]["case_id"] == "business-outer"
+
+
+def test_legacy_canonical_prefix_without_conversation_id_remains_readable():
+    items = parsed()
+    for item in items:
+        item.pop("conversation_id")
+    normalized = normalize_operation_items(items)
+    assert [i["conversation_id"] for i in normalized] == ["r1"] * 3
+    assert [i["id"] for i in normalized] == ["r1", "r2", "r3"]
+
+
+def test_legacy_prefix_consistency_still_matches_first_turn_after_business_id_decoupling():
+    source = source_rows()
+    for row in source:
+        row["case_id"] = "old-business-group"
+    items = parsed(source)
+    legacy = copy.deepcopy(items[0])
+    legacy.pop("conversation_id")
+    assert normalize_operation_items([legacy])[0]["conversation_id"] == "r1"
+    validate_round_prefixes([legacy, *items[1:]])
+    items[1]["turns"][0]["query"] = "历史输入已修改"
+    with pytest.raises(ValueError, match="历史输入不一致"):
+        validate_round_prefixes([legacy, items[1]])
+
+
+@pytest.mark.parametrize("suffix", ["csv", "xlsx"])
+def test_table_import_uses_uppercase_markers_not_business_case_id(suffix):
+    source = source_rows()
+    for index, row in enumerate(source):
+        row.update(case_id=f"business-{index}", is_start=str(row["is_start"]).upper(),
+                   is_end=str(row["is_end"]).upper(), video_path="https://example.com/full.mp4")
+    frame = pd.DataFrame(source)
+    buffer = io.BytesIO()
+    if suffix == "csv":
+        content = frame.to_csv(index=False).encode()
+    else:
+        frame.to_excel(buffer, index=False)
+        content = buffer.getvalue()
+    with TestClient(server.app) as client:
+        response = client.post("/api/operation/import-table", files={"file":(f"rounds.{suffix}",content)})
+    payload = response.json()
+    assert response.status_code == 200 and not payload["errors"]
+    assert payload["count"] == 3
+    assert [i["case_id"] for i in payload["items"]] == [r["case_id"] for r in source]
+    assert len({i["conversation_id"] for i in payload["items"]}) == 1
+
+
+def test_business_ids_and_internal_conversation_ids_survive_exports():
+    source = source_rows()
+    for index, row in enumerate(source):
+        row["case_id"] = f"business-{index}"
+    data = snapshot()
+    data["items"] = parsed(source)
+    sheets = history.export_rows(data)
+    for name in ("数据集明细", "评估结果", "逐题结果"):
+        assert [r["case_id"] for r in sheets[name]] == [r["case_id"] for r in source]
+        assert [r["conversation_id"] for r in sheets[name]] == ["r1"] * 3
+    exported = history.jsonl_export_rows(data)
+    assert [r["case_id"] for r in exported] == [r["case_id"] for r in source]
+    assert [r["conversation_id"] for r in exported] == ["r1"] * 3
+    restored, errors = parse_jsonl(history.rows_to_jsonl(exported), "operation")
+    assert not errors
+    assert [i["case_id"] for i in restored] == [r["case_id"] for r in source]
+    assert len({i["conversation_id"] for i in restored}) == 1
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="需要 Node.js")
+def test_web_submission_preserves_internal_group_and_business_case_ids():
+    source = source_rows()
+    for index, row in enumerate(source):
+        row["case_id"] = f"business-{index}"
+    script = (Path(__file__).resolve().parents[1] / "src/auto_eval/web/static/app.js").read_text()
+    start = script.index("          opItems.value = imported.map((item) => {")
+    mapping = script[start:script.index("          importedDatasetSelections.value =", start)]
+    start = script.index("        items.value = valid.map(({ it, sourceIndex }) => {")
+    submission = script[start:script.index("        errors.value = [];", start)]
+    program = "const assert=require('assert').strict; const mode={value:'operation'},opItems={value:[]},items={value:[]}; const newOpItem=()=>({}); const imported=" + json.dumps(parsed(source),ensure_ascii=False) + ";\n" + mapping
+    program += "const valid=opItems.value.map((it,sourceIndex)=>({it,sourceIndex}));\n" + submission
+    program += "assert.deepEqual(items.value.map(i=>i.case_id),['business-0','business-1','business-2']); assert.deepEqual(items.value.map(i=>i.conversation_id),['r1','r1','r1']);"
+    subprocess.run([shutil.which("node"), "-e", program], check=True, capture_output=True, text=True)
 
 
 @pytest.mark.parametrize("change", [

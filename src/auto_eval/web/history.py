@@ -498,6 +498,7 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
             "query_images",
             "turn_count",
             "turn_index", "evaluation_scope",
+            "conversation_id",
             "case_id", "evaluation_strategy", "alignment_status",
             "alignment_warnings", "group_variants", "image_input",
             "dataset_status", "dataset_revision", "dataset_source_batch_id",
@@ -799,7 +800,7 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
         if item.get("is_result_row") is False:
             row["evaluation"] = None
         if item.get("evaluation_scope") == "latest_turn":
-            row.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "evaluation_scope")})
+            row.update({key: item[key] for key in ("case_id", "conversation_id", "turn_index", "turn_count", "evaluation_scope") if key in item})
             # A round export is independently reusable, including continuation rows
             # whose original video_path was intentionally blank.
             row["video_path"] = _project_relative_path(item.get("video_path"))
@@ -1373,7 +1374,7 @@ def _operation_export_rows(
             if not item["is_result_row"]:
                 _clear_conversation_evaluation(exported)
         if item.get("evaluation_scope") == "latest_turn":
-            exported.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "evaluation_scope")})
+            exported.update({key: item[key] for key in ("case_id", "conversation_id", "turn_index", "turn_count", "evaluation_scope") if key in item})
         export.append(exported)
     return export
 
@@ -1524,7 +1525,7 @@ def _operation_user_result_rows(
         if "is_result_row" in item:
             projected.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "is_result_row")})
         if item.get("evaluation_scope") == "latest_turn":
-            projected.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "evaluation_scope")})
+            projected.update({key: item[key] for key in ("case_id", "conversation_id", "turn_index", "turn_count", "evaluation_scope") if key in item})
         rows.append(projected)
     return rows
 
@@ -1902,7 +1903,7 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
             })
         row.update(media_fields)
         if item.get("evaluation_scope") == "latest_turn":
-            row.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "evaluation_scope")})
+            row.update({key: item[key] for key in ("case_id", "conversation_id", "turn_index", "turn_count", "evaluation_scope") if key in item})
         rows.append(row)
     return rows
 

@@ -1073,9 +1073,10 @@ async def _run(
             if item_dict.get("turns"):
                 image_turns = item_dict["turns"][-1:] if item_dict.get("evaluation_scope") == "latest_turn" else item_dict["turns"]
                 query_images = [path for turn in image_turns for path in turn.get("query_images") or []]
-                res.update(case_id=item_dict.get("case_id") or item_dict.get("id"), turn_count=item_dict.get("turn_count") or len(item_dict["turns"]))
+                res.update(case_id=item_dict.get("case_id", item_dict.get("id")), turn_count=item_dict.get("turn_count") or len(item_dict["turns"]))
                 if item_dict.get("evaluation_scope") == "latest_turn":
                     res.update(evaluation_scope="latest_turn", turn_index=item_dict["turn_index"])
+                    res["conversation_id"] = item_dict.get("conversation_id") or item_dict.get("case_id") or item_dict.get("id")
             if query_images:
                 res["query_images"] = query_images
                 res["query_image_count"] = len(query_images)

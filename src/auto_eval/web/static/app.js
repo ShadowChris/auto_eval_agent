@@ -1766,7 +1766,8 @@ createApp({
               sourceLine: item.source_line ?? null,
               sourceData: item.source_data || null,
               turns: item.turns || [],
-              caseId: item.case_id || "",
+              caseId: item.case_id ?? "",
+              conversationId: item.conversation_id || "",
               turnIndex: item.turn_index ?? null,
               turnCount: item.turn_count ?? null,
               evaluationScope: item.evaluation_scope || "",
@@ -2049,7 +2050,8 @@ createApp({
             item.attachment_url_ip = it.attachmentUrlIp || "";
             if ((it.turns || []).length) {
               item.turns = it.turns;
-              item.case_id = it.caseId || item.id;
+              item.case_id = it.caseId ?? item.id;
+              if (it.conversationId) item.conversation_id = it.conversationId;
               if (it.evaluationScope) item.evaluation_scope = it.evaluationScope;
               if (it.turnIndex != null) item.turn_index = it.turnIndex;
               if (it.turnCount != null) item.turn_count = it.turnCount;

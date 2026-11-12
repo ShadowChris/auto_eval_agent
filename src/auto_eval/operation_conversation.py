@@ -59,7 +59,13 @@ def _source(row: dict) -> dict:
 def _group(rows: list[dict], *, parent: dict | None = None, fallback_id: str = "conversation_1") -> dict:
     first = rows[0]
     result = dict(parent or first)
-    case_id = str(result.get("case_id") or result.get("id") or "").strip()
+    # Business case_id never determines a newly imported conversation. Preserve
+    # canonical prefixes (including old histories) when normalizing them again.
+    if parent and parent.get("evaluation_scope") == "latest_turn":
+        conversation_id = parent.get("conversation_id") or first.get("id") or parent.get("case_id") or parent.get("id")
+    else:
+        conversation_id = first.get("id") or (parent or {}).get("id")
+    conversation_id = str(conversation_id or fallback_id).strip()
     video = str(result.get("video_path") or first.get("video_path") or "").strip()
     if not video or video == "__missing_video__":
         raise ValueError("多轮 Case 首行或外层必须提供完整录屏 video_path")
@@ -69,8 +75,6 @@ def _group(rows: list[dict], *, parent: dict | None = None, fallback_id: str = "
         row_video = str(row.get("video_path") or "").strip()
         if row_video not in ("", "__missing_video__", video):
             raise ValueError(f"第 {index} 轮 video_path 与完整录屏不一致")
-        if row.get("case_id") and case_id and str(row["case_id"]).strip() != case_id:
-            raise ValueError(f"第 {index} 轮 case_id 不一致")
         query = row.get("query") or row.get("question")
         if not isinstance(query, str) or not query.strip():
             raise ValueError(f"第 {index} 轮缺少 query")
@@ -104,10 +108,9 @@ def _group(rows: list[dict], *, parent: dict | None = None, fallback_id: str = "
             source_line=row.get("source_line"),
         )
         turns.append(turn.model_dump())
-    if not case_id:
-        case_id = fallback_id
     result.update({
-        "id": case_id, "case_id": case_id, "turns": turns,
+        "id": conversation_id, "conversation_id": conversation_id,
+        "case_id": result.get("case_id", conversation_id), "turns": turns,
         "turn_count": len(turns), "video_path": video,
         "query": "\n".join(f"第{t['turn_index']}轮：{t['query']}" for t in turns),
         "answer": "\n".join(f"第{t['turn_index']}轮：{t['answer']}" for t in turns),
@@ -149,6 +152,8 @@ def group_operation_items(items: list[dict]) -> list[dict]:
             if row.get("id"):
                 normalized["id"] = row["id"]
             normalized["source_data"] = _source(row)
+            if "case_id" in normalized["source_data"]:
+                normalized["case_id"] = normalized["source_data"]["case_id"]
             grouped.append(normalized)
             continue
         if row.get("turns") is not None:
@@ -197,13 +202,19 @@ def _round_item(conversation: dict, index: int, *, turn_count: int | None = None
 
     turns = conversation["turns"]
     current = turns[index]
-    case_id = conversation["case_id"]
+    conversation_id = conversation.get("conversation_id") or conversation["case_id"]
+    source_data = copy.deepcopy(current.get("source_data") or {})
+    parent_source = conversation.get("source_data") or {}
+    if "case_id" not in source_data and "turns" in parent_source and "case_id" in parent_source:
+        source_data["case_id"] = copy.deepcopy(parent_source["case_id"])
     row = dict(conversation)
     row.update({
-        "id": current.get("id") or f"{case_id}_turn_{index + 1:03d}",
+        "id": current.get("id") or f"{conversation_id}_turn_{index + 1:03d}",
+        "conversation_id": conversation_id,
+        "case_id": source_data.get("case_id", conversation_id),
         "query": current["query"], "answer": current.get("answer") or "",
         "context": current.get("context"), "query_images": list(current.get("query_images") or []),
-        "source_data": copy.deepcopy(current.get("source_data") or {}),
+        "source_data": source_data,
         "task_start_time": current["task_start_time"], "task_end_time": current["task_end_time"],
         "turns": copy.deepcopy(turns[:index + 1]), "turn_index": index + 1,
         "turn_count": turn_count or len(turns), "evaluation_scope": "latest_turn",
@@ -244,7 +255,8 @@ def validate_round_prefixes(items: list[dict]) -> None:
             original = turn.get("source_data") or turn
             signature = (turn.get("query"), turn.get("answer") or "", turn.get("context") or "",
                 tuple(operation_query_images(original)), turn.get("task_start_time"), turn.get("task_end_time"))
-            key = (str(item.get("case_id")), index)
+            first_id = (item.get("turns") or [{}])[0].get("id")
+            key = (str(item.get("conversation_id") or first_id or item.get("case_id") or item.get("id")), index)
             if key in seen and seen[key] != signature:
                 raise ValueError(f"会话 {key[0]} 第 {index} 轮历史输入不一致；修改前轮时请同步替换受影响后轮的前缀，或新建评估集")
             seen[key] = signature
