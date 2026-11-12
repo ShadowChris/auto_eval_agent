@@ -311,7 +311,7 @@ def _parse_jsonl_rows(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
         # 原始字段仅用于历史追溯和导出，不会进入 EvalItem 或裁判 prompt。
         item["source_data"] = _source_data_with_flat_metadata(obj)
         if mode == "operation" and obj.get("turns"):
-            for key in ("turns", "case_id", "turn_count", "turn_index", "evaluation_scope"):
+            for key in ("turns", "case_id", "conversation_id", "turn_count", "turn_index", "evaluation_scope"):
                 if key in obj:
                     item[key] = obj[key]
             item["source_data"] = obj.get("source_data") or item["source_data"]
