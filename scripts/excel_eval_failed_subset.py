@@ -68,12 +68,21 @@ def _read_evaluation(path: Path, sheet: str | int) -> pd.DataFrame:
     if suffix not in {".xlsx", ".xls", ".xlsm"}:
         raise ValueError("评估结果必须是 .xlsx/.xls/.xlsm 文件")
     try:
-        return pd.read_excel(
-            path,
-            sheet_name=sheet,
-            dtype=object,
-            keep_default_na=False,
-        )
+        with pd.ExcelFile(path) as workbook:
+            frame = pd.read_excel(
+                workbook, sheet_name=sheet, dtype=object, keep_default_na=False,
+            )
+            # New exports keep internal evaluation scope in 数据集明细 only.
+            # Do not mistake a failed round for an old whole-conversation case.
+            if "evaluation_scope" not in frame.columns and "数据集明细" in workbook.sheet_names:
+                details = pd.read_excel(
+                    workbook, sheet_name="数据集明细", dtype=object,
+                    keep_default_na=False, usecols=lambda name: name == "evaluation_scope",
+                )
+                frame.attrs["latest_turn_evaluation"] = (
+                    "evaluation_scope" in details.columns and any(details["evaluation_scope"] == "latest_turn")
+                )
+            return frame
     except ValueError as exc:
         raise ValueError(f"无法读取工作表 {sheet}：{exc}") from exc
 
@@ -165,7 +174,9 @@ def extract_failed_subset(
     source_rows = _read_jsonl(dataset_path)
     from auto_eval.operation_conversation import group_operation_items, normalize_operation_items
 
-    per_round = "evaluation_scope" in frame.columns and any(frame["evaluation_scope"] == "latest_turn")
+    per_round = frame.attrs.get("latest_turn_evaluation", False) or (
+        "evaluation_scope" in frame.columns and any(frame["evaluation_scope"] == "latest_turn")
+    )
     source_cases = normalize_operation_items(source_rows) if per_round else group_operation_items(source_rows)
     source_ids = {_text(row.get("id")) for row in source_rows} | {
         _text(case.get("id")) for case in source_cases

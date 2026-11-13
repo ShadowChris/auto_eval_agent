@@ -20,6 +20,10 @@ OPERATION_RESULT_FIELD_LABELS = {
     "turn_index": "组内轮次",
 }
 
+# Execution/history metadata belongs in 数据集明细 and JSONL, not result sheets.
+# Multi-group case_id has a different purpose and must not be filtered there.
+OPERATION_INTERNAL_ROUND_FIELDS = ("case_id", "turn_count", "is_result_row", "evaluation_scope")
+
 OPERATION_USER_RESULT_COLUMNS = (
     "数据集序号",
     "id",
@@ -81,14 +85,10 @@ def operation_result_identity_fields(
 
 def operation_user_result_display_row(row: dict[str, Any]) -> dict[str, Any]:
     """按统一顺序生成带用户可见表头的任务类评估结果行。"""
-    displayed = {
+    return {
         OPERATION_RESULT_FIELD_LABELS.get(field, field): row.get(field, "")
         for field in OPERATION_USER_RESULT_COLUMNS
     }
-    for key in ("case_id", "conversation_id", "turn_index", "turn_count", "is_result_row", "evaluation_scope"):
-        if key in row and key not in OPERATION_USER_RESULT_COLUMNS:
-            displayed[key] = row[key]
-    return displayed
 
 
 def operation_round_export_fields(
