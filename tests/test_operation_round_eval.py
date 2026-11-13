@@ -237,7 +237,10 @@ def test_business_ids_and_internal_conversation_ids_survive_exports():
     data["items"] = parsed(source)
     sheets = history.export_rows(data)
     for name in ("数据集明细", "评估结果", "逐题结果"):
-        assert [r["case_id"] for r in sheets[name]] == [r["case_id"] for r in source]
+        if name == "数据集明细":
+            assert [r["case_id"] for r in sheets[name]] == [r["case_id"] for r in source]
+        else:
+            assert all("case_id" not in row for row in sheets[name])
         group_key = "评估会话分组" if name == "评估结果" else "conversation_id"
         assert [r[group_key] for r in sheets[name]] == ["r1"] * 3
     exported = history.jsonl_export_rows(data)

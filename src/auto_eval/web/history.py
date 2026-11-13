@@ -46,6 +46,7 @@ from .dataset_revision import (
     is_item_active,
 )
 from .operation_export_fields import (
+    OPERATION_INTERNAL_ROUND_FIELDS as _OPERATION_INTERNAL_ROUND_FIELDS,
     OPERATION_CARD_FIELD_LABELS as _OPERATION_CARD_LABELS,
     OPERATION_USER_RESULT_COLUMNS as _OPERATION_USER_RESULT_COLUMNS,
     OPERATION_USER_RESULT_HEADERS as _OPERATION_USER_RESULT_HEADERS,
@@ -1043,7 +1044,8 @@ def export_rows(snapshot: dict, cfg: Any | None = None) -> dict[str, list[dict]]
         # “逐题结果”Sheet 时仍转换其中的挂卡字段名称。
         if "逐题结果" in rows:
             rows["逐题结果"] = [
-                {_OPERATION_CARD_LABELS.get(key, key): value for key, value in row.items()}
+                {_OPERATION_CARD_LABELS.get(key, key): value for key, value in row.items()
+                 if multi_operation or key not in _OPERATION_INTERNAL_ROUND_FIELDS}
                 for row in rows["逐题结果"]
             ]
     frame_rows = _frame_manifest_rows(

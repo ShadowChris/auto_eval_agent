@@ -19,6 +19,7 @@ from ..analysis.operation_statistics import (
 )
 from ..judges.operation_fields import LEGACY_REVIEW_CATEGORIES, split_operation_issue_fields
 from .operation_export_fields import (
+    OPERATION_INTERNAL_ROUND_FIELDS,
     operation_result_identity_fields,
     operation_user_result_display_row,
 )
@@ -60,6 +61,8 @@ def import_operation_comparison_file(
             for key, label in (("conversation_id", "评估会话分组"), ("turn_index", "组内轮次")):
                 if key not in record and label in record:
                     record[key] = record[label]
+    if dataset_records is not None:
+        records = _restore_legacy_conversation_fields(records, dataset_records)
     records = fold_conversation_export_rows(records)
     if dataset_records is not None:
         dataset_records = fold_conversation_export_rows(dataset_records)
@@ -227,6 +230,38 @@ def _read_records(
             workbook, sheet_name="数据集明细", dtype=object,
         ))
     return _dataframe_records(dataframe), sheet, dataset_records
+
+
+def _restore_legacy_conversation_fields(
+    records: list[dict[str, Any]], dataset_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Recover old aggregate markers from details before folding blank rows.
+
+    Only restore compatibility metadata, never evaluation values. Match unique
+    ID/Query, not workbook row order. Existing result-sheet markers take priority.
+    """
+    if not any(row.get("is_result_row") not in (None, "") for row in dataset_records):
+        return records
+
+    def identities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        output = []
+        for row in rows:
+            item_id, _ = _field(row, REQUIRED_COMPARISON_FIELDS["id"])
+            output.append({
+                "id": str(item_id if item_id is not None else "").strip(),
+                "query": _field(row, REQUIRED_COMPARISON_FIELDS["query"])[0],
+            })
+        return output
+
+    matches, _ = _match_rows(identities(records), identities(dataset_records))
+    restored = [dict(row) for row in records]
+    for match in matches:
+        result = restored[match["baseline_index"]]
+        detail = dataset_records[match["target_index"]]
+        for key in (*OPERATION_INTERNAL_ROUND_FIELDS, "conversation_id", "turn_index"):
+            if key in detail and result.get(key) in (None, ""):
+                result[key] = detail[key]
+    return restored
 
 
 def _attach_dataset_sources(

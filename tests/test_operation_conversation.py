@@ -199,8 +199,11 @@ def test_excel_and_jsonl_are_row_aligned_but_statistics_count_cases():
         exported = sheets[name]
         assert len(exported) == 3
         assert [r["query"] for r in exported] == ["帮我设一个闹钟", "明早七点", "打开蓝牙"]
-        assert [r["is_result_row"] for r in exported] == [True, False, True]
-        assert [r["case_id"] for r in exported] == ["t1", "t1", "single"]
+        if name == "数据集明细":
+            assert [r["is_result_row"] for r in exported] == [True, False, True]
+            assert [r["case_id"] for r in exported] == ["t1", "t1", "single"]
+        else:
+            assert all("is_result_row" not in row and "case_id" not in row for row in exported)
     for key in ("correctness", "issue_types", "rationale", "total", "latency_s", "维度_操作完成度", "理由_操作完成度"):
         assert sheets["评估结果"][1][key] == ""
     assert sheets["评估结果"][0]["correctness"] == "ok"
