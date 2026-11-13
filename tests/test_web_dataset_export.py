@@ -146,7 +146,7 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
 
     assert list(sheets)[0] == "评估结果"
     user_results = sheets["评估结果"]
-    assert list(user_results[0]) == [history._OPERATION_CARD_LABELS.get(key, key) for key in history._OPERATION_USER_RESULT_COLUMNS]
+    assert list(user_results[0]) == list(history._OPERATION_USER_RESULT_HEADERS)
     assert list(user_results[0]) == [
         "数据集序号",
         "id",
@@ -154,6 +154,10 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
         "item_id",
         "index",
         "session_id",
+        "评估会话分组",
+        "组内轮次",
+        "is_start",
+        "is_end",
         "query",
         "context",
         "attachment_path",

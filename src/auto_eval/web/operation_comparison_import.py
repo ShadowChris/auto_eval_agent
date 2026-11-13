@@ -53,6 +53,13 @@ def import_operation_comparison_file(
 
     records, sheet, dataset_records = _read_records(content, suffix)
     source_row_count = len(records)
+    # 旧整会话导出在字段投影前按轮次折叠，先识别新的中文展示表头。
+    # 保留中文原列，同时不覆盖文件中已有的英文字段。
+    for rows in (records, dataset_records or []):
+        for record in rows:
+            for key, label in (("conversation_id", "评估会话分组"), ("turn_index", "组内轮次")):
+                if key not in record and label in record:
+                    record[key] = record[label]
     records = fold_conversation_export_rows(records)
     if dataset_records is not None:
         dataset_records = fold_conversation_export_rows(dataset_records)
@@ -394,6 +401,10 @@ def _standard_export(
         "序号": ("序号", "sequence"),
         "session_id": ("session_id", "sessionid", "sessionId"),
         "sessionid": ("sessionid", "session_id", "sessionId"),
+        "conversation_id": ("conversation_id", "评估会话分组"),
+        "turn_index": ("turn_index", "组内轮次"),
+        "is_start": ("is_start",),
+        "is_end": ("is_end",),
         "query": ("query", "操作意图", "问题"),
         "context": ("context",),
         "attachment_path": ("attachment_path",),

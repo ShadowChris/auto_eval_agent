@@ -53,7 +53,13 @@ def has_turn_markers(row: dict) -> bool:
 
 
 def _source(row: dict) -> dict:
-    return dict(row["source_data"]) if isinstance(row.get("source_data"), dict) else dict(row)
+    source = dict(row["source_data"]) if isinstance(row.get("source_data"), dict) else dict(row)
+    # API callers may supply source_data containing only business columns.
+    # Keep the actual input markers before _round_item removes runtime markers.
+    for key in ("is_start", "is_end"):
+        if key in row:
+            source.setdefault(key, row[key])
+    return source
 
 
 def _group(rows: list[dict], *, parent: dict | None = None, fallback_id: str = "conversation_1") -> dict:

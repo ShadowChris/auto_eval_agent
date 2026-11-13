@@ -46,10 +46,11 @@ from .dataset_revision import (
     is_item_active,
 )
 from .operation_export_fields import (
-    OPERATION_RESULT_FIELD_LABELS as _OPERATION_CARD_LABELS,
+    OPERATION_CARD_FIELD_LABELS as _OPERATION_CARD_LABELS,
     OPERATION_USER_RESULT_COLUMNS as _OPERATION_USER_RESULT_COLUMNS,
     OPERATION_USER_RESULT_HEADERS as _OPERATION_USER_RESULT_HEADERS,
     operation_result_identity_fields,
+    operation_round_export_fields,
     operation_user_result_display_row as _operation_user_result_display_row,
 )
 from .operation_runs import frame_items
@@ -1433,6 +1434,7 @@ def _operation_user_result_rows(
                 source.get("sessionId"),
                 result.get("sessionid"),
             ),
+            **operation_round_export_fields(item, source),
             "query": _first_export_value(
                 result.get("query"),
                 source.get("query"),
@@ -1586,6 +1588,7 @@ def _operation_multi_dataset_rows(snapshot: dict) -> list[dict]:
             }
             for key, value in source.items():
                 row.setdefault(key, value)
+            row.update(operation_round_export_fields(item, source))
             row["录屏项目相对路径"] = _project_relative_path(item.get("video_path"))
             row["抽帧目录项目相对路径"] = (
                 _project_relative_path(Path(frames[0]).parent) if frames else ""
@@ -1875,6 +1878,8 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
         for key, value in source.items():
             if key not in row:
                 row[key] = value
+        if snapshot.get("mode") == "operation":
+            row.update(operation_round_export_fields(item, source))
 
         frames = [str(path) for path in (item.get("frames") or [])]
         video_runtime_path = item.get("video_path") or (

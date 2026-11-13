@@ -7,11 +7,17 @@ from __future__ import annotations
 from typing import Any
 
 
-OPERATION_RESULT_FIELD_LABELS = {
+OPERATION_CARD_FIELD_LABELS = {
     "card_presence": "是否挂卡",
     "card_types": "卡片类型",
     "card_suitability": "卡片合适判断",
     "card_suitability_reason": "卡片合适判断原因",
+}
+
+OPERATION_RESULT_FIELD_LABELS = {
+    **OPERATION_CARD_FIELD_LABELS,
+    "conversation_id": "评估会话分组",
+    "turn_index": "组内轮次",
 }
 
 OPERATION_USER_RESULT_COLUMNS = (
@@ -21,6 +27,10 @@ OPERATION_USER_RESULT_COLUMNS = (
     "item_id",
     "index",
     "session_id",
+    "conversation_id",
+    "turn_index",
+    "is_start",
+    "is_end",
     "query",
     "context",
     "attachment_path",
@@ -76,6 +86,31 @@ def operation_user_result_display_row(row: dict[str, Any]) -> dict[str, Any]:
         for field in OPERATION_USER_RESULT_COLUMNS
     }
     for key in ("case_id", "conversation_id", "turn_index", "turn_count", "is_result_row", "evaluation_scope"):
-        if key in row:
+        if key in row and key not in OPERATION_USER_RESULT_COLUMNS:
             displayed[key] = row[key]
     return displayed
+
+
+def operation_round_export_fields(
+    item: dict[str, Any], source: dict[str, Any],
+) -> dict[str, Any]:
+    """导出已记录的会话信息，不根据剩余行数猜测开始或结束边界。"""
+    def first(*values: Any) -> Any:
+        return next((value for value in values if value is not None and value != ""), "")
+
+    # A latest-turn item contains history and current input, never future turns.
+    turns = item.get("turns") or []
+    current = turns[-1] if item.get("evaluation_scope") == "latest_turn" and turns else {}
+    current = current if isinstance(current, dict) else {}
+    current_source = current.get("source_data") or {}
+    current_source = current_source if isinstance(current_source, dict) else {}
+    current_metadata = current_source.get("metadata")
+    current_metadata = current_metadata if isinstance(current_metadata, dict) else {}
+    fields = {
+        "conversation_id": first(item.get("conversation_id"), source.get("conversation_id")),
+        "turn_index": first(item.get("turn_index"), source.get("turn_index")),
+    }
+    for key in ("is_start", "is_end"):
+        fields[key] = first(source.get(key), item.get(key), current_source.get(key),
+                            current_metadata.get(key), current.get(key))
+    return fields

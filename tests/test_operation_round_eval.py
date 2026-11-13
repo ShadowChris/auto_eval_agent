@@ -238,7 +238,8 @@ def test_business_ids_and_internal_conversation_ids_survive_exports():
     sheets = history.export_rows(data)
     for name in ("数据集明细", "评估结果", "逐题结果"):
         assert [r["case_id"] for r in sheets[name]] == [r["case_id"] for r in source]
-        assert [r["conversation_id"] for r in sheets[name]] == ["r1"] * 3
+        group_key = "评估会话分组" if name == "评估结果" else "conversation_id"
+        assert [r[group_key] for r in sheets[name]] == ["r1"] * 3
     exported = history.jsonl_export_rows(data)
     assert [r["case_id"] for r in exported] == [r["case_id"] for r in source]
     assert [r["conversation_id"] for r in exported] == ["r1"] * 3
@@ -344,7 +345,8 @@ def test_every_export_row_has_its_own_result_and_statistics():
     sheets = history.export_rows(data)
     for name in ("评估结果", "逐题结果", "数据集明细"):
         assert len(sheets[name]) == 3
-        assert [r["turn_index"] for r in sheets[name]] == [1, 2, 3]
+        turn_key = "组内轮次" if name == "评估结果" else "turn_index"
+        assert [r[turn_key] for r in sheets[name]] == [1, 2, 3]
         assert [r["query"] for r in sheets[name]] == [r["query"] for r in source_rows()]
     assert [r["correctness"] for r in sheets["评估结果"]] == ["no_support", "ok", "ok"]
     assert all("is_result_row" not in r for r in sheets["评估结果"])
