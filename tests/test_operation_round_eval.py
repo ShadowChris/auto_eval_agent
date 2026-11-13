@@ -49,6 +49,21 @@ def test_single_turn_system_prompt_preserves_pre_multiturn_rendering():
     assert hashlib.sha256(rendered.encode()).hexdigest() == "6b98f9c30e7ac5a155afd85c3381aea8a89fa67782a08bfb63741433e3b848d2"
 
 
+def test_shared_policy_terms_are_scoped_to_the_current_round_only_for_multi_turn():
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config")
+    skill = cfg.domain_skills["operation"]
+    clarification = "以下共用标准中的 Query、原始任务和生效目标，均指结合相关历史确定的当前轮实际承接要求，不包含已结束的独立历史任务。"
+    assert clarification in skill.operation_policy.multi_turn_rules
+    kwargs = dict(persona="终端用户", dims=skill.rubrics, scale=5,
+                  policy=skill.operation_policy, expert_knowledge_text="",
+                  multi_group=False, has_query_images=False)
+    multi = OPERATION_SYSTEM.render(**kwargs, multi_turn=True, latest_turn=True)
+    single = OPERATION_SYSTEM.render(**kwargs, multi_turn=False, latest_turn=False)
+    assert multi.count(clarification) == 1
+    assert multi.index("【多轮会话】") < multi.index(clarification) < multi.index("【证据规则】")
+    assert clarification not in single
+
+
 def parsed(rows=None):
     items, errors = parse_jsonl("\n".join(json.dumps(row, ensure_ascii=False) for row in (rows or source_rows())), "operation")
     assert not errors, errors
