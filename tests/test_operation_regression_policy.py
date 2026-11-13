@@ -26,8 +26,9 @@ def test_operation_policy_checks_ui_semantics_before_result_mapping() -> None:
 
 def test_operation_policy_does_not_invent_blockers_from_prerequisites() -> None:
     prompt = _prompt()
-    assert '不能凭泛化失败自述推断该条件实际缺失' in prompt
-    assert '默认支持范围不得扩大为所有第三方应用能力' in prompt
+    assert '仅出现泛化失败反馈时，不得替本次任务推断' in prompt
+    assert '所有 Query 默认具备对应执行能力，包括第三方应用业务' in prompt
+    assert '能力可执行不等于本次已登录、已授权或必要信息齐全' in prompt
     assert '后续尚未开始的目标属于串行中断后果' in prompt
     assert 'A.用户必须补充的信息或动作' in prompt
     assert '只有 A/B/C 成立且 D 为否' in prompt
@@ -66,7 +67,8 @@ def test_delivered_wrong_card_and_fixed_failure_cannot_be_hidden_by_blocker() ->
     assert '替代必需结果的错卡是已交付错误' in prompt
     assert '即使同一回复前面声称已完成，也不能忽略或解释成正常结束话术' in prompt
     assert '查询本机或应用内的配对设备、记录、设置等真实状态仍适用查询证据规则' in prompt
-    assert '只有“信息收集整理、处理任务、生成内容”等通用阶段的生成进度面板，不是文档结果卡' in prompt
+    assert '只有泛化通用流程状态、无对应文档生成卡时才按通用进度面板处理' in prompt
+    assert '已识别的文档生成卡不因展示生成阶段而被排除' in prompt
 
 
 def test_final_conclusion_rechecks_the_evidence_instead_of_washing_errors() -> None:
@@ -89,7 +91,7 @@ def test_delivered_result_audit_precedes_blocker_and_quality_uses_bound_source()
 
 def test_operation_prompt_stays_compact_and_question_policy_stays_separate() -> None:
     prompt = _prompt()
-    assert len(prompt) < 22500
+    assert len(prompt) < 25000  # V6 rechecks and the confirmed product priors.
     assert '【Query 一致性门禁】' in prompt
     assert '"correctness": "ok|nok|no_support|others"' in prompt
     assert '默认值、历史搜索词、占位词、推荐词' not in RUBRIC_SYSTEM.render(
@@ -114,7 +116,9 @@ def test_underspecified_settings_use_direct_entry_without_expanding_goal() -> No
     prompt = _prompt()
     assert '参数欠指定设置入口规则' in prompt
     assert '目标状态、变化方向、约束或 agent 自主选择授权' in prompt
-    assert '禁止使用入口例外' in prompt
+    assert '应按状态变化目标验收，不能仅以打开页面交付' in prompt
+    assert '是否仍需用户授权或确认，按既有阻塞规则判断' in prompt
+    assert '任一存在就说明具备执行条件' not in prompt
     assert '不能仅因缺少精确数值而降格为打开页面' in prompt
     assert '上一级或错误页面不算到达' in prompt
     assert '不能仅凭页面有开启按钮就增加启用目标' in prompt

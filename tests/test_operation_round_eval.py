@@ -37,7 +37,7 @@ def source_rows():
 
 
 def test_single_turn_system_prompt_preserves_pre_multiturn_rendering():
-    """Golden HEAD rendering: do not accidentally reorder shared single rules.
+    """Golden V8 rendering: multi-turn support must not change single-turn rules.
 
     Intentional policy changes may update this digest with standards/regressions.
     """
@@ -46,7 +46,7 @@ def test_single_turn_system_prompt_preserves_pre_multiturn_rendering():
     rendered = OPERATION_SYSTEM.render(persona="终端用户", dims=skill.rubrics, scale=5,
         policy=skill.operation_policy, expert_knowledge_text="", multi_group=False,
         has_query_images=False, multi_turn=False, latest_turn=False)
-    assert hashlib.sha256(rendered.encode()).hexdigest() == "39a20b2cb9a93fa387e2be2d5cd9768f19237d24b8b2dd87e27e1c58d45b06e8"
+    assert hashlib.sha256(rendered.encode()).hexdigest() == "6b98f9c30e7ac5a155afd85c3381aea8a89fa67782a08bfb63741433e3b848d2"
 
 
 def parsed(rows=None):
@@ -466,3 +466,6 @@ async def test_prompt_keeps_history_answer_but_only_judges_current(tmp_path):
     assert "不重复处罚历史独立任务" in captured["system"]
     assert "只对当前轮执行原始 Query" in captured["system"]
     assert "不处罚历史回复质量" in captured["system"]
+    assert "6. 【最终回答质量】锁定来源：只锁定当前轮非空 answer" in captured["system"]
+    assert "不检查历史回答质量" in captured["system"]
+    assert "对应文档生成卡（生成中也闭环）" in captured["system"]

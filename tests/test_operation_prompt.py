@@ -45,7 +45,7 @@ def test_operation_policy_and_dimensions_load_from_yaml() -> None:
     assert [dim.name for dim in operation.rubrics] == ["操作完成度", "步骤正确性"]
     assert [dim.weight for dim in operation.rubrics] == [0.7, 0.3]
     assert operation.operation_policy is not None
-    assert config.expert_knowledge["operation"].version == 9
+    assert config.expert_knowledge["operation"].version == 14
     assert config.expert_knowledge["operation"].categories
     assert operation.operation_policy.scope_rules
     assert operation.operation_policy.evidence_rules
@@ -481,24 +481,25 @@ def test_operation_prompt_judges_evidence_by_sufficiency_not_container() -> None
     _, prompt = _operation_prompt()
 
     assert "【证据规则】" in prompt
-    assert "取决于其展示的具体内容，而不是所在载体" in prompt
+    assert "取决于其展示内容及适用产品验收终点，而不是载体或中间过程是否完整" in prompt
     assert "设置结果卡片直接显示目标开关状态或当前值" in prompt
-    assert "可以形成充分的完成证据链" in prompt
-    assert "每个生效目标都必须有对应证据" in prompt
-    assert "一个目标的证据不能替代其他目标" in prompt
-    assert "缺少反证不等于存在完成证据" in prompt
-    assert "不得因其他目标执行成功" in prompt
+    assert "不追加完整点击过程或额外结果页" in prompt
+    assert "每个生效目标都须有足够完成依据" in prompt
+    assert "同一结果或后续交付足以证明多个目标时，可以共同使用" in prompt
+    assert "不得仅凭执行顺序或其中一个目标完成，就推定其他目标完成" in prompt
+    assert "缺少反证不等于完成" in prompt
+    assert "只有一句完成声明且无其他依据的普通任务仍不足以判完成" in prompt
     assert "只有泛化的“正在操作/已完成”" in prompt
-    assert "只能证明尝试" in prompt
-    assert "严格区分“目标未执行”和“执行后缺少结果证据”" in prompt
+    assert "不能单独证明任务完成" in prompt
+    assert "严格区分目标未执行、实际结果错误和缺证" in prompt
     assert "同一目标不能同时使用两者" in prompt
-    assert "该状态与 query 要求不一致时，优先标记任务结果错误" in prompt
-    assert "画面不足以验证结果，且没有独立错误时判 others" in prompt
+    assert "结果与要求的冲突实质影响任务完成时记任务结果错误" in prompt
+    assert "确实不足以判断且没有独立错误或有效阻塞时判 others" in prompt
     assert "最终画面或初始状态直接满足 query 即可" in prompt
     assert "关键帧未展示全部过渡过程不等于步骤错误" in prompt
     assert "【逐目标状态】" in prompt
     assert "当前不进行外部事实核验" in prompt
-    assert "可直接核对的约束冲突是任务结果错误" in prompt
+    assert "实质影响任务完成时，才记任务结果错误" in prompt
     assert "自动操作卡片、进度、目标入口和操作轨迹属于过程证据" not in prompt
     assert "ok 必须有最终状态强证据" not in prompt
 
@@ -510,9 +511,9 @@ def test_operation_prompt_separates_collapsed_window_from_plain_text_claim() -> 
     assert "任务执行窗口始终处于带“查看/点击查看”入口的缩略状态" in prompt
     assert "判 others，优先标记任务执行窗口未展开" in prompt
     assert "相关评分维度填 null" in prompt
-    assert "模型收到的画面不足以验证结果" in prompt
+    assert "确实不足以判断且没有独立错误或有效阻塞" in prompt
     assert "判 others" in prompt
-    assert "标记未展示可验证结果" in prompt
+    assert "others / 未展示可验证结果" in prompt
     assert "不得推测是否由抽帧遗漏造成" in prompt
     assert "任务执行窗口未展开" in prompt
 
@@ -575,8 +576,9 @@ def test_operation_prompt_maps_fixed_failure_messages() -> None:
 def test_operation_prompt_injects_torch_and_document_generation_knowledge() -> None:
     _, prompt = _operation_prompt()
 
-    assert "Excel 等文档生成任务耗时较长" in prompt
-    assert "文档类型和内容主题相符" in prompt
+    assert "生成Excel、PPT、Word等文档时" in prompt
+    assert "生成中或已生成状态均可" in prompt
+    assert "不要求先核实完整正文、标题或全部内容细节" in prompt
     assert "只有泛化的“正在生成”文字而没有文档结果卡时不能判完成" in prompt
     assert "手电筒开启后" in prompt
     assert "手电筒图标元素" in prompt
@@ -599,18 +601,17 @@ def test_operation_prompt_distinguishes_guided_user_wait_from_silent_stall() -> 
     assert "回复非空不自动等于 no_support" in prompt
     assert "缺少用户后续操作和最终结果只是阻塞的必然后果" in prompt
     assert "将正确停止流程中尚未开始的目标按串行待续处理" in prompt
-    assert "agent 明确声明能力不支持" in prompt
-    assert "没有可信专家经验或可见证据反驳" in prompt
+    assert "能力拒绝声明本身不构成阻塞" in prompt
+    assert "不再要求专家经验或同一目标的成功记录反驳该声明" in prompt
     assert "必须同时检查按时间顺序的视觉证据和 agent 文本自述" in prompt
     assert "不得只依据其中一路下结论" in prompt
-    assert "任务执行过程文字或 agent 最终回答" in prompt
+    assert "界面、任务执行过程文字或 agent 最终回答" in prompt
     assert "返回桌面或助手界面" in prompt
-    assert "缺少完成任务所需的信息并指引用户提供" in prompt
-    assert "泛化能力常识、相似能力或裁判设想的替代策略" in prompt
+    assert "真实登录授权、必要信息或活动对象缺失不等于能力不支持" in prompt
     assert "判 no_support 前必须逐项写明" in prompt
     assert "只是错误后的恢复询问" in prompt
     assert "用户实际答复、选择、确认、完成登录授权" in prompt
-    assert "不能以通常可用的其他网络、应用或入口作为反证" in prompt
+    assert "仅凭“不支持、功能不可用、技术受限、无法执行”声明不能证明能力缺失" in prompt
     assert "不强制要求 agent 再重复说明" in prompt
     assert "仅返回桌面或助手界面不算解除" in prompt
     assert "无法继续”“请自行操作”“相关工具已返回结果" in prompt
@@ -621,9 +622,9 @@ def test_operation_prompt_does_not_expand_goal_or_treat_recovery_question_as_blo
 
     assert "不得擅自扩大 query 的完成边界" in prompt
     assert "可以按打开、查看或展示该功能入口理解" in prompt
-    assert "query 已提供继续执行所需信息" in prompt
+    assert "query 已经明确给出所需信息时，重复确认用户原意" in prompt
     assert "只是错误后的恢复询问" in prompt
-    assert "明确能力受支持的专家经验也不证明本次已授权" in prompt
+    assert "能力可执行不等于本次已登录、已授权或必要信息齐全" in prompt
     assert "用户不负责选择 agent 的搜索、导航、工具或补救策略" in prompt
     assert "询问是否换路径、换入口、继续查找或上报" in prompt
 
@@ -652,7 +653,8 @@ def test_operation_prompt_distinguishes_empty_query_result_from_missing_action_o
 
     assert "区分“查询结果为空”和“动作缺少目标对象”" in prompt
     assert "未找到、无记录、未绑定、尚未创建" in prompt
-    assert "没有可恢复应用、目标文件、剪贴板内容或活动对象" in prompt
+    assert "没有目标文件、剪贴板内容或活动对象" in prompt
+    assert "恢复应用按应用管理页验收，不要求存在可恢复应用" in prompt
     assert "不能因为成功进入页面或展示空状态就判 ok" in prompt
     assert "仅文字声称“没有结果/找不到”而无查询证据时判 others" in prompt
     assert "不因为结果为空就额外要求用户创建、绑定或添加对象" in prompt
@@ -669,15 +671,15 @@ def test_operation_prompt_distinguishes_sensitive_credentials_from_privacy_setti
     assert "账号密码、支付密码、验证码、私钥" in prompt
     assert "明确说明安全或隐私原因的拒绝属于正确响应" in prompt
     assert "该规则不适用于普通隐私或权限设置" in prompt
-    assert "常规系统设置与设备操控默认属于已支持能力" in prompt
-    assert "静态隐私说明、帮助文案、风险提示或协议链接" in prompt
+    assert "所有 Query 默认具备对应执行能力，包括第三方应用业务" in prompt
+    assert "普通隐私设置和权限开关操作不适用" in prompt
 
 
 def test_operation_prompt_keeps_reply_omission_and_visual_conflict_separate() -> None:
     _, prompt = _operation_prompt()
 
     assert "属于回复不够完整，不等于回复与界面冲突" in prompt
-    assert "与可见状态相反的结果、对象或参数" in prompt
+    assert "agent 原句中的明确事实断言和与之冲突的直接业务证据" in prompt
 
 
 def test_operation_prompt_distinguishes_unverified_condition_from_false_condition() -> None:
@@ -711,7 +713,7 @@ def test_operation_prompt_does_not_infer_missing_object_from_partial_list() -> N
 def test_operation_prompt_keeps_action_task_open_while_waiting_for_user() -> None:
     _, prompt = _operation_prompt()
 
-    assert "原始任务的完成边界" in prompt
+    assert "原始任务的完成边界和关键约束" in prompt
     assert "预订、下单、发送、发布等实际动作" in prompt
     assert "前置查询结果只是执行过程" in prompt
     assert "不能提前判 ok" in prompt
@@ -722,13 +724,14 @@ def test_operation_prompt_keeps_action_task_open_while_waiting_for_user() -> Non
     assert "【逐目标状态】" in prompt
     assert "阻塞前是否已有足以独立导致失败的可见错误" in prompt
     assert "禁止把任务面板的步骤、“已完成”或“超时，任务终止”当成 agent 回复" in prompt
-    assert "必须引用冲突的具体 agent 自然语言回复" in prompt
+    assert "须同时引用 agent 原句中的明确事实断言" in prompt
 
 
 def test_operation_prompt_requires_blocker_evidence_gate_before_correctness() -> None:
     _, prompt = _operation_prompt()
 
-    assert "必须先完成“阻塞证据门控”" in prompt
+    assert "核验已交付结果后，对尚未交付原因完成“阻塞证据门控”" in prompt
+    assert prompt.index('4. 【已交付结果与卡片验收】') < prompt.index('5. 【阻塞资格表】')
     assert "逐帧扫描并逐字摘录面向用户的登录、授权、同意" in prompt
     assert "协议说明配合“取消/同意”等按钮" in prompt
     assert "从完整 agent 文本中逐字摘录“无法/缺少/未提供/请提供" in prompt
@@ -740,7 +743,7 @@ def test_operation_prompt_requires_blocker_evidence_gate_before_correctness() ->
     assert "具体条件说明" in prompt
     assert "注明来源与帧号，不得意译或补写原文中没有的询问" in prompt
     assert "普通“登录”入口、“查看”按钮、“手动操作中”状态" in prompt
-    assert "泛化终止语只有在同时说明具体能力限制" in prompt
+    assert "泛化终止语只有在同时提供真实必要的缺失条件" in prompt
     assert "不得意译或补写原文中没有的询问" in prompt
 
 
@@ -756,7 +759,7 @@ def test_operation_prompt_follows_serial_execution_chain_and_requires_direct_pla
     assert "普通应用跳转、打开视频应用、模糊的应用加载画面" in prompt
     assert "播放专属的直接信号" in prompt
     assert "正在播放/播放中" in prompt
-    assert "不能仅因画面跳转或模糊而降级为 others" in prompt
+    assert "仅因未见播放信号、画面跳转或模糊而无法确认是否执行时判 others" in prompt
     assert "判 nok / 应执行目标未执行" in prompt
     assert "播放专属的直接信号" in prompt
     assert "准备卡不证明后续动作" in prompt
@@ -765,12 +768,12 @@ def test_operation_prompt_follows_serial_execution_chain_and_requires_direct_pla
 def test_operation_prompt_distinguishes_action_preparation_from_core_trigger() -> None:
     _, prompt = _operation_prompt()
 
-    assert "不可省略的核心提交或触发动作" in prompt
-    assert "必须区分前置准备和核心动作执行" in prompt
+    assert "仅对验收终点要求实际提交、触发或状态生效的目标" in prompt
+    assert "区分前置准备和核心动作执行" in prompt
     assert "进入对应应用、跳转目标页面、找到目标对象" in prompt
     assert "不能证明核心动作已经执行" in prompt
     assert "目标专属的直接触发、执行中或执行完成反馈" in prompt
-    assert "普通应用跳转或模糊的应用加载画面" in prompt
+    assert "普通应用跳转、打开视频应用、模糊的应用加载画面" in prompt
 
 
 def test_operation_prompt_uses_explicit_login_feedback_gate() -> None:
