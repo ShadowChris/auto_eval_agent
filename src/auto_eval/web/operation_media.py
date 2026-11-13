@@ -24,6 +24,7 @@ from ..media import (
 )
 from ..config import VisualModeProfile
 from ..paths import PROJECT_ROOT, RUNS_DIR
+from ..query_images import attachment_image_fields, attachment_image_urls
 from .parse_input import operation_query_images
 from .remote_video import is_remote_video_url, local_video_input
 
@@ -222,6 +223,7 @@ def prepare_operation_query_images(
     """把 query_images 归一为已校验的绝对路径，快照中不保存 base64。"""
     prepared = dict(item)
     raw_images = operation_query_images(item)
+    attachment_urls = attachment_image_urls(item)
     if len(raw_images) > MAX_QUERY_IMAGES:
         raise ValueError(f"query_images 最多支持 {MAX_QUERY_IMAGES} 张")
     if raw_images:
@@ -229,9 +231,23 @@ def prepare_operation_query_images(
         downloaded: list[Path] = []
         try:
             for raw in raw_images:
-                path = resolve_operation_query_image_path(raw, base_dir=base_dir)
+                candidates = attachment_urls if len(raw_images) == 1 and attachment_urls[:1] == [raw] else [raw]
+                errors: list[str] = []
+                for candidate in candidates:
+                    try:
+                        if candidate in attachment_urls and not candidate.lower().startswith(("http://", "https://")):
+                            raise ValueError("附件地址必须是 HTTP/HTTPS 图片链接")
+                        path = resolve_operation_query_image_path(candidate, base_dir=base_dir)
+                        break
+                    except ValueError as exc:
+                        if len(candidates) == 1:
+                            raise
+                        field = next(key for key, value in attachment_image_fields(item).items() if value == candidate)
+                        errors.append(f"{field}：{exc}")
+                else:
+                    raise ValueError("用户输入图片读取失败：" + "；".join(errors))
                 paths.append(str(path))
-                if raw.lower().startswith(("http://", "https://")):
+                if candidate.lower().startswith(("http://", "https://")):
                     downloaded.append(path)
         except Exception:
             for path in downloaded:

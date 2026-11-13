@@ -47,6 +47,8 @@ OPERATION_USER_RESULT_COLUMNS = (
     "video_url_domain",
     "video_url_ip",
     "录屏时长",
+    "task_start_time",
+    "task_end_time",
 )
 
 OPERATION_USER_RESULT_HEADERS = tuple(

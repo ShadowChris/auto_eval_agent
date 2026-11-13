@@ -1481,6 +1481,12 @@ def _operation_user_result_rows(
                 source.get("duration"),
                 item.get("duration"),
             ),
+            "task_start_time": _first_export_value(
+                source.get("task_start_time"), item.get("task_start_time"), result.get("task_start_time")
+            ),
+            "task_end_time": _first_export_value(
+                source.get("task_end_time"), item.get("task_end_time"), result.get("task_end_time")
+            ),
         }
         rows.append({key: values[key] for key in _OPERATION_USER_RESULT_COLUMNS})
     return rows

@@ -734,10 +734,6 @@ async def _run(
                     last_error is None
                     and task.mode == "operation"
                     and not _is_multi_group_operation(item_dict)
-                    and any(
-                        item_dict.get(field)
-                        for field in ("query_images", "query_image_path", "attachment_path")
-                    )
                 ):
                     try:
                         prepared_images = await asyncio.to_thread(
