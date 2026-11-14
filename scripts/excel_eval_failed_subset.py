@@ -1,7 +1,7 @@
 """根据评估 Excel 中的执行失败记录，从原始 JSONL 提取补充数据集。
 
 默认读取“逐题结果”，选取 error 非空且 error 不包含
-“视频文件不存在”的数据。通过 item_id 对齐原始 JSONL 的 id，
+“视频文件不存在”的数据。优先通过 id 对齐原始 JSONL 的 id，兼容旧表 item_id，
 并保持原始数据集顺序输出。
 
 示例：
@@ -25,6 +25,7 @@ import pandas as pd
 DEFAULT_SHEET = "逐题结果"
 DEFAULT_EXCLUDED_ERRORS = ("视频文件不存在",)
 ITEM_ID_COLUMN = "item_id"
+ID_COLUMN = "id"
 SEQUENCE_COLUMN = "序号"
 QUERY_COLUMN = "query"
 ERROR_COLUMN = "error"
@@ -134,8 +135,10 @@ def extract_failed_subset(
         raise ValueError("原始数据集必须是 .jsonl 文件")
 
     frame = _read_evaluation(evaluation_path, sheet)
-    required_columns = {ITEM_ID_COLUMN, ERROR_COLUMN}
+    required_columns = {ERROR_COLUMN}
     missing_columns = sorted(required_columns - set(frame.columns))
+    if not {ID_COLUMN, ITEM_ID_COLUMN}.intersection(frame.columns):
+        missing_columns.append("id/item_id（至少一列）")
     if missing_columns:
         raise ValueError(
             f"工作表 {sheet} 缺少必需列：{', '.join(missing_columns)}"
@@ -159,11 +162,11 @@ def extract_failed_subset(
             excluded_rows += 1
             continue
 
-        item_id = _text(row.get(ITEM_ID_COLUMN))
+        item_id = _text(row.get(ID_COLUMN)) or _text(row.get(ITEM_ID_COLUMN))
         if not item_id:
-            raise ValueError(f"工作表 {sheet} 第 {row_number} 行缺少 item_id")
+            raise ValueError(f"工作表 {sheet} 第 {row_number} 行缺少 id/item_id")
         if item_id in selected:
-            raise ValueError(f"工作表 {sheet} 存在重复 item_id：{item_id}")
+            raise ValueError(f"工作表 {sheet} 存在重复 id/item_id：{item_id}")
         selected[item_id] = FailedSubsetItem(
             item_id=item_id,
             sequence=_text(row.get(SEQUENCE_COLUMN)),

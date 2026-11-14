@@ -345,7 +345,7 @@
         <p v-if="mode==='operation'" class="hint">支持 JSONL、CSV、XLSX。表格必需列：<strong>query</strong>，以及 <strong>id / index / 序号</strong> 至少一列。非空 id 直接复用，缺失时按 index 或序号生成。视频优先读取 <strong>video_path</strong>；没有该列时使用<strong>原文件名</strong>拼接，<strong>文件路径</strong>可选。Excel 优先读取“合并数据”工作表。</p>
         <p v-if="mode==='operation'" class="hint">video_path 支持本地路径或 HTTP/HTTPS 视频直链；开始评估时临时下载，单题评估结束后删除临时原视频。下载或视频校验失败会显示在对应题目下方。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","content_start_time":0,"content_end_time":18.5}</p>
-        <p v-if="mode==='operation'" class="hint op-optional-fields-help">可选字段：id（题号）、context（背景）、attachment_url_domain / attachment_url_ip（同一张用户图片的域名/IP 地址）、agent_statement / answer（自述）、task_start_time / task_end_time（任务起止时间，单位秒）。图片域名地址优先，为空或读取失败时尝试 IP 地址；两者为空则无附件图片。不再读取 attachment_path；仍支持显式 query_images 多图和手动上传。视频及图片在开始评估时校验。多轮请连续排列，用 is_start/is_end（TRUE/FALSE）标记首尾，每轮必须提供完整视频中的起止秒数；每轮独立勾选、评估和重跑，自动携带截至本轮的历史 Query、Answer 和画面，仅评本轮承接要求，导出每行都有结果。</p>
+        <p v-if="mode==='operation'" class="hint op-optional-fields-help">可选字段：id（题号）、context（背景）、attachment_url_domain / attachment_url_ip（同一张用户图片的域名/IP 地址）、agent_statement / answer（自述）、task_start_time / task_end_time（任务起止时间，单位秒）。图片域名地址优先，为空或读取失败时尝试 IP 地址；两者为空则无附件图片。不再读取 attachment_path；仍支持显式 query_images 多图和手动上传。视频及图片在开始评估时校验。多轮优先用 session_group（会话字符串）和 turn_index（从0开始的轮次）归组，同组按轮次排序；这两个字段为空时，兼容连续的 is_start/is_end（TRUE/FALSE）首尾标记。每轮必须提供完整视频中的起止秒数；每轮独立勾选、评估和重跑，自动携带截至本轮的历史 Query、Answer 和画面，仅评本轮承接要求，导出保持原始行序。</p>
         <div v-if="datasetImportSummary" class="summary dataset-import-summary">
           <span>格式 {{ datasetImportSummary.format }}</span>
           <span v-if="datasetImportSummary.sheet != null">工作表 {{ datasetImportSummary.sheet }}</span>
@@ -379,6 +379,7 @@
                 <td>
                   <strong>{{ row.key }}</strong>
                   <small v-if="row.turn_count > 1">多轮会话 · 当前第 {{ row.turn_index || row.turn_count }} / {{ row.turn_count }} 轮 · 本轮独立评估</small>
+                  <small v-if="row.session_group">session_group: {{ row.session_group }} · turn_index: {{ row.input_turn_index ?? '未提供' }}</small>
                   <small v-if="row.incoming_id && row.incoming_id !== row.key">id: {{ row.incoming_id }}</small>
                 </td>
                 <td>

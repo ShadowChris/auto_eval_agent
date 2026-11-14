@@ -162,7 +162,7 @@ def parse_text(text: str, mode: Mode) -> tuple[list[dict], list[str]]:
 def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     if mode != "operation":
         return _parse_jsonl_rows(content, mode)
-    from ..operation_conversation import normalize_operation_batch, has_turn_markers
+    from ..operation_conversation import normalize_operation_batch, has_turn_markers, has_session_markers
 
     raw_rows = []
     for line, text in enumerate(content.splitlines(), 1):
@@ -175,7 +175,7 @@ def parse_jsonl(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
         if not isinstance(value, dict):
             value = {"input_error": "输入行必须是 JSON 对象", "source_data": {"raw_value": value}}
         raw_rows.append((line, value))
-    if not any(has_turn_markers(row) or "turns" in row or row.get("evaluation_scope") == "latest_turn"
+    if not any(has_turn_markers(row) or has_session_markers(row) or "turns" in row or row.get("evaluation_scope") == "latest_turn"
                or row.get("input_error") for _, row in raw_rows):
         return _parse_jsonl_rows(content, mode)
     grouped = normalize_operation_batch([
@@ -324,7 +324,7 @@ def _parse_jsonl_rows(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
         # 原始字段仅用于历史追溯和导出，不会进入 EvalItem 或裁判 prompt。
         item["source_data"] = _source_data_with_flat_metadata(obj)
         if mode == "operation" and obj.get("turns"):
-            for key in ("turns", "case_id", "conversation_id", "turn_count", "turn_index", "evaluation_scope"):
+            for key in ("turns", "case_id", "conversation_id", "session_group", "turn_count", "turn_index", "evaluation_scope"):
                 if key in obj:
                     item[key] = obj[key]
             item["source_data"] = obj.get("source_data") or item["source_data"]

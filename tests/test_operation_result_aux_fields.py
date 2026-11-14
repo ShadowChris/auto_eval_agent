@@ -55,7 +55,7 @@ def test_only_internal_aux_fields_are_hidden_and_other_round_fields_remain(legac
         headers = [cell.value for cell in workbook[name][1]]
         assert not set(headers).intersection(OPERATION_INTERNAL_ROUND_FIELDS)
     assert list(sheets["评估结果"][0]) == list(OPERATION_USER_RESULT_HEADERS)
-    assert all(key in sheets["评估结果"][0] for key in ("评估会话分组", "组内轮次", "is_start", "is_end"))
+    assert all(key in sheets["评估结果"][0] for key in ("session_group", "turn_index", "is_start", "is_end"))
     details = sheets["数据集明细"]
     assert [row["标签"] for row in details] == ["首轮", "续轮", "单轮"]
     assert [row["case_id"] for row in details[:2]] == ["r1", "r1"]
@@ -106,10 +106,10 @@ def test_legacy_marker_recovery_does_not_guess_ambiguous_ids():
 
 def test_display_projection_drops_aux_without_mutating_input():
     raw = dict(case_id="business", turn_count=3, evaluation_scope="latest_turn", is_result_row=True,
-               conversation_id="chat", turn_index=2, is_start=False, is_end=True)
+               conversation_id="internal", session_group="chat", turn_index=2, is_start=False, is_end=True)
     projected = operation_user_result_display_row(raw)
     assert not set(projected).intersection(OPERATION_INTERNAL_ROUND_FIELDS)
-    assert projected["评估会话分组"] == "chat" and projected["组内轮次"] == 2
+    assert projected["session_group"] == "chat" and projected["turn_index"] == 2
     assert projected["is_start"] is False and projected["is_end"] is True
     assert raw["case_id"] == "business"
 

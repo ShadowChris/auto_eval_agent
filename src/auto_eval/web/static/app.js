@@ -12,6 +12,7 @@ function resultConversationMeta(result, items) {
   if (id == null || String(id).trim() === "") return null;
   return {
     id: String(id),
+    label: String(result.session_group || item.session_group || id),
     turnIndex: Number(result.turn_index || item.turn_index || item.turns?.length || 1),
     turnCount: Number(result.turn_count || item.turn_count || item.turns?.length || 1),
   };
@@ -49,7 +50,7 @@ function buildResultPages(rows, pageSize, items, groupConversations) {
         || Number(left.index) - Number(right.index)
       ));
       const total = group.rows.reduce((count, row) => Math.max(count, resultConversationMeta(row, items).turnCount), group.rows.length);
-      page.headings.set(group.rows[0], { id: group.conversation.id, visible: group.rows.length, total });
+      page.headings.set(group.rows[0], { id: group.conversation.label, visible: group.rows.length, total });
     }
     group.rows.forEach(row => page.rows.push(row));
   }
@@ -502,6 +503,8 @@ createApp({
       turn_count: item.turnCount || (item.turns || []).length || 1,
       turn_index: item.turnIndex,
       evaluation_scope: item.evaluationScope,
+      session_group: item.sessionGroup,
+      input_turn_index: item.sourceData?.turn_index,
       input_error: item.inputError || "",
       input_warnings: item.inputWarnings || [],
       turn_windows: (item.turns || []).map(turn => [turn.task_start_time, turn.task_end_time]),
@@ -1841,6 +1844,7 @@ createApp({
               turns: item.turns || [],
               caseId: item.case_id ?? "",
               conversationId: item.conversation_id || "",
+              sessionGroup: item.session_group ?? item.source_data?.session_group ?? "",
               turnIndex: item.turn_index ?? null,
               turnCount: item.turn_count ?? null,
               evaluationScope: item.evaluation_scope || "",
@@ -2123,6 +2127,9 @@ createApp({
             if (it.inputError) item.input_error = it.inputError;
             if ((it.inputWarnings || []).length) item.input_warnings = [...it.inputWarnings];
             if ((it.queryImages || []).length) item.query_images = [...it.queryImages];
+            if (it.sessionGroup || Object.prototype.hasOwnProperty.call(it.sourceData || {}, "session_group")) {
+              item.session_group = it.sessionGroup;
+            }
             item.attachment_url_domain = it.attachmentUrlDomain || "";
             item.attachment_url_ip = it.attachmentUrlIp || "";
             if ((it.turns || []).length || it.evaluationScope === "latest_turn") {
