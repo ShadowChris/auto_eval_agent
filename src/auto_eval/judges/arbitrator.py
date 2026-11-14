@@ -11,7 +11,7 @@ from ..schema import EvalItem, OperationSingleScore, SingleScore
 from ..expert_knowledge import render_expert_knowledge
 from .base import JudgeClient, JudgeOutputParseError
 from .operation_fields import (
-    QUERY_ALIGNMENT_ISSUE,
+    OPERATION_INPUT_GATE_CATEGORIES,
     collect_operation_output_issues,
     hoist_misnested_operation_fields,
     normalize_operation_cards,
@@ -122,7 +122,7 @@ class Arbitrator:
             issue_types, need_review_cate = split_operation_issue_fields(
                 all_issues, policy.review_category_names if policy else []
             )
-            if QUERY_ALIGNMENT_ISSUE in need_review_cate:
+            if any(category in need_review_cate for category in OPERATION_INPUT_GATE_CATEGORIES):
                 rubric = {}
                 total = None
             return {

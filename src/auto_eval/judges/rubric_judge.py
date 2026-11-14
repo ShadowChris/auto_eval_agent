@@ -18,7 +18,7 @@ from ..schema import EvalItem, OperationSingleScore, SingleScore
 logger = logging.getLogger("auto_eval.classify")
 from .base import JudgeClient, JudgeOutputParseError
 from .operation_fields import (
-    QUERY_ALIGNMENT_ISSUE,
+    OPERATION_INPUT_GATE_CATEGORIES,
     collect_operation_output_issues,
     hoist_misnested_operation_fields,
     normalize_operation_cards,
@@ -136,7 +136,7 @@ def _operation_score_from_data(
     issue_types, need_review_cate = split_operation_issue_fields(
         all_issues, policy.review_category_names if policy else []
     )
-    if QUERY_ALIGNMENT_ISSUE in need_review_cate:
+    if any(category in need_review_cate for category in OPERATION_INPUT_GATE_CATEGORIES):
         rubric = {}
         rubric_reasons = {}
         na_dimensions = [dim.name for dim in dims]

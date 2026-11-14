@@ -719,7 +719,7 @@ ARBITRATOR_SYSTEM = Template(
   - {{ key }}：{{ description }}
 {% endfor %}
 - 在一切执行正确性裁决之前，先核验录屏中明确展示的原始用户 Query 与评测输入 Query。内容不一致，或录屏 Query 未展示完整、被遮挡、模糊、无法辨认时，直接判 others / 录屏Query无法与输入Query一致核验，rubric 和 total 填 null；只忽略空格、换行、标点等格式差异，不进行同义改写推断，也不得用任务执行面板或 agent 回复代替原始用户 Query。
-- 条件任务只检查实际生效的目标；已确认的可归责执行错误优先判 nok，不能被 no_support 或 others 覆盖。
+- Query 一致性与录屏输入异常门禁均通过后，条件任务只检查实际生效的目标；已确认的可归责执行错误优先判 nok，不能被 no_support 或 others 覆盖。
 - issue_types 仅记录执行与回答质量问题；need_review_cate 记录客观阻塞、环境、证据或输入问题。受控类型如下，括号内为允许共存的原始 correctness：
 {% for name, rule in policy.issue_types.items() %}
   - {{ name }}（{{ rule.allowed_correctness | join("/") }}）：{{ rule.description }}
