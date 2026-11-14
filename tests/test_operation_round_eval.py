@@ -36,8 +36,8 @@ def source_rows():
     ]
 
 
-def test_single_turn_system_prompt_preserves_pre_multiturn_rendering():
-    """Golden V8 rendering: multi-turn support must not change single-turn rules.
+def test_single_turn_system_prompt_matches_confirmed_policy_rendering():
+    """Golden rendering includes the confirmed completed-reply recording gate.
 
     Intentional policy changes may update this digest with standards/regressions.
     """
@@ -46,7 +46,7 @@ def test_single_turn_system_prompt_preserves_pre_multiturn_rendering():
     rendered = OPERATION_SYSTEM.render(persona="终端用户", dims=skill.rubrics, scale=5,
         policy=skill.operation_policy, expert_knowledge_text="", multi_group=False,
         has_query_images=False, multi_turn=False, latest_turn=False)
-    assert hashlib.sha256(rendered.encode()).hexdigest() == "6b98f9c30e7ac5a155afd85c3381aea8a89fa67782a08bfb63741433e3b848d2"
+    assert hashlib.sha256(rendered.encode()).hexdigest() == "1b684be1bb6320b961f53b0562451066c825e0f1071d534417ca401ac499185a"
 
 
 def test_shared_policy_terms_are_scoped_to_the_current_round_only_for_multi_turn():
@@ -241,8 +241,10 @@ def test_business_ids_and_internal_conversation_ids_survive_exports():
             assert [r["case_id"] for r in sheets[name]] == [r["case_id"] for r in source]
         else:
             assert all("case_id" not in row for row in sheets[name])
-        group_key = "评估会话分组" if name == "评估结果" else "conversation_id"
-        assert [r[group_key] for r in sheets[name]] == ["r1"] * 3
+        if name == "评估结果":
+            assert [r["session_group"] for r in sheets[name]] == [""] * 3
+        else:
+            assert [r["conversation_id"] for r in sheets[name]] == ["r1"] * 3
     exported = history.jsonl_export_rows(data)
     assert [r["case_id"] for r in exported] == [r["case_id"] for r in source]
     assert [r["conversation_id"] for r in exported] == ["r1"] * 3
@@ -348,8 +350,7 @@ def test_every_export_row_has_its_own_result_and_statistics():
     sheets = history.export_rows(data)
     for name in ("评估结果", "逐题结果", "数据集明细"):
         assert len(sheets[name]) == 3
-        turn_key = "组内轮次" if name == "评估结果" else "turn_index"
-        assert [r[turn_key] for r in sheets[name]] == [1, 2, 3]
+        assert [r["turn_index"] for r in sheets[name]] == ([""] * 3 if name == "评估结果" else [1, 2, 3])
         assert [r["query"] for r in sheets[name]] == [r["query"] for r in source_rows()]
     assert [r["correctness"] for r in sheets["评估结果"]] == ["no_support", "ok", "ok"]
     assert all("is_result_row" not in r for r in sheets["评估结果"])

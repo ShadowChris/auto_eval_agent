@@ -18,7 +18,7 @@ from ..schema import (
 )
 from .operation_fields import (
     LEGACY_REVIEW_CATEGORIES,
-    QUERY_ALIGNMENT_ISSUE,
+    OPERATION_INPUT_GATE_CATEGORIES,
     primary_operation_issue_types,
     split_operation_issue_fields,
 )
@@ -258,7 +258,7 @@ def aggregate_operation_scores(
         if parts:
             rubric_reasons[key] = " | ".join(parts[:3])
 
-    if QUERY_ALIGNMENT_ISSUE in need_review_cate:
+    if any(category in need_review_cate for category in OPERATION_INPUT_GATE_CATEGORIES):
         rubric_mean = {}
         rubric_reasons = {}
         na_consensus = [dim.name for dim in dims]

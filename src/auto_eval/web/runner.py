@@ -1091,6 +1091,8 @@ async def _run(
                         res[field] = item_dict[field]
             if item_dict.get("input_warnings"):
                 res["input_warnings"] = list(item_dict["input_warnings"])
+            if "session_group" in item_dict:
+                res["session_group"] = item_dict["session_group"]
             if query_images:
                 res["query_images"] = query_images
                 res["query_image_count"] = len(query_images)

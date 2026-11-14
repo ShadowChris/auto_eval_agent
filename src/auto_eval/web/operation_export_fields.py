@@ -16,8 +16,6 @@ OPERATION_CARD_FIELD_LABELS = {
 
 OPERATION_RESULT_FIELD_LABELS = {
     **OPERATION_CARD_FIELD_LABELS,
-    "conversation_id": "评估会话分组",
-    "turn_index": "组内轮次",
 }
 
 # Execution/history metadata belongs in 数据集明细 and JSONL, not result sheets.
@@ -28,10 +26,9 @@ OPERATION_USER_RESULT_COLUMNS = (
     "数据集序号",
     "id",
     "metadata.id",
-    "item_id",
     "index",
     "session_id",
-    "conversation_id",
+    "session_group",
     "turn_index",
     "is_start",
     "is_end",
@@ -106,9 +103,18 @@ def operation_round_export_fields(
     current_source = current_source if isinstance(current_source, dict) else {}
     current_metadata = current_source.get("metadata")
     current_metadata = current_metadata if isinstance(current_metadata, dict) else {}
+    def original(key: str) -> Any:
+        for container in (source, current_source, current_metadata):
+            if key in container:
+                return container[key]
+        if item.get("evaluation_scope") != "latest_turn":
+            return item.get(key, "")
+        return item.get(key, "") if key == "session_group" else ""
+
     fields = {
         "conversation_id": first(item.get("conversation_id"), source.get("conversation_id")),
-        "turn_index": first(item.get("turn_index"), source.get("turn_index")),
+        "session_group": original("session_group"),
+        "turn_index": original("turn_index"),
     }
     for key in ("is_start", "is_end"):
         fields[key] = first(source.get(key), item.get(key), current_source.get(key),

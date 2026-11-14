@@ -91,7 +91,7 @@ def test_delivered_result_audit_precedes_blocker_and_quality_uses_bound_source()
 
 def test_operation_prompt_stays_compact_and_question_policy_stays_separate() -> None:
     prompt = _prompt()
-    assert len(prompt) < 25000  # V6 rechecks and the confirmed product priors.
+    assert len(prompt) < 25600  # 保留 V8 先验，新录屏输入门禁约增加 500 字符。
     assert '【Query 一致性门禁】' in prompt
     assert '"correctness": "ok|nok|no_support|others"' in prompt
     assert '默认值、历史搜索词、占位词、推荐词' not in RUBRIC_SYSTEM.render(

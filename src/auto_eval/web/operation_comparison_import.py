@@ -437,6 +437,7 @@ def _standard_export(
         "session_id": ("session_id", "sessionid", "sessionId"),
         "sessionid": ("sessionid", "session_id", "sessionId"),
         "conversation_id": ("conversation_id", "评估会话分组"),
+        "session_group": ("session_group",),
         "turn_index": ("turn_index", "组内轮次"),
         "is_start": ("is_start",),
         "is_end": ("is_end",),

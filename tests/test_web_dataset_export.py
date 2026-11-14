@@ -151,11 +151,10 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
         "数据集序号",
         "id",
         "metadata.id",
-        "item_id",
         "index",
         "session_id",
-        "评估会话分组",
-        "组内轮次",
+        "session_group",
+        "turn_index",
         "is_start",
         "is_end",
         "query",
@@ -353,7 +352,8 @@ def test_operation_export_preserves_both_ids(
         assert row["id"] == "op_1"
         assert row["metadata.id"] == metadata_id
     assert sheets["数据集明细"][0]["id_1"] == "existing-original-column"
-    assert sheets["评估结果"][0]["item_id"] == "op_1"
+    assert "item_id" not in sheets["评估结果"][0]
+    assert sheets["逐题结果"][0]["item_id"] == "op_1"
     batch_row = history.operation_comparison_batch(snapshot)["rows"][0]
     assert batch_row["id"] == "op_1"
     assert batch_row["export"]["metadata.id"] == metadata_id
