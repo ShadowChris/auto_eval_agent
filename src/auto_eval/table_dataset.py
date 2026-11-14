@@ -510,7 +510,7 @@ def convert_table(
     has_query_image_path_column = QUERY_IMAGE_PATH_COLUMN in df.columns
     multi_turn_table = any(
         column in df.columns and any(not _is_empty(value) for value in df[column])
-        for column in ("is_start", "is_end")
+        for column in ("is_start", "is_end", "session_group", "turn_index")
     )
     direct_standard_columns = tuple(
         column
@@ -586,7 +586,7 @@ def convert_table(
                 if present
             ),
         )
-        marked = any(not _is_empty(row.get(key)) for key in ("is_start", "is_end"))
+        marked = any(not _is_empty(row.get(key)) for key in ("is_start", "is_end", "session_group", "turn_index"))
         try:
             query_images = _table_query_images(raw_query_images, strict=marked)
             if not query_images:

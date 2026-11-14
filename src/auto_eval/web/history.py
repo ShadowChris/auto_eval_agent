@@ -500,7 +500,7 @@ def snapshot_payload(data: dict, *, compact: bool = False) -> dict:
             "query_images",
             "turn_count",
             "turn_index", "evaluation_scope",
-            "conversation_id",
+            "conversation_id", "session_group",
             "case_id", "evaluation_strategy", "alignment_status",
             "alignment_warnings", "group_variants", "image_input",
             "dataset_status", "dataset_revision", "dataset_source_batch_id",
@@ -807,7 +807,12 @@ def jsonl_export_rows(snapshot: dict) -> list[dict]:
             # whose original video_path was intentionally blank.
             row["video_path"] = _project_relative_path(item.get("video_path"))
             if item.get("turns"):
-                row["turns"] = [{key: value for key, value in turn.items() if key != "source_data"} for turn in item["turns"]]
+                row["turns"] = [{key: value for key, value in turn.items() if key != "source_data" or "session_group" in (turn.get("source_data") or {})} for turn in item["turns"]]
+            if "session_group" in source:
+                row["source_data"] = dict(source)
+                row["eval_run"]["turn_index"] = item.get("turn_index")
+                if "turn_index" in source:
+                    row["turn_index"] = source["turn_index"]
         for field in ("input_error", "input_warnings"):
             if item.get(field):
                 row[field] = item[field]
@@ -1533,7 +1538,7 @@ def _operation_user_result_rows(
         if "is_result_row" in item:
             projected.update({key: item[key] for key in ("case_id", "turn_index", "turn_count", "is_result_row")})
         if item.get("evaluation_scope") == "latest_turn":
-            projected.update({key: item[key] for key in ("case_id", "conversation_id", "turn_index", "turn_count", "evaluation_scope") if key in item})
+            projected.update({key: item[key] for key in ("case_id", "conversation_id", "turn_count", "evaluation_scope") if key in item})
         rows.append(projected)
     return rows
 
@@ -1914,7 +1919,9 @@ def _dataset_rows(snapshot: dict, *, compact_media: bool = False) -> list[dict]:
             })
         row.update(media_fields)
         if item.get("evaluation_scope") == "latest_turn":
-            row.update({key: item[key] for key in ("case_id", "conversation_id", "turn_index", "turn_count", "evaluation_scope") if key in item})
+            row.update({key: item[key] for key in ("case_id", "conversation_id", "turn_count", "evaluation_scope") if key in item})
+            if "turn_index" not in source:
+                row["turn_index"] = item.get("turn_index")
         rows.append(row)
     return rows
 

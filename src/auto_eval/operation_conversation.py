@@ -49,14 +49,53 @@ def marker_bool(value: Any) -> bool:
 
 
 def has_turn_markers(row: dict) -> bool:
-    return any(row.get(key) not in (None, "") for key in ("is_start", "is_end"))
+    return any(input_value_present(operation_input_field(row, key)) for key in ("is_start", "is_end"))
+
+
+def operation_input_field(row: dict, key: str) -> Any:
+    """Outer input wins, including explicit empty values; then metadata/source."""
+    source = row.get("source_data")
+    for container in (row, row.get("metadata"), source, source.get("metadata") if isinstance(source, dict) else None):
+        if isinstance(container, dict) and key in container:
+            return container[key]
+    return None
+
+
+def input_value_present(value: Any) -> bool:
+    return value is not None and not (isinstance(value, str) and not value.strip())
+
+
+def has_session_markers(row: dict) -> bool:
+    return any(input_value_present(operation_input_field(row, key)) for key in ("session_group", "turn_index"))
+
+
+def session_turn_number(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ValueError("turn_index 必须是非负整数")
+    try:
+        number = float(value)
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError("turn_index 必须是非负整数") from None
+    if not math.isfinite(number) or number < 0 or not number.is_integer():
+        raise ValueError("turn_index 必须是非负整数")
+    return int(number)
+
+
+def session_group_key(row: dict) -> str | None:
+    group = operation_input_field(row, "session_group")
+    number = operation_input_field(row, "turn_index")
+    if not input_value_present(group) or not input_value_present(number):
+        return None
+    if not isinstance(group, str):
+        raise ValueError("session_group 必须是非空字符串")
+    return group.strip()
 
 
 def _source(row: dict) -> dict:
     source = dict(row["source_data"]) if isinstance(row.get("source_data"), dict) else dict(row)
     # API callers may supply source_data containing only business columns.
     # Keep the actual input markers before _round_item removes runtime markers.
-    for key in ("is_start", "is_end"):
+    for key in ("is_start", "is_end", "session_group"):
         if key in row:
             source.setdefault(key, row[key])
     return source
@@ -176,7 +215,7 @@ def group_operation_items(items: list[dict]) -> list[dict]:
             grouped.append(row)
             continue
         try:
-            start, end = marker_bool(row.get("is_start")), marker_bool(row.get("is_end"))
+            start, end = marker_bool(operation_input_field(row, "is_start")), marker_bool(operation_input_field(row, "is_end"))
         except ValueError as exc:
             raise ValueError(f"第 {position} 行：{exc}") from exc
         if start:
@@ -213,6 +252,8 @@ def _round_item(conversation: dict, index: int, *, turn_count: int | None = None
     parent_source = conversation.get("source_data") or {}
     if "case_id" not in source_data and "turns" in parent_source and "case_id" in parent_source:
         source_data["case_id"] = copy.deepcopy(parent_source["case_id"])
+    if "session_group" not in source_data and "turns" in parent_source and "session_group" in parent_source:
+        source_data["session_group"] = copy.deepcopy(parent_source["session_group"])
     row = dict(conversation)
     row.update({
         "id": current.get("id") or f"{conversation_id}_turn_{index + 1:03d}",
@@ -227,6 +268,9 @@ def _round_item(conversation: dict, index: int, *, turn_count: int | None = None
         "source_line": current.get("source_line") or conversation.get("source_line"),
     })
     row["category"] = row.get("category") or "operation"
+    row.pop("session_group", None)
+    if "session_group" in source_data:
+        row["session_group"] = source_data["session_group"]
     for field in ("is_start", "is_end", "is_result_row", "question", "agent_statement", "query_image_path", "attachment_path"):
         row.pop(field, None)
     if not row.get("context"):
@@ -238,8 +282,15 @@ def _round_item(conversation: dict, index: int, *, turn_count: int | None = None
 
 def normalize_operation_items(items: list[dict]) -> list[dict]:
     """New submissions evaluate each round; unmarked single rows are unchanged."""
+    if any(isinstance(row, dict) and row.get("evaluation_scope") != "latest_turn"
+           and row.get("turns") is None and has_session_markers(row) for row in items):
+        normalized = normalize_operation_batch(items)
+        errors = [row["input_error"] for row in normalized if row.get("input_error")]
+        if errors:
+            raise ValueError("；".join(dict.fromkeys(errors)))
+        return normalized
     output = []
-    for item in group_operation_items(items):
+    for item in group_operation_items([_canonical_round_input(row) for row in items]):
         if item.get("evaluation_scope") == "latest_turn" or not item.get("turns"):
             output.append(item)
         else:
@@ -251,6 +302,106 @@ def normalize_operation_items(items: list[dict]) -> list[dict]:
     return output
 
 
+def _canonical_round_input(row: dict) -> dict:
+    """JSONL keeps the external zero-based counter separate from runtime ordinal."""
+    run = row.get("eval_run") if isinstance(row, dict) else None
+    if isinstance(run, dict) and row.get("evaluation_scope") == "latest_turn" and "turn_index" in run:
+        return {**row, "source_data": _source(row), "turn_index": run["turn_index"]}
+    return row
+
+
+def _failed_operation_input(row: dict, error: str, **fields: Any) -> dict:
+    result = dict(row)
+    result.setdefault("source_data", _source(row))
+    result.update(fields, input_error=error)
+    result["query"] = str(row.get("query") or row.get("question") or "")
+    result["video_path"] = str(row.get("video_path") or "")
+    for field in ("answer", "context"):
+        if not isinstance(result.get(field), str):
+            result.pop(field, None)
+    result.pop("turns", None)
+    return result
+
+
+def _normalize_session_group_items(items: list[dict]) -> list[dict] | None:
+    """Group by explicit key, build chronological prefixes, retain source order."""
+    groups: dict[str, list[tuple[int, dict]]] = {}
+    selected: set[int] = set()
+    placed: list[tuple[int, int, dict]] = []
+    for position, original in enumerate(items):
+        if not isinstance(original, dict) or original.get("turns") is not None or original.get("evaluation_scope") == "latest_turn":
+            continue
+        try:
+            key = session_group_key(original)
+        except ValueError as exc:
+            selected.add(position)
+            placed.append((position, 0, _failed_operation_input(original, str(exc))))
+            continue
+        if key is None:
+            continue
+        row = dict(original)
+        row.setdefault("source_line", position + 1)
+        row["source_data"] = _source(original)
+        for field in ("session_group", "turn_index"):
+            row["source_data"][field] = operation_input_field(original, field)
+        groups.setdefault(key, []).append((position, row))
+        selected.add(position)
+    if not selected:
+        return None
+    from collections import Counter
+
+    for key, members in groups.items():
+        invalid = ""
+        try:
+            ordered = sorted(members, key=lambda entry: session_turn_number(operation_input_field(entry[1], "turn_index")))
+        except ValueError as exc:
+            ordered, invalid = members, str(exc)
+        numbers = [] if invalid else [session_turn_number(operation_input_field(row, "turn_index")) for _, row in ordered]
+        counts = Counter(numbers)
+        expected = 0
+        turns = []
+        for index, (_, row) in enumerate(ordered):
+            turn = dict(row)
+            if invalid:
+                turn["input_error"] = f"会话 {key} 的轮次无法可靠排序：{invalid}"
+            else:
+                number = numbers[index]
+                if counts[number] > 1:
+                    turn["input_error"] = f"会话 {key} 的 turn_index={number} 重复，无法确定该轮历史"
+                elif number != expected:
+                    turn["input_error"] = f"会话 {key} 缺少 turn_index={expected} 的历史，不能跳过轮次评估"
+                expected = number + 1
+            turns.append(turn)
+        normalized = normalize_operation_batch([{"turns": turns}])
+        for (position, _), item in zip(ordered, normalized):
+            item["conversation_id"] = f"session_group:{key}"
+            if "case_id" not in (item.get("source_data") or {}):
+                item["case_id"] = item["conversation_id"]
+            placed.append((position, 0, item))
+    position = 0
+    while position < len(items):
+        if position in selected:
+            position += 1
+            continue
+        start = position
+        while position < len(items) and position not in selected:
+            position += 1
+        segment = [{**row, "source_line": row.get("source_line", start + offset + 1)}
+                   if isinstance(row, dict) else row for offset, row in enumerate(items[start:position])]
+        placed.extend((start, index, item) for index, item in enumerate(normalize_operation_batch(segment)))
+    return [item for _, _, item in sorted(placed, key=lambda entry: entry[:2])]
+
+
+def _serializable_operation_input(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _serializable_operation_input(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_serializable_operation_input(child) for child in value]
+    return value
+
+
 def normalize_operation_batch(items: list[dict]) -> list[dict]:
     """Recover batch boundaries without discarding rows or relaxing evidence checks.
 
@@ -258,32 +409,23 @@ def normalize_operation_batch(items: list[dict]) -> list[dict]:
     prefix. Here a bad round invalidates its dependent prefixes, not other cases.
     Failed rows never contain partially valid ``turns`` for a judge to consume.
     """
+    items = [_serializable_operation_input(item) for item in items]
+    for row in items:
+        if not isinstance(row, dict) or row.get("turns") is not None or row.get("evaluation_scope") == "latest_turn":
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        supplied = [key for key in ("session_group", "turn_index") if key in row or key in metadata]
+        if supplied:
+            source = _source(row)
+            source.update({key: operation_input_field(row, key) for key in supplied})
+            row["source_data"] = source
+    session_items = _normalize_session_group_items(items)
+    if session_items is not None:
+        return _validate_batch_identities(session_items)
     output: list[dict] = []
     pending: list[dict] = []
 
-    def serializable(value: Any) -> Any:
-        # Python's JSON decoder also accepts NaN/Infinity. Retain their literal
-        # meaning for diagnosis, but do not break HTTP/history JSON serialization.
-        if isinstance(value, float) and not math.isfinite(value):
-            return str(value)
-        if isinstance(value, dict):
-            return {key: serializable(child) for key, child in value.items()}
-        if isinstance(value, list):
-            return [serializable(child) for child in value]
-        return value
-
-    def failed(row: dict, error: str, **fields: Any) -> dict:
-        result = dict(row)
-        result.setdefault("source_data", _source(row))
-        result.update(fields, input_error=error)
-        # Keep invalid values in source_data, not in the execution schema.
-        result["query"] = str(row.get("query") or row.get("question") or "")
-        result["video_path"] = str(row.get("video_path") or "")
-        for field in ("answer", "context"):
-            if not isinstance(result.get(field), str):
-                result.pop(field, None)
-        result.pop("turns", None)
-        return result
+    failed = _failed_operation_input
 
     def emit(rows: list[dict], *, parent: dict | None = None, warning: str = "") -> None:
         first = rows[0]
@@ -337,12 +479,12 @@ def normalize_operation_batch(items: list[dict]) -> list[dict]:
             pending.clear()
 
     for position, original in enumerate(items, 1):
-        original = serializable(original)
         row = dict(original) if isinstance(original, dict) else {
             "source_data": {"raw_value": original}, "input_error": "输入行必须是 JSON 对象",
         }
         row.setdefault("source_line", position)
         if row.get("evaluation_scope") == "latest_turn" or row.get("turns") is not None:
+            row = _canonical_round_input(row)
             flush("上一会话缺少 is_end=TRUE，已在下一条独立输入前结束")
             if row.get("input_error"):
                 output.append(row)
@@ -359,10 +501,11 @@ def normalize_operation_batch(items: list[dict]) -> list[dict]:
                     emit(turns, parent=row)
             continue
         if not has_turn_markers(row) and not pending:
-            output.append(row)
+            output.append(failed(row, "session_group/turn_index 不完整，且未提供 is_start/is_end，无法确定会话")
+                          if has_session_markers(row) else row)
             continue
         try:
-            start = marker_bool(row.get("is_start"))
+            start = marker_bool(operation_input_field(row, "is_start"))
         except ValueError:
             start = None
         # An explicit new start is a reliable boundary even if its end marker
@@ -372,7 +515,7 @@ def normalize_operation_batch(items: list[dict]) -> list[dict]:
         try:
             if start is None:
                 raise ValueError("is_start/is_end 必须是 TRUE/FALSE 或 1/0")
-            end = marker_bool(row.get("is_end"))
+            end = marker_bool(operation_input_field(row, "is_end"))
         except ValueError as exc:
             row = failed(row, str(row.get("input_error") or f"多轮标记无效：{exc}"))
             if pending or start is True:
@@ -394,7 +537,11 @@ def normalize_operation_batch(items: list[dict]) -> list[dict]:
             flush()
     flush("文件末尾缺少 is_end=TRUE，已按现有连续轮次结束会话")
 
-    # Do not let ambiguous execution ids overwrite one another in histories.
+    return _validate_batch_identities(output)
+
+
+def _validate_batch_identities(output: list[dict]) -> list[dict]:
+    """Do not let ambiguous execution ids overwrite one another in histories."""
     from collections import Counter
 
     counts = Counter(str(row.get("id")) for row in output if row.get("id"))
@@ -403,7 +550,7 @@ def normalize_operation_batch(items: list[dict]) -> list[dict]:
     for position, row in enumerate(output, 1):
         if row.get("id") and counts[str(row["id"])] > 1:
             original_id = row["id"]
-            row = failed(row, f"id 重复：{original_id}；请修正原始 id 后重跑")
+            row = _failed_operation_input(row, f"id 重复：{original_id}；请修正原始 id 后重跑")
             identifier = f"__invalid_row_{position}_{original_id}"
             while identifier in reserved:
                 identifier += "_"
@@ -414,7 +561,7 @@ def normalize_operation_batch(items: list[dict]) -> list[dict]:
             try:
                 validate_round_prefixes([row], _seen=seen)
             except (ValueError, TypeError) as exc:
-                output[position - 1] = failed(row, str(exc))
+                output[position - 1] = _failed_operation_input(row, str(exc))
     return output
 
 
