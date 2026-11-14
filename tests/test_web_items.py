@@ -2,9 +2,6 @@
 import asyncio
 from pathlib import Path
 
-import pytest
-from fastapi import HTTPException
-
 from auto_eval.config import load_config
 from auto_eval.web import runner, scheduler, server
 from auto_eval.web import tasks as web_tasks
@@ -16,11 +13,22 @@ from test_web_scheduler import _patch_runner
 _CFG = load_config(Path("config"))
 
 
-def _patch_item_runner(monkeypatch, expected_calls: int = 20):
+def _patch_item_runner(
+    monkeypatch,
+    expected_calls: int = 20,
+    *,
+    started: asyncio.Event | None = None,
+    release: asyncio.Event | None = None,
+    gate_query: str = "",
+):
     calls: list[tuple[int, str]] = []
 
     async def fake_eval_one(mode, idx, item, **kw):
         calls.append((idx, item.get("query") or ""))
+        if started is not None and item.get("query") == gate_query:
+            started.set()
+            assert release is not None
+            await release.wait()
         return {
             "item_id": item.get("id"),
             "query": item.get("query"),
@@ -185,6 +193,28 @@ def test_unmarked_turns_from_same_existing_session_still_dedupe_rerun():
     assert [idx for idx, _ in rerun[0].batch] == [1, 2]
 
 
+def test_rerun_summary_refreshes_from_latest_results_at_job_start():
+    task = _task([
+        {"id": "q1", "query": "q1", "session_group": "s1", "turn_index": 0},
+        {"id": "q2", "query": "q2", "session_group": "s1", "turn_index": 1},
+        {"id": "q3", "query": "q3", "session_group": "s1", "turn_index": 2},
+    ])
+    task.results = [
+        {"index": 0, "turn_summary": "old-1"},
+        {"index": 1, "turn_summary": "old-2"},
+    ]
+    batches = runner.build_rerun_batches(task, [2])
+    assert batches[0].initial_summary == "【第1轮】old-1\n【第2轮】old-2\n"
+
+    task.results = [
+        {"index": 0, "turn_summary": "new-1"},
+        {"index": 1, "turn_summary": "new-2"},
+    ]
+    runner.refresh_rerun_batch_summaries(task, batches)
+
+    assert batches[0].initial_summary == "【第1轮】new-1\n【第2轮】new-2\n"
+
+
 async def test_items_endpoint_queues_multiple_tasks(monkeypatch):
     _no_persist(monkeypatch)
     _patch_item_runner(monkeypatch)
@@ -267,24 +297,46 @@ async def test_items_endpoint_runs_updated_session_suffix_once(monkeypatch):
         TASKS.pop(task.id, None)
 
 
-async def test_items_endpoint_rejects_same_task_while_queued(monkeypatch):
+async def test_items_endpoint_queues_same_task_behind_running_job(monkeypatch):
     _no_persist(monkeypatch)
-    _patch_item_runner(monkeypatch)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = _patch_item_runner(
+        monkeypatch,
+        started=started,
+        release=release,
+        gate_query="first",
+    )
     old_cfg = server._state.get("cfg")
     server._state["cfg"] = _CFG
     try:
-        await server.api_eval_items(server.EvalItemsReq(
+        first = await server.api_eval_items(server.EvalItemsReq(
             task_id="items-same-task",
             mode="rich_content",
-            items=[{"id": "a1", "query": "A", "video_path": "a.mp4"}],
+            items=[{"id": "a1", "query": "first", "video_path": "a.mp4"}],
         ))
-        with pytest.raises(HTTPException) as exc:
-            await server.api_eval_items(server.EvalItemsReq(
-                task_id="items-same-task",
-                items=[{"id": "a2", "query": "A2", "video_path": "a2.mp4"}],
-            ))
-        assert exc.value.status_code == 409
+        await asyncio.wait_for(started.wait(), 2)
+
+        second = await server.api_eval_items(server.EvalItemsReq(
+            task_id="items-same-task",
+            items=[{"id": "a1", "query": "second", "video_path": "a2.mp4"}],
+        ))
+
+        assert first["status"] == "queued"
+        assert second["status"] == "queued"
+        assert second["task_status"] == "running"
+        assert first["job_id"] != second["job_id"]
+        snap = EVAL_SCHEDULER.snapshot()
+        assert snap["running"]["task_id"] == "items-same-task"
+        assert snap["queued"][0]["task_id"] == "items-same-task"
+        assert snap["queued"][0]["job_id"] == second["job_id"]
+
+        release.set()
+        await _wait_queue_idle()
+        assert calls == [(0, "first"), (0, "second")]
+        assert TASKS["items-same-task"].status == "done"
     finally:
+        release.set()
         await EVAL_SCHEDULER.stop()
         server._state["cfg"] = old_cfg
         TASKS.pop("items-same-task", None)

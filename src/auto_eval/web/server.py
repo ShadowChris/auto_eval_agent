@@ -49,6 +49,7 @@ from .video_prepare import (
 from .runner import (
     all_items_healthy,
     build_rerun_batches,
+    refresh_rerun_batch_summaries,
     reset_item_progress,
     run_eval,
     run_update_batch,
@@ -456,7 +457,7 @@ async def api_queue_cancel(task_id: str) -> dict:
     task_id = _validate_param_id(task_id, "task_id")
     task = EVAL_SCHEDULER.cancel(task_id)
     if task is not None:
-        return {"task_id": task.id, "status": "cancelled"}
+        return {"task_id": task.id, "status": task.status}
     running = EVAL_SCHEDULER.snapshot().get("running")
     if running and running.get("task_id") == task_id:
         raise HTTPException(409, "任务已经开始运行，不能按排队任务取消")
@@ -507,9 +508,8 @@ async def api_eval_resume(task_id: str):
 async def api_eval_stop(task_id: str):
     """停止：终态。未评估条目落「评测已停止」，已完成结果保留，任务转 error。"""
     task = _control_task(task_id)
-    if task.status == "queued":
-        # 还没开跑的排队任务：直接从队列移除，避免等它被弹出后再走 EvalStopped。
-        EVAL_SCHEDULER.cancel(task.id)
+    # 同一 task 可能有一个 job 在跑、多个 job 在排队；停止时清理全部排队 job。
+    EVAL_SCHEDULER.cancel(task.id)
     task.stop()
     # 唤醒暂停等待者；停止过程由各评测路径将剩余条目标记后收敛到 error 终态
     await task.publish("control", {"paused": False, "stopped": True})
@@ -523,11 +523,10 @@ async def api_eval_stop(task_id: str):
 
 @app.post("/api/eval/items")
 async def api_eval_items(req: EvalItemsReq):
-    """向 task 批量更新/追加 items，并把整次更新作为一个队列 job。
+    """向 task 批量更新/追加 items，并把整次更新作为一个独立队列 job。
 
-    请求内按 is_start/is_end 切 session；没有标记时每条独立。按 id 命中则
-    原位替换并重评该轮所在 session 的后缀，未命中则追加。接口只返回排队
-    状态、task_id 和请求 query id，结果经任务/单题接口轮询。
+    同一 task 已有 job 在运行或排队时，新请求继续追加到 FIFO 队尾；批成员
+    和 item 副本在受理时快照，前缀总结在真正开跑时从最新结果刷新。
     """
     task_id = _validate_param_id(req.task_id, "task_id")
     if not req.items:
@@ -536,11 +535,6 @@ async def api_eval_items(req: EvalItemsReq):
     app_cfg = cfg()
     task = await get_task_async(task_id)
     created = task is None
-    if task is not None and (
-        task.active_runs > 0
-        or task.status in {"pending", "queued", "running"}
-    ):
-        raise HTTPException(409, "该任务已在运行或排队，结束或取消后才能提交更新")
     mode = req.mode if created else task.mode
     if created:
         if req.mode is None:
@@ -563,6 +557,14 @@ async def api_eval_items(req: EvalItemsReq):
             task_id=task_id,
             persist=False,
         )
+        task.items_lifecycle = True
+    elif (
+        task.items_return_status is None
+        and task.status in {"done", "error"}
+    ):
+        # 当前 job 结束后要恢复的已有终态；如果任务正在跑，等开跑时再捕获。
+        task.items_return_status = task.status
+        task.items_return_error = task.error
     try:
         batch, replaced_ids, added_ids = merge_items_by_id(task, req.items)
     except ItemGroupingError as exc:
@@ -578,21 +580,36 @@ async def api_eval_items(req: EvalItemsReq):
     ]
     save_task(task)  # items 定义立即落快照；结果仍在各题完成后才覆盖合并
     effective_options = {**task.options, **req.options}
-    reset_item_progress(task, sorted({idx for rb in batches for idx, _ in rb.batch}))
-    prior_status = task.status if task.status in {"done", "error"} else "done"
+    batch_indexes = sorted({idx for rb in batches for idx, _ in rb.batch})
 
     async def run_items_job(parent: Task, _cfg: object) -> None:
         # enqueue 的 pin 只保护排队期；开跑后由每个 session 批各自 pin。
         parent.active_runs = max(0, parent.active_runs - 1)
-        if created:
-            parent.status = "running"
-            parent.error = None
-            await parent.publish(
-                "start", {"total": len(parent.items), "mode": parent.mode}
+        if (
+            not parent.items_lifecycle
+            and parent.items_return_status is None
+        ):
+            parent.items_return_status = (
+                parent.status if parent.status in {"done", "error"} else "done"
             )
-            save_task(parent)
-        else:
-            parent.status = prior_status
+            parent.items_return_error = (
+                parent.error if parent.status == "error" else None
+            )
+        parent.status = "running"
+        parent.error = None
+        if not parent.items_started:
+            parent.items_started = True
+            if parent.items_lifecycle:
+                await parent.publish(
+                    "start", {"total": len(parent.items), "mode": parent.mode}
+                )
+        save_task(parent)
+
+        # 进度在 job 真正获得执行权时重置，避免后到的请求清掉当前 job 的进度。
+        reset_item_progress(parent, batch_indexes)
+        # 前序 job 可能刚生成新的 turn_summary，开跑前刷新种子总结链。
+        refresh_rerun_batch_summaries(parent, batches)
+
         for _rb in batches:
             parent.active_runs += 1
         failures = await asyncio.gather(*[
@@ -604,17 +621,36 @@ async def api_eval_items(req: EvalItemsReq):
                 manage_status=False,
                 initial_summary=rb.initial_summary,
                 initial_turn=rb.initial_turn,
-                mark_interrupted=not created,
+                # items job 在所有同任务 job 都结束后统一收尾。
+                mark_interrupted=False,
             )
             for rb in batches
         ], return_exceptions=True)
-        if created:
+        for result in failures:
+            if isinstance(result, BaseException):
+                logger.error(
+                    "更新批异常: task_id=%s",
+                    parent.id,
+                    exc_info=(
+                        type(result),
+                        result,
+                        result.__traceback__,
+                    ),
+                )
+
+        # 还有同一 task 的 job 在排队：保持 running，由最后一个 job 收尾。
+        if parent.active_runs > 0:
+            save_task(parent)
+            return
+
+        healthy = all_items_healthy(parent)
+        if parent.items_lifecycle:
             if parent.stopped:
                 parent.status = "error"
                 parent.error = parent.error or "用户停止评测，保留已完成结果"
                 event = "error"
                 payload = {"message": parent.error, "stopped": True}
-            elif all_items_healthy(parent):
+            elif healthy:
                 parent.status = "done"
                 parent.error = None
                 event = "done"
@@ -627,28 +663,54 @@ async def api_eval_items(req: EvalItemsReq):
                 parent.error = parent.error or "部分题目评测失败"
                 event = "error"
                 payload = {"message": parent.error}
-            save_task(parent)
-            parent._fanout(event, payload)
-            retire_task(parent)
         else:
-            for result in failures:
-                if isinstance(result, BaseException):
-                    logger.error(
-                        "更新批异常: task_id=%s",
-                        parent.id,
-                        exc_info=(
-                            type(result),
-                            result,
-                            result.__traceback__,
-                        ),
-                    )
+            return_status = parent.items_return_status or "done"
+            if parent.stopped:
+                parent.status = "error"
+                parent.error = "用户停止评测，保留已完成结果"
+                event = "error"
+                payload = {"message": parent.error, "stopped": True}
+            elif healthy:
+                parent.status = "done"
+                parent.error = None
+                event = "done"
+                payload = {
+                    "summary": parent.summary,
+                    "total": len(parent.items),
+                }
+            elif return_status == "error":
+                parent.status = "error"
+                parent.error = parent.items_return_error or "部分题目评测失败"
+                event = "error"
+                payload = {"message": parent.error}
+            else:
+                parent.status = "done"
+                parent.error = None
+                event = "done"
+                payload = {
+                    "summary": parent.summary,
+                    "total": len(parent.items),
+                }
+            parent.items_return_status = None
+            parent.items_return_error = None
 
+        save_task(parent)
+        parent._fanout(event, payload)
+        retire_task(parent)
+
+    job_id = f"{task.id}:items:{uuid.uuid4().hex[:8]}"
     queue_position = EVAL_SCHEDULER.enqueue(
-        task, app_cfg, run_items_job, kind="items"
+        task,
+        app_cfg,
+        run_items_job,
+        kind="items",
+        job_id=job_id,
     )
     return {
         "task_id": task.id,
-        "status": task.status,
+        "job_id": job_id,
+        "status": "queued",
+        "task_status": task.status,
         "query_ids": query_ids,
         "queue_position": queue_position,
         "created": created,

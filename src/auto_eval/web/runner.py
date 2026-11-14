@@ -8,7 +8,7 @@ import os
 import time
 import traceback
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -219,15 +219,19 @@ def _mark_interrupted_if_stuck(task: Task) -> bool:
     return True
 
 
-async def _cleanup_task_video_downloads(task: Task) -> None:
-    """清理运行期下载的视频；正常路径已在单题完成时清理，这里兜底中断。"""
+async def _cleanup_video_downloads(items: list[dict]) -> None:
     await asyncio.gather(
         *(
             asyncio.to_thread(cleanup_item_video_downloads, item)
-            for item in task.items
+            for item in items
         ),
         return_exceptions=True,
     )
+
+
+async def _cleanup_task_video_downloads(task: Task) -> None:
+    """清理运行期下载的视频；正常路径已在单题完成时清理，这里兜底中断。"""
+    await _cleanup_video_downloads(task.items)
 
 
 async def run_eval(task: Task, cfg: AppConfig) -> None:
@@ -668,6 +672,9 @@ async def _aclose_judge_clients(clients: list[JudgeClient]) -> None:
 
 
 async def _run(task: Task, cfg: AppConfig) -> None:
+    # 全量任务开始时冻结输入，之后到达的增量更新只进入后续 job。
+    original_items = list(task.items)
+    run_items = [dict(item) for item in task.items]
     one, fail, clients = _make_item_evaluator(task, cfg)
 
     # 多轮垂域视觉评测：同一 session_group 的各轮按 turn_index 串行评测，
@@ -677,14 +684,14 @@ async def _run(task: Task, cfg: AppConfig) -> None:
     # session_group 由 parse_csv 据 is_start/is_end 切组赋值，与上游 session_id 列无关。
     sessions: dict[str, list[int]] = {}
     standalone: list[int] = []
-    for i, it in enumerate(task.items):
+    for i, it in enumerate(run_items):
         grp = it.get("session_group")
         if task.mode == "rich_content" and grp:
             sessions.setdefault(str(grp), []).append(i)
         else:
             standalone.append(i)
     for _grp, idxs in sessions.items():
-        idxs.sort(key=lambda i: task.items[i].get("turn_index", 0))
+        idxs.sort(key=lambda i: run_items[i].get("turn_index", 0))
 
     async def run_session(idxs: list[int]) -> None:
         """组内按轮次串行：把前序各轮总结累积写进当前轮 context 后再评测。
@@ -700,9 +707,9 @@ async def _run(task: Task, cfg: AppConfig) -> None:
                 await task.wait_runnable()
             except EvalStopped:
                 for later_idx in idxs[turn_no - 1:]:
-                    await fail(later_idx, task.items[later_idx], "评测已停止")
+                    await fail(later_idx, run_items[later_idx], "评测已停止")
                 return
-            it = task.items[idx]
+            it = run_items[idx]
             is_last = "是" if turn_no == total else "否"
             turn_marker = f"【轮次】第 {turn_no} 轮 / 共 {total} 轮 / 是否最后一轮：{is_last}"
             base_ctx = (it.get("context") or "").strip()
@@ -714,12 +721,12 @@ async def _run(task: Task, cfg: AppConfig) -> None:
             if task.stopped:
                 # 停止：本轮已落「评测已停止」，剩余轮同样标停，不级联连坐文案
                 for later_idx in idxs[turn_no:]:
-                    await fail(later_idx, task.items[later_idx], "评测已停止")
+                    await fail(later_idx, run_items[later_idx], "评测已停止")
                 return
             if res.get("error") and turn_no < len(idxs):
                 reason = f"同组前序轮次失败：{res['error']}"
                 for later_idx in idxs[turn_no:]:
-                    await fail(later_idx, task.items[later_idx], reason)
+                    await fail(later_idx, run_items[later_idx], reason)
                 return
             if turn_no == len(idxs):
                 continue  # 最后一轮总结无人消费，跳过
@@ -743,19 +750,30 @@ async def _run(task: Task, cfg: AppConfig) -> None:
         try:
             await task.wait_runnable()
         except EvalStopped:
-            await fail(i, task.items[i], "评测已停止")
+            await fail(i, run_items[i], "评测已停止")
             return
         # 整题占一个流水线准入槽（预处理 + 模型同占，封顶关键帧内存）
         async with PIPELINE_LIMITER:
-            await one(i, task.items[i])
+            await one(i, run_items[i])
 
     coros = [_session_job(idxs) for idxs in sessions.values()]
     coros += [_standalone_job(i) for i in standalone]
     try:
         await asyncio.gather(*coros)
     finally:
+        # 只有未被增量更新替换的题目才同步运行期 context/frames 回任务定义；
+        # 已替换的新版本留给后续排队 job，避免旧 job 覆盖新请求。
+        for i, item in enumerate(run_items):
+            if (
+                i < len(original_items)
+                and i < len(task.items)
+                and task.items[i] is original_items[i]
+            ):
+                task.items[i].clear()
+                task.items[i].update(item)
         await _aclose_judge_clients(clients)
         await _cleanup_task_video_downloads(task)
+        await _cleanup_video_downloads(run_items)
 
 
 # 登记后台更新批任务引用：避免协程被 GC，也便于测试等待完成。
@@ -834,6 +852,7 @@ class RerunBatch:
     initial_summary: str  # 复用前序轮总结重建的种子总结链
     initial_turn: int     # 种子链覆盖的前缀轮数；批内轮次编号从 initial_turn+1 接续
     group: str            # 组名 / standalone:{index}
+    prefix_indexes: list[int] = field(default_factory=list)
 
 
 def build_rerun_batches(task: Task, indexes: list[int]) -> list[RerunBatch]:
@@ -879,6 +898,7 @@ def build_rerun_batches(task: Task, indexes: list[int]) -> list[RerunBatch]:
             initial_summary=initial_summary,
             initial_turn=first_sel,
             group=grp,
+            prefix_indexes=idxs[:first_sel],
         ))
     for i in standalone_selected:
         batches.append(RerunBatch(
@@ -886,8 +906,33 @@ def build_rerun_batches(task: Task, indexes: list[int]) -> list[RerunBatch]:
             initial_summary="",
             initial_turn=0,
             group=f"standalone:{i}",
+            prefix_indexes=[],
         ))
     return batches
+
+
+def refresh_rerun_batch_summaries(
+    task: Task, batches: list[RerunBatch]
+) -> None:
+    """用 job 开跑时的最新结果重建前缀总结链。"""
+    latest = _latest_result_by_index(task)
+    for rb in batches:
+        if not rb.prefix_indexes:
+            rb.initial_summary = ""
+            continue
+        parts: list[str] = []
+        for pos, idx in enumerate(rb.prefix_indexes, 1):
+            summary = (
+                (latest[idx].get("turn_summary") or "").strip()
+                if idx in latest
+                else ""
+            )
+            parts.append(
+                f"【第{pos}轮】{summary}\n"
+                if summary
+                else f"【第{pos}轮】（未生成总结）\n"
+            )
+        rb.initial_summary = "".join(parts)
 
 
 def _all_items_healthy(task: Task) -> bool:

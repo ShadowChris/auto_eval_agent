@@ -89,6 +89,51 @@ async def test_cancel_queued_removes_without_running():
         for t in (t1, t2):
             TASKS.pop(t.id, None)
 
+
+async def test_same_task_jobs_keep_order_and_cancel_removes_all_queued():
+    """同一 task 可连续入队；取消排队项时不影响正在跑的 job。"""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    order: list[str] = []
+
+    async def runner(task, cfg):
+        current = "first" if not started.is_set() else "later"
+        order.append(current)
+        task.status = "running"
+        started.set()
+        await release.wait()
+        task.active_runs = max(0, task.active_runs - 1)
+        task.status = "done"
+
+    task = _task("same-task")
+    try:
+        EVAL_SCHEDULER.enqueue(task, object(), runner, job_id="job-1")
+        EVAL_SCHEDULER.enqueue(task, object(), runner, job_id="job-2")
+        EVAL_SCHEDULER.enqueue(task, object(), runner, job_id="job-3")
+        await asyncio.wait_for(started.wait(), 2)
+
+        snap = EVAL_SCHEDULER.snapshot()
+        assert snap["running"]["job_id"] == "job-1"
+        assert [q["job_id"] for q in snap["queued"]] == ["job-2", "job-3"]
+        assert task.status == "running"  # 新 job 入队不把运行中任务改回 queued
+        assert task.active_runs == 3
+
+        assert EVAL_SCHEDULER.cancel(task.id) is task
+        assert task.status == "running"
+        assert task.active_runs == 1
+        assert EVAL_SCHEDULER.snapshot()["queued"] == []
+
+        release.set()
+        await _drain()
+        assert order == ["first"]
+        assert task.status == "done"
+        assert task.active_runs == 0
+    finally:
+        release.set()
+        await EVAL_SCHEDULER.stop()
+        TASKS.pop(task.id, None)
+
+
 async def test_api_eval_submits_enqueue_and_runs_to_done(monkeypatch):
     """端到端：POST /api/eval 走单消费者队列，两张表排队、依次跑完均 done。
 

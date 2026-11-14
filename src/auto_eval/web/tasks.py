@@ -41,10 +41,17 @@ class Task:
     # queue：无消费者时不再堆积事件，多连接也各自收到全量而非互相瓜分。
     subscribers: set[asyncio.Queue] = field(default_factory=set)
     dropped_events: int = 0
-    # 正在执行的 run_eval / run_update_batch 数（运行时状态，不进快照）。
-    # 退休判定用计数而非 status：run_update_batch(manage_status=False)
-    # 全程 status=done，只有计数能 pin 住运行中的任务对象。
+    # 正在执行/排队的 run_eval、run_update_batch 和 items job 数
+    # （运行时状态，不进快照）。退休判定用计数而非 status，确保多个
+    # 同任务 job 共享对象时直到最后一个结束才移出 TASKS。
     active_runs: int = 0
+    # /api/eval/items 的任务生命周期。该接口新建任务时由第一个 job 负责
+    # pending/queued -> running -> done/error；已有任务在所有排队 job 结束后
+    # 恢复原终态。
+    items_lifecycle: bool = False
+    items_started: bool = False
+    items_return_status: str | None = None
+    items_return_error: str | None = None
     # 用户运行控制（运行时状态，不进快照，重启即失效）：
     #   paused  —— 暂停：停在下一题边界，恢复（resume）后继续，可再次暂停/停止；
     #   stopped —— 停止：终态，唤醒暂停等待并终止剩余条目，已保留结果不丢。

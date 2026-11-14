@@ -470,7 +470,8 @@ def persist_settings(path: Path | None = None) -> bool:
 # 全量评测 /api/eval 与重跑 /api/eval/rerun 走这里：全局一次只跑一张表，多张排队。
 # 每个任务内部仍由自己的组并发 + 上面的全局 MODEL_LIMITER 控制模型调用。
 # 全量评测、手动重跑、增量更新 update-batch 共用一个单消费者 FIFO；
-# queue 只保证 task 级串行，任务内部仍按 session 组并发。
+# queue 保证 job 级串行；同一 task 可连续排多个 items job，任务内部仍按
+# session 组并发。
 
 RunEval = Callable[[Task, object], Awaitable[None]]
 
@@ -513,14 +514,28 @@ class EvalScheduler:
             self._worker = loop.create_task(self._worker_loop())
             self._worker_event_loop = loop
 
-    def enqueue(self, task: Task, cfg: object, runner: RunEval, *, kind: str = "initial") -> int:
+    def enqueue(
+        self,
+        task: Task,
+        cfg: object,
+        runner: RunEval,
+        *,
+        kind: str = "initial",
+        job_id: str | None = None,
+    ) -> int:
         """将任务放到队尾，返回当前等待队列中的 1-based 位置。"""
-        task.status = "queued"
-        task.error = None
+        # 同一任务已有 job 在跑时，新 job 是“追加排队”，任务整体仍处于 running。
+        same_task_running = (
+            self._running is not None
+            and self._running.task.id == task.id
+        )
+        if not same_task_running:
+            task.status = "queued"
+            task.error = None
         # queued 也必须 pin，避免等待期间被 LRU/删除端点移除。
         task.active_runs += 1
         self._pending.append(_QueuedEval(
-            job_id=task.id,
+            job_id=job_id or task.id,
             kind=kind,
             task=task,
             cfg=cfg,
@@ -536,22 +551,32 @@ class EvalScheduler:
         return self._running
 
     def cancel(self, task_id: str) -> Task | None:
-        """取消尚未开始的任务；运行中或不存在时返回 None。"""
-        job = next(
-            (item for item in self._pending if item.job_id == task_id),
-            None,
-        )
-        if job is None:
+        """取消该任务所有尚未开始的 job；没有排队 job 时返回 None。"""
+        matches = [item for item in self._pending if item.task.id == task_id]
+        if not matches:
             return None
-        self._pending.remove(job)
-        task = job.task
-        task.active_runs = max(0, task.active_runs - 1)
-        task.status = "cancelled"
-        task.error = None
+        for job in matches:
+            self._pending.remove(job)
+        task = matches[0].task
+        task.active_runs = max(0, task.active_runs - len(matches))
+        running_same_task = (
+            self._running is not None
+            and self._running.task.id == task.id
+        )
+        if not running_same_task:
+            task.status = "cancelled"
+            task.error = None
         save_task(task)
-        task._fanout("cancelled", {"message": "排队任务已取消", "job_id": job.job_id})
-        # cancelled 不是 done/error，retire_task 不处理；主动从注册表移除避免滞留
-        if TASKS.get(task.id) is task:
+        if not running_same_task and TASKS.get(task.id) is task:
+            task._fanout(
+                "cancelled",
+                {
+                    "message": "排队任务已取消",
+                    "job_id": matches[0].job_id,
+                    "cancelled_jobs": len(matches),
+                },
+            )
+            # cancelled 不是 done/error，retire_task 不处理；主动从注册表移除避免滞留。
             TASKS.pop(task.id, None)
         return task
 
