@@ -36,8 +36,8 @@ def source_rows():
     ]
 
 
-def test_single_turn_system_prompt_preserves_pre_multiturn_rendering():
-    """Golden V8 rendering: multi-turn support must not change single-turn rules.
+def test_single_turn_system_prompt_matches_confirmed_policy_rendering():
+    """Golden rendering includes the confirmed completed-reply recording gate.
 
     Intentional policy changes may update this digest with standards/regressions.
     """
@@ -46,7 +46,7 @@ def test_single_turn_system_prompt_preserves_pre_multiturn_rendering():
     rendered = OPERATION_SYSTEM.render(persona="终端用户", dims=skill.rubrics, scale=5,
         policy=skill.operation_policy, expert_knowledge_text="", multi_group=False,
         has_query_images=False, multi_turn=False, latest_turn=False)
-    assert hashlib.sha256(rendered.encode()).hexdigest() == "6b98f9c30e7ac5a155afd85c3381aea8a89fa67782a08bfb63741433e3b848d2"
+    assert hashlib.sha256(rendered.encode()).hexdigest() == "1b684be1bb6320b961f53b0562451066c825e0f1071d534417ca401ac499185a"
 
 
 def test_shared_policy_terms_are_scoped_to_the_current_round_only_for_multi_turn():

@@ -69,8 +69,7 @@ def test_operation_boundary_does_not_enter_question_prompt_or_grow_a_new_field()
     assert '关键事实待核验' not in question
     assert '所有任务先验收已给出的回答/方案' not in question
     prompt = operation_prompt()
-    # Restored V6 flow includes the separate output rechecks, plus confirmed priors.
-    assert len(prompt) < 25000
+    assert len(prompt) < 25600  # 保留 V8 先验，新录屏输入门禁约增加 500 字符。
     assert '"need_review_cate"' in prompt
     assert 'decision_basis' not in prompt
     assert 'complex_082' not in prompt and '设置项1600条-1131' not in prompt
