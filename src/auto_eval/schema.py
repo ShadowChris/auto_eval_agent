@@ -32,6 +32,21 @@ ProblemSolved = Literal["ok", "nok", "need_review"]
 # --------------------------------------------------------------------------- #
 # 评测集
 # --------------------------------------------------------------------------- #
+class OperationTurn(BaseModel):
+    """任务会话的一轮；原始列保留在 source_data，不作为裁判规则。"""
+
+    id: str = ""
+    query: str
+    answer: str = ""
+    context: str | None = None
+    query_images: list[str] = Field(default_factory=list)
+    task_start_time: float
+    task_end_time: float
+    turn_index: int
+    source_line: int | None = None
+    source_data: dict[str, Any] = Field(default_factory=dict)
+
+
 class EvalItem(BaseModel):
     """一条评测题。"""
 
@@ -47,6 +62,9 @@ class EvalItem(BaseModel):
     trace: str | None = None  # 被测 agent 的推理/工具轨迹（仅过程盲评使用）
     media: list[str] = Field(default_factory=list)  # 任务类评测：录屏/图片本地路径（裁判抽帧后以 image_url 多图盲评）
     query_images: list[str] = Field(default_factory=list)  # 用户随 query 提供的图片；与录屏证据严格隔离
+    turns: list[OperationTurn] = Field(default_factory=list)
+    evaluation_scope: Literal["single", "conversation", "latest_turn"] = "single"
+    turn_index: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def categories(self) -> list[str]:

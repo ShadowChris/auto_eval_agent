@@ -146,14 +146,17 @@ def test_export_keeps_source_fields_paths_and_input_alignment(
 
     assert list(sheets)[0] == "评估结果"
     user_results = sheets["评估结果"]
-    assert list(user_results[0]) == [history._OPERATION_CARD_LABELS.get(key, key) for key in history._OPERATION_USER_RESULT_COLUMNS]
+    assert list(user_results[0]) == list(history._OPERATION_USER_RESULT_HEADERS)
     assert list(user_results[0]) == [
         "数据集序号",
         "id",
         "metadata.id",
-        "item_id",
         "index",
         "session_id",
+        "session_group",
+        "turn_index",
+        "is_start",
+        "is_end",
         "query",
         "context",
         "attachment_path",
@@ -349,7 +352,8 @@ def test_operation_export_preserves_both_ids(
         assert row["id"] == "op_1"
         assert row["metadata.id"] == metadata_id
     assert sheets["数据集明细"][0]["id_1"] == "existing-original-column"
-    assert sheets["评估结果"][0]["item_id"] == "op_1"
+    assert "item_id" not in sheets["评估结果"][0]
+    assert sheets["逐题结果"][0]["item_id"] == "op_1"
     batch_row = history.operation_comparison_batch(snapshot)["rows"][0]
     assert batch_row["id"] == "op_1"
     assert batch_row["export"]["metadata.id"] == metadata_id

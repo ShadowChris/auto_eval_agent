@@ -56,11 +56,14 @@ _INDEPENDENT_OTHER_CUES = (
     "独立 qa",
 )
 QUERY_ALIGNMENT_ISSUE = "录屏Query无法与输入Query一致核验"
+COMPLETED_REPLY_RECORDING_CATEGORY = "录屏仅展示已完成回答"
+OPERATION_INPUT_GATE_CATEGORIES = (QUERY_ALIGNMENT_ISSUE, COMPLETED_REPLY_RECORDING_CATEGORY)
 FACT_REVIEW_CATEGORY = "关键事实待核验"
 LEGACY_REVIEW_CATEGORIES = {
     "待用户澄清", "缺少前置条件", "其他阻塞原因", "未展示可验证结果",
     "环境或算力异常", "外部服务暂时异常", "视频损坏", "录屏数据不完整",
     "视频无法解析", "任务意图不明确", "任务要求矛盾", "输入数据异常",
+    COMPLETED_REPLY_RECORDING_CATEGORY,
     QUERY_ALIGNMENT_ISSUE, "任务执行窗口未展开", "评测证据冲突",
     "未预期场景", "其他未归类情况", FACT_REVIEW_CATEGORY,
 }
@@ -462,10 +465,11 @@ def normalize_operation_fields(
     normalized_correctness = normalize_operation_correctness(correctness, issue_types)
     issues = _as_issue_list(issue_types)
 
-    # Query 对齐是评测输入门禁，而非 agent 执行问题。命中后不再混入
-    # 其他执行归因，确保下游可以稳定筛出配对异常样本。
-    if QUERY_ALIGNMENT_ISSUE in issues:
-        return "others", [QUERY_ALIGNMENT_ISSUE], "no"
+    # 输入门禁不是 agent 执行问题；Query 配对异常优先于录屏完成态异常。
+    # 只规范模型明确报告的类型，不通过回复措辞或帧数猜测视觉异常。
+    for category in OPERATION_INPUT_GATE_CATEGORIES:
+        if category in issues:
+            return "others", [category], "no"
 
     if FACT_REVIEW_CATEGORY in issues:
         catalog = operation_issue_catalog(allowed_issue_types)

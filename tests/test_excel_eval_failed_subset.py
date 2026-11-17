@@ -107,3 +107,34 @@ def test_extract_failed_subset_rejects_dataset_version_mismatch(tmp_path: Path):
 
     with pytest.raises(ValueError, match="原始 JSONL 中不存在"):
         extract_failed_subset(evaluation, dataset)
+
+
+@pytest.mark.parametrize("fields,expected", [
+    ({"id": "q1"}, "q1"),
+    ({"item_id": "q2"}, "q2"),
+    ({"id": "q1", "item_id": "q2"}, "q1"),
+    ({"id": "  ", "item_id": "q2"}, "q2"),
+    ({"id": 0, "item_id": "q2"}, "0"),
+])
+def test_subset_prefers_nonempty_id_and_falls_back_to_legacy_item_id(tmp_path, fields, expected):
+    evaluation = tmp_path / "evaluation.xlsx"
+    pd.DataFrame([{**fields, "error":"timeout"}]).to_excel(evaluation, sheet_name="逐题结果", index=False)
+    dataset = tmp_path / "dataset.jsonl"
+    _write_jsonl(dataset, [{"id":value,"query":value} for value in ("q1","q2","0")])
+    result = extract_failed_subset(evaluation, dataset)
+    assert result.selected_rows == 1
+    assert json.loads(result.output_path.read_text())["id"] == expected
+
+
+@pytest.mark.parametrize("records,match", [
+    ([{"error":"timeout"}], "至少一列"),
+    ([{"id":"", "item_id":"", "error":"timeout"}], "缺少 id/item_id"),
+    ([{"id":"q1", "error":"timeout"}, {"item_id":"q1", "error":"timeout"}], "重复 id/item_id"),
+])
+def test_subset_rejects_missing_or_ambiguous_effective_id(tmp_path, records, match):
+    evaluation = tmp_path / "evaluation.xlsx"
+    pd.DataFrame(records).to_excel(evaluation, sheet_name="逐题结果", index=False)
+    dataset = tmp_path / "dataset.jsonl"
+    _write_jsonl(dataset, [{"id":"q1", "query":"第一题"}])
+    with pytest.raises(ValueError, match=match):
+        extract_failed_subset(evaluation, dataset)

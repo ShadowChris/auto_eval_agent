@@ -12,12 +12,14 @@ from typing import Any
 import pandas as pd
 
 from ..analysis.operation_comparison import _match_rows
+from ..operation_conversation import fold_conversation_export_rows
 from ..analysis.operation_statistics import (
     OPERATION_CORRECTNESS,
     normalize_operation_issue_types,
 )
 from ..judges.operation_fields import LEGACY_REVIEW_CATEGORIES, split_operation_issue_fields
 from .operation_export_fields import (
+    OPERATION_INTERNAL_ROUND_FIELDS,
     operation_result_identity_fields,
     operation_user_result_display_row,
 )
@@ -51,6 +53,19 @@ def import_operation_comparison_file(
         raise ValueError("评估结果文件为空")
 
     records, sheet, dataset_records = _read_records(content, suffix)
+    source_row_count = len(records)
+    # 旧整会话导出在字段投影前按轮次折叠，先识别新的中文展示表头。
+    # 保留中文原列，同时不覆盖文件中已有的英文字段。
+    for rows in (records, dataset_records or []):
+        for record in rows:
+            for key, label in (("conversation_id", "评估会话分组"), ("turn_index", "组内轮次")):
+                if key not in record and label in record:
+                    record[key] = record[label]
+    if dataset_records is not None:
+        records = _restore_legacy_conversation_fields(records, dataset_records)
+    records = fold_conversation_export_rows(records)
+    if dataset_records is not None:
+        dataset_records = fold_conversation_export_rows(dataset_records)
     if not records:
         raise ValueError("文件中没有可导入的数据行")
     rows: list[dict[str, Any]] = []
@@ -89,6 +104,7 @@ def import_operation_comparison_file(
             "format": suffix.lstrip(".").upper(),
             "sheet": sheet,
             "raw_count": len(records),
+            "source_row_count": source_row_count,
             "valid_count": valid_count,
             "invalid_count": len(records) - valid_count,
             "warning_count": len(warnings),
@@ -214,6 +230,38 @@ def _read_records(
             workbook, sheet_name="数据集明细", dtype=object,
         ))
     return _dataframe_records(dataframe), sheet, dataset_records
+
+
+def _restore_legacy_conversation_fields(
+    records: list[dict[str, Any]], dataset_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Recover old aggregate markers from details before folding blank rows.
+
+    Only restore compatibility metadata, never evaluation values. Match unique
+    ID/Query, not workbook row order. Existing result-sheet markers take priority.
+    """
+    if not any(row.get("is_result_row") not in (None, "") for row in dataset_records):
+        return records
+
+    def identities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        output = []
+        for row in rows:
+            item_id, _ = _field(row, REQUIRED_COMPARISON_FIELDS["id"])
+            output.append({
+                "id": str(item_id if item_id is not None else "").strip(),
+                "query": _field(row, REQUIRED_COMPARISON_FIELDS["query"])[0],
+            })
+        return output
+
+    matches, _ = _match_rows(identities(records), identities(dataset_records))
+    restored = [dict(row) for row in records]
+    for match in matches:
+        result = restored[match["baseline_index"]]
+        detail = dataset_records[match["target_index"]]
+        for key in (*OPERATION_INTERNAL_ROUND_FIELDS, "conversation_id", "turn_index"):
+            if key in detail and result.get(key) in (None, ""):
+                result[key] = detail[key]
+    return restored
 
 
 def _attach_dataset_sources(
@@ -388,6 +436,11 @@ def _standard_export(
         "序号": ("序号", "sequence"),
         "session_id": ("session_id", "sessionid", "sessionId"),
         "sessionid": ("sessionid", "session_id", "sessionId"),
+        "conversation_id": ("conversation_id", "评估会话分组"),
+        "session_group": ("session_group",),
+        "turn_index": ("turn_index", "组内轮次"),
+        "is_start": ("is_start",),
+        "is_end": ("is_end",),
         "query": ("query", "操作意图", "问题"),
         "context": ("context",),
         "attachment_path": ("attachment_path",),

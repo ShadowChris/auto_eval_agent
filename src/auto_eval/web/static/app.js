@@ -2,6 +2,62 @@ import { createApp, ref, computed, watch, onMounted, onUnmounted, nextTick } fro
 import { FramePreview } from "./frame_preview.js";
 import * as echarts from "https://unpkg.com/echarts@5/dist/echarts.esm.min.js";
 
+// Presentation only: keep original result objects/indices for reruns and exports.
+function resultConversationMeta(result, items) {
+  const index = result.index == null ? -1 : Number(result.index);
+  const item = Number.isInteger(index) && index >= 0 ? (items[index] || {}) : {};
+  const scope = result.evaluation_scope || item.evaluation_scope;
+  if (scope !== "latest_turn") return null;
+  const id = result.conversation_id || item.conversation_id || item.turns?.[0]?.id;
+  if (id == null || String(id).trim() === "") return null;
+  return {
+    id: String(id),
+    label: String(result.session_group || item.session_group || id),
+    turnIndex: Number(result.turn_index || item.turn_index || item.turns?.length || 1),
+    turnCount: Number(result.turn_count || item.turn_count || item.turns?.length || 1),
+  };
+}
+
+function buildResultPages(rows, pageSize, items, groupConversations) {
+  const groups = new Map();
+  const orderedRows = groupConversations && rows.some(row => resultConversationMeta(row, items))
+    ? [...rows].sort((left, right) => {
+      const a = left.index == null ? NaN : Number(left.index);
+      const b = right.index == null ? NaN : Number(right.index);
+      return Number.isInteger(a) && Number.isInteger(b) ? a - b : 0;
+    })
+    : rows;
+  orderedRows.forEach((result, position) => {
+    const conversation = groupConversations ? resultConversationMeta(result, items) : null;
+    // Business case_id/session_id do not define a multi-turn conversation.
+    const key = conversation ? `conversation:${conversation.id}` : `row:${position}`;
+    if (!groups.has(key)) groups.set(key, { conversation, rows: [] });
+    groups.get(key).rows.push(result);
+  });
+  const pages = [];
+  let page = { rows: [], headings: new Map(), offset: 0 };
+  let offset = 0;
+  const limit = Math.max(1, Number(pageSize) || 10);
+  for (const group of groups.values()) {
+    if (page.rows.length >= limit) {
+      pages.push(page);
+      offset += page.rows.length;
+      page = { rows: [], headings: new Map(), offset };
+    }
+    if (group.conversation) {
+      group.rows.sort((left, right) => (
+        resultConversationMeta(left, items).turnIndex - resultConversationMeta(right, items).turnIndex
+        || Number(left.index) - Number(right.index)
+      ));
+      const total = group.rows.reduce((count, row) => Math.max(count, resultConversationMeta(row, items).turnCount), group.rows.length);
+      page.headings.set(group.rows[0], { id: group.conversation.label, visible: group.rows.length, total });
+    }
+    group.rows.forEach(row => page.rows.push(row));
+  }
+  if (page.rows.length || !pages.length) pages.push(page);
+  return pages;
+}
+
 createApp({
   components: {
     FramePreview,
@@ -433,13 +489,25 @@ createApp({
       key: importedPreviewKey(item, index),
       incoming_id: String(item.id || `第${index + 1}条`),
       query: item.query || "",
-      context: item.context || "",
+      context: (item.turns || []).length
+        ? item.turns.filter(turn => turn.context).map(turn => `第${turn.turn_index}轮：${turn.context}`).join("\n")
+        : (item.context || ""),
       video_path: item.videoPath || "",
-      query_images: [...(item.queryImages || [])],
+      query_images: (item.turns || []).length
+        ? item.turns.flatMap(turn => turn.query_images || [])
+        : [...(item.queryImages || [])],
       attachment_url_domain: item.attachmentUrlDomain || "",
       attachment_url_ip: item.attachmentUrlIp || "",
       task_start_time: item.taskStartTime,
       task_end_time: item.taskEndTime,
+      turn_count: item.turnCount || (item.turns || []).length || 1,
+      turn_index: item.turnIndex,
+      evaluation_scope: item.evaluationScope,
+      session_group: item.sessionGroup,
+      input_turn_index: item.sourceData?.turn_index,
+      input_error: item.inputError || "",
+      input_warnings: item.inputWarnings || [],
+      turn_windows: (item.turns || []).map(turn => [turn.task_start_time, turn.task_end_time]),
     })));
     const importedPreviewPageCount = computed(() => Math.max(
       1,
@@ -1009,11 +1077,12 @@ createApp({
         current.count += 1;
         map.set(key, current);
       });
-      return Array.from(map.values()).sort((a, b) => {
+      const categories = Array.from(map.values()).sort((a, b) => {
         if (a.key === "__error__") return 1;
         if (b.key === "__error__") return -1;
         return b.count - a.count;
       });
+      return [{ key: "", label: "全部结果", count: results.value.length }, ...categories];
     });
 
     const skillResults = computed(() => {
@@ -1255,7 +1324,7 @@ createApp({
         if (correctnessFilter.value && r.correctness !== correctnessFilter.value) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] > threshold) return false;
         if (problemDimFilter.value && (r.rubric || {})[problemDimFilter.value] == null) return false;
-        if (q && !`${r.item_id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.answer_text || ""} ${(r.execution_routes || []).join(" ")} ${r.route_rationale || ""} ${(r.issue_types || []).join(" ")} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""}`.toLowerCase().includes(q)) return false;
+        if (q && !`${r.item_id || ""} ${resultConversationMeta(r, items.value)?.id || ""} ${r.query || ""} ${r.context || ""} ${r.answer || ""} ${r.answer_text || ""} ${(r.execution_routes || []).join(" ")} ${r.route_rationale || ""} ${(r.issue_types || []).join(" ")} ${(r.card_contents || []).join(" ")} ${(r.superlink_texts || []).join(" ")} ${r.rationale || ""} ${r.error || ""}`.toLowerCase().includes(q)) return false;
         return true;
       });
       return isSingleApiDataset.value
@@ -1263,12 +1332,27 @@ createApp({
         : rows;
     });
 
-    const pageCount = computed(() => Math.max(1, Math.ceil(filteredResults.value.length / resultPageSize.value)));
-    const pagedResults = computed(() => {
+    const resultPages = computed(() => buildResultPages(
+      filteredResults.value, resultPageSize.value, items.value,
+      mode.value === "operation" && !isMultiGroupMode.value,
+    ));
+    const pageCount = computed(() => resultPages.value.length);
+    const currentResultPage = computed(() => {
       const safePage = Math.min(resultPage.value, pageCount.value);
-      const start = (safePage - 1) * resultPageSize.value;
-      return filteredResults.value.slice(start, start + resultPageSize.value);
+      return resultPages.value[Math.max(0, safePage - 1)];
     });
+    const pagedResults = computed(() => currentResultPage.value.rows);
+    const resultPageOffset = computed(() => currentResultPage.value.offset);
+    const hasConversationResults = computed(() => mode.value === "operation" && !isMultiGroupMode.value
+      && filteredResults.value.some(result => resultConversationMeta(result, items.value)));
+    function resultConversationHeading(result) {
+      return currentResultPage.value.headings.get(result);
+    }
+    function resultTurnLabel(result) {
+      if (mode.value !== "operation" || isMultiGroupMode.value) return "";
+      const conversation = resultConversationMeta(result, items.value);
+      return conversation ? `第 ${conversation.turnIndex} / ${conversation.turnCount} 轮` : "";
+    }
     const multiGroupColumns = computed(() => {
       const configured = loadedTaskOptions.value?.operation_groups
         || groupAlignment.value?.groups
@@ -1757,6 +1841,15 @@ createApp({
               contentEndTime: item.content_end_time ?? null,
               sourceLine: item.source_line ?? null,
               sourceData: item.source_data || null,
+              turns: item.turns || [],
+              caseId: item.case_id ?? "",
+              conversationId: item.conversation_id || "",
+              sessionGroup: item.session_group ?? item.source_data?.session_group ?? "",
+              turnIndex: item.turn_index ?? null,
+              turnCount: item.turn_count ?? null,
+              evaluationScope: item.evaluation_scope || "",
+              inputError: item.input_error || "",
+              inputWarnings: item.input_warnings || [],
             };
           });
           importedDatasetSelections.value = Object.fromEntries(
@@ -1960,8 +2053,8 @@ createApp({
       }
       if (isVideoMode.value)
         return !opPreparing.value && opItems.value.some(
-          (it, index) => it.query.trim()
-            && ((it.frames || []).length || it.videoPath)
+          (it, index) => (it.inputError || (it.query.trim()
+            && ((it.frames || []).length || it.videoPath)))
             && (
               !hasImportedOperationDataset.value
               || importedDatasetSelections.value[String(index)] !== false
@@ -2006,8 +2099,8 @@ createApp({
         }
       } else if (isVideoMode.value) {
         const valid = opItems.value.map((it, sourceIndex) => ({ it, sourceIndex })).filter(
-          ({ it, sourceIndex }) => it.query.trim()
-            && ((it.frames || []).length || it.videoPath)
+          ({ it, sourceIndex }) => (it.inputError || (it.query.trim()
+            && ((it.frames || []).length || it.videoPath)))
             && (
               !hasImportedOperationDataset.value
               || importedDatasetSelections.value[String(sourceIndex)] !== false
@@ -2031,9 +2124,22 @@ createApp({
           if (mode.value === "operation") {
             item.category = "operation";
             item.answer = (it.answer || "").trim();
+            if (it.inputError) item.input_error = it.inputError;
+            if ((it.inputWarnings || []).length) item.input_warnings = [...it.inputWarnings];
             if ((it.queryImages || []).length) item.query_images = [...it.queryImages];
+            if (it.sessionGroup || Object.prototype.hasOwnProperty.call(it.sourceData || {}, "session_group")) {
+              item.session_group = it.sessionGroup;
+            }
             item.attachment_url_domain = it.attachmentUrlDomain || "";
             item.attachment_url_ip = it.attachmentUrlIp || "";
+            if ((it.turns || []).length || it.evaluationScope === "latest_turn") {
+              if ((it.turns || []).length) item.turns = it.turns;
+              item.case_id = it.caseId ?? item.id;
+              if (it.conversationId) item.conversation_id = it.conversationId;
+              if (it.evaluationScope) item.evaluation_scope = it.evaluationScope;
+              if (it.turnIndex != null) item.turn_index = it.turnIndex;
+              if (it.turnCount != null) item.turn_count = it.turnCount;
+            }
           } else {
             // rich_content / rich_content_quality
             item.category = (it.category || "").trim() || "default";
@@ -2967,6 +3073,9 @@ createApp({
     }
 
     function formatAppendPreviewTimeRange(row) {
+      if (row?.turn_windows?.length) {
+        return row.turn_windows.map(([start, end], index) => `第${index + 1}轮：${start}–${end} 秒`).join("；");
+      }
       const start = row?.task_start_time;
       const end = row?.task_end_time;
       const hasStart = start !== null && start !== undefined && String(start).trim() !== "";
@@ -3592,7 +3701,6 @@ createApp({
         } else {
           datasetMaintenance.value = null;
         }
-        if (mode.value !== "compare" && skillTabs.value.length) activeSkill.value = skillTabs.value[0].key;
         renderCharts();
         if (running.value) connectSSE();
         if (scrollToResults) {
@@ -3681,12 +3789,12 @@ createApp({
       window.open(`/api/eval/${taskId.value}/export?format=frames_zip`);
     }
     function resultWarnings(result) {
-      const direct = result?.video_prepare_warnings;
-      if (Array.isArray(direct) && direct.length) return direct.filter(Boolean).map(String);
       const index = Number(result?.index);
-      if (!Number.isInteger(index) || index < 0) return [];
-      const itemWarnings = items.value[index]?.video_prepare_warnings;
-      return Array.isArray(itemWarnings) ? itemWarnings.filter(Boolean).map(String) : [];
+      const item = Number.isInteger(index) && index >= 0 ? items.value[index] : null;
+      return [...new Set([
+        ...(result?.input_warnings || item?.input_warnings || []),
+        ...(result?.video_prepare_warnings || item?.video_prepare_warnings || []),
+      ].filter(Boolean).map(String))];
     }
     function itemArtifactUrl(result, format) {
       const index = Number(result && result.index);
@@ -4251,7 +4359,7 @@ createApp({
       resultJumpPage,
       pieChart, barChartRefs, resultBrowser, setBarRef, renderCharts,
       activeSkill, resultQuery, correctnessFilter, problemDimFilter, resultPage, resultPageSize, resultQueryImagePreviewIndex, resultQueryImagePreviewItemIndex,
-      skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultTableWidth, resultActionWidths, fallbackStat,
+      skillTabs, rubricDims, filteredResults, pagedResults, pageCount, resultPageOffset, hasConversationResults, resultConversationHeading, resultTurnLabel, resultTableWidth, resultActionWidths, fallbackStat,
       operationGroups, groupAlignment, groupAligning, multiGroupColumns, multiGroupResult, displayArray, groupRoleLabel,
       formatHint, placeholder, previewKeys, pagedPreviewItems, skillOverviewRows, resultCols, opItems, pagedOpItems, opPreparing, datasetImportSummary, datasetImportWarnings, canSubmit, formatOptionalTaskTime, formatAttachmentUrls,
       trunc, switchMode, onFile, onOpManifestFile, clearImportedOperationDataset,

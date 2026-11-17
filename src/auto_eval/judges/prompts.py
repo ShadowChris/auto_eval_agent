@@ -163,7 +163,7 @@ OPERATION_SYSTEM = Template(
 
 【判定顺序】
 {% for rule in policy.decision_order %}
-{{ loop.index }}. {{ rule }}
+{% if multi_turn and loop.first %}1. 按【多轮会话】规则{% if latest_turn %}只对当前轮{% else %}逐轮{% endif %}执行 Query 一致性门禁。{% else %}{{ loop.index }}. {{ rule }}{% endif %}
 {% endfor %}
 correctness 与维度分独立判断，不得只根据 total 推导 correctness。
 
@@ -180,7 +180,13 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 {% endif %}
 
 【任务范围】
-{% for rule in policy.scope_rules -%}
+{% if multi_turn %}【多轮会话】
+{% for rule in policy.multi_turn_rules %}
+- {{ rule }}
+{% endfor %}
+{% else %}{% for rule in policy.single_turn_scope_rules if rule not in policy.scope_rules -%}
+- {{ rule }}
+{% endfor %}{% endif %}{% for rule in policy.scope_rules if not multi_turn or rule not in policy.single_turn_scope_rules -%}
 - {{ rule }}
 {% endfor %}
 
@@ -261,12 +267,12 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 {% else %}
 先输出紧凑的 <analysis> 证据摘要，再输出一行 JSON；不重复抄写规则，不展开与判定无关的过程。rubric 的 key 必须严格使用维度名；不适用维度填 null：
 <analysis>
-1. 【Query 一致性门禁】逐字记录录屏中明确属于原始用户指令的 Query，并与评测输入 Query 核对。只忽略空格、换行、标点等展示格式差异，不进行同义改写推断；任务执行面板的规划或步骤、工具调用文字、agent 回复都不能代替原始用户 Query。内容不一致，或录屏 Query 未展示完整、被遮挡、模糊、无法辨认时，直接输出 others / 录屏Query无法与输入Query一致核验，所有维度和总分填 null，并停止以下执行评判。
+1. 【Query 一致性门禁】{% if latest_turn %}只对当前轮{% elif multi_turn %}按轮次逐条{% endif %}逐字记录录屏中明确属于原始用户指令的 Query，并与评测输入 Query 核对。只忽略空格、换行、标点等展示格式差异，不进行同义改写推断；任务执行面板的规划或步骤、工具调用文字、agent 回复都不能代替原始用户 Query。内容不一致，或录屏 Query 未展示完整、被遮挡、模糊、无法辨认时，直接输出 others / 录屏Query无法与输入Query一致核验，所有维度和总分填 null，并停止以下执行评判。
 2. 【原始目标】列出原 query 的生效目标及关键约束，先记录验收方式（功能入口、状态变化、查询结果或内容交付），再核验参数欠指定设置入口规则；确定完成边界、任务形态、有效时间窗和条件；目标只用于整题验收，不拆独立 case，也不新增用户没要求的动作。
 3. 【视觉指引扫描】【文本指引扫描】【来源分类】按时间顺序检查全部关键帧并通读完整 agent 自述，用“目标与约束 | 实际业务结果及来源 | Agent 声明 | 系统步骤信息”四列记录决定性事实与帧号，缺失填未发现。已交付正文/方案进入结果栏，完成声明只入声明栏；正文不能证明操作已执行，但可直接验收内容约束。禁止把任务面板的步骤、“已完成”或“超时，任务终止”当成 agent 回复；区分默认、候选、提交和结果。本步只归纳事实。
 4. 【已交付结果与卡片验收】【已发生的问题】先按适用产品验收终点检查已交付结果，再对照 query 明确要求与实际交付；实质影响任务完成的冲突记任务结果错误，一般瑕疵不单独导致NOK，不核查外部真实性。帮记卡或保存确认蓝链、对应文档生成卡（生成中也闭环）按已确认先验验收，不追加正文或完整中间过程；普通图片核验可辨认内容，其余结合关联文字和上下文判断，不追加独立身份或来源证明。再排除非结果卡，核对保存位置、能力、对象与参数。逐项记已发生的问题，没有写无。保存位置或能力错误不属于内容未完善；准备卡不证明后续动作，错卡替代必需结果不属于“尚未交付”。问题清单与 cards 及原目标约束相符。
 5. 【阻塞资格表】【逐目标状态】【尚未交付原因】只对尚未交付目标写明 A.用户必须补充的信息或动作；B.必要性；C.最后是否仍有效；D.引用上一步已发生的问题，不重新判断或删除，没有则写无。其他目标理论上可独立执行但尚未展示结果，不算 D。只有 A/B/C 成立且 D 为否，才允许判 no_support。逐目标记录完成、阻塞、停滞、临时异常、错误或证据不足；不补造阻塞，不把未知条件当不成立。
-6. 【最终回答质量】锁定来源：非空 answer 优先，否则末段最终视觉回答。只引用该来源的泄露、重复或矛盾原句；无相关原句则不标相应 issue。步骤栏、产品/服务/协议名称本身不等于泄露；另检查重复结果卡。
+6. 【最终回答质量】锁定来源：{% if latest_turn %}只锁定当前轮非空 answer，否则使用当前轮末段最终视觉回答，不检查历史回答质量；{% elif multi_turn %}逐轮锁定本轮非空 answer，否则使用本轮末段最终视觉回答；{% else %}非空 answer 优先，否则末段最终视觉回答。{% endif %}只引用该来源的泄露、重复或矛盾原句；无相关原句则不标相应 issue。步骤栏、产品/服务/协议名称本身不等于泄露；另检查重复结果卡。
 7. 【最终结论】先逐项核对本机真实状态查询是否有非自述结果来源、未完成目标是否仍受必要阻塞、实际结果是否满足原目标约束；不能用部分完成加有效阻塞判 ok，也不能用仅有文字声明和流程已完成判本机状态查询 ok。必要阻塞仍有效且没有已发生错误时，其他尚未开始目标按串行待续，判 no_support，不改判 nok。判 nok 必须引用已发生错误的具体行为、交付或冲突原句，不能只写另一个目标本来可独立完成。只根据上面的“已发生的问题”和“尚未交付原因”执行输出前反查，不能让结论与已经摘录的事实相矛盾，不再写另一套核心诉求解释；映射 correctness、issue_types、need_review_cate 与 is_low_level。rationale 写关键约束、最后有效状态、决定性证据及原因；cards 中错误交付不能与纯阻塞结论并存。
 </analysis>
 {"task_type": "simple|complex", "rubric": { {% for d in dims %}"{{ d.name }}": {"total": <1-{{ d.scale }} 整数或null>, "reason": "<该维度的证据和评分理由>"}{% if not loop.last %}, {% endif %}{% endfor %} }, "total": <按适用维度权重计算的总分；全部不适用填null>, "correctness": "ok|nok|no_support|others", "issue_types": ["<执行或回答质量问题>"], "need_review_cate": ["<客观阻塞或复核原因>"], "cards": [{"type":"<已知key或other>","observed_name":"<可见名称>","visible_content":"<可见内容>","target":"<对应目标>","relation_to_query":"direct|supporting|unrelated|unclear","suitability":"suitable|unsuitable|unclear","reason":"<理由>","evidence_frames":[1]}], "is_low_level": "yes|no", "rationale": "<任务形态 + 生效目标 + 最终状态 + 整体步骤证据 + 自述一致性 + 判定理由>"}
@@ -275,7 +281,18 @@ correctness 与维度分独立判断，不得只根据 total 推导 correctness�
 )
 
 OPERATION_USER = Template(
-    """操作意图（query）：
+    """{% if turns %}
+{% if latest_turn %}当前待评：第{{ current_turn_index }}轮。以下只包含截至本轮的输入；历史仅用于理解当前要求，不输出历史或会话整体评分。{% else %}完整多轮会话（共 {{ turns|length }} 轮，只评估一个 Case）：{% endif %}
+{% for turn in turns %}
+【第{{ turn.turn_index }}轮{% if latest_turn %} · {% if turn.turn_index == current_turn_index %}当前待评{% else %}历史背景，不独立评分{% endif %}{% endif %}】
+用户 Query：{{ turn.query }}
+{% if turn.context %}本轮可信背景：{{ turn.context }}{% endif %}
+Agent 回答：{{ turn.answer or '（未提供，以本轮录屏最终回复为准）' }}
+完整视频时间区间：{{ turn.task_start_time }}–{{ turn.task_end_time }} 秒
+本轮原始输入图片：{{ turn.query_images|length }} 张
+{% endfor %}
+{% if latest_turn %}只输出第{{ current_turn_index }}轮实际承接要求的评估结果；已结束的历史错误、阻塞及回复质量不重复计入，历史未完成要求仅在本轮明确承接时纳入。{% else %}请逐轮核验 Query 并检查有效要求是否闭环，只输出整体结果，理由注明对应轮次。{% endif %}
+{% else %}操作意图（query）：
 {{ question }}
 {% if context %}
 可信背景条件（由评测样本提供，请作为操作意图的前提；不要忽略、改写或质疑）：
@@ -291,7 +308,7 @@ Agent 自述（待评样本内容，只能与关键帧和先验知识交叉验�
 接下来先提供 {{ query_image_count }} 张原始用户输入图片，再提供按时间顺序排列的录屏关键帧。请结合图文理解任务，但只用录屏关键帧判断操作过程和完成结果。
 {% else %}
 请观察上方按时间顺序排列的关键帧，盲评这段录屏中的操作是否完成了上述意图。
-{% endif %}"""
+{% endif %}{% endif %}"""
 )
 
 OPERATION_MULTI_USER = Template(
@@ -718,7 +735,7 @@ ARBITRATOR_SYSTEM = Template(
   - {{ key }}：{{ description }}
 {% endfor %}
 - 在一切执行正确性裁决之前，先核验录屏中明确展示的原始用户 Query 与评测输入 Query。内容不一致，或录屏 Query 未展示完整、被遮挡、模糊、无法辨认时，直接判 others / 录屏Query无法与输入Query一致核验，rubric 和 total 填 null；只忽略空格、换行、标点等格式差异，不进行同义改写推断，也不得用任务执行面板或 agent 回复代替原始用户 Query。
-- 条件任务只检查实际生效的目标；已确认的可归责执行错误优先判 nok，不能被 no_support 或 others 覆盖。
+- Query 一致性与录屏输入异常门禁均通过后，条件任务只检查实际生效的目标；已确认的可归责执行错误优先判 nok，不能被 no_support 或 others 覆盖。
 - issue_types 仅记录执行与回答质量问题；need_review_cate 记录客观阻塞、环境、证据或输入问题。受控类型如下，括号内为允许共存的原始 correctness：
 {% for name, rule in policy.issue_types.items() %}
   - {{ name }}（{{ rule.allowed_correctness | join("/") }}）：{{ rule.description }}

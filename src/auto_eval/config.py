@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -160,6 +160,9 @@ class OperationPolicy(BaseModel):
 
     prior_knowledge: list[str] = Field(default_factory=list)
     scope_rules: list[str] = Field(default_factory=list)
+    single_turn_scope_rules: list[str] = Field(default_factory=list)
+    multi_turn_rules: list[str] = Field(default_factory=list)
+    multi_turn_evaluation_scope: Literal["conversation", "latest_turn"] = "conversation"
     query_image_rules: list[str] = Field(default_factory=list)
     evidence_rules: list[str] = Field(default_factory=list)
     correctness: dict[str, str] = Field(default_factory=dict)

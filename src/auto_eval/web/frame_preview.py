@@ -85,6 +85,7 @@ def create_frame_preview_router(
                     version = 0
                 records.append({
                     "index": index, "filename": path.name, "time": timestamp,
+                    "turn_index": info.get("turn_index"),
                     "available": path.is_file(),
                     "url": f"/api/eval/{task_id}/items/{item_index}/frames/{index}?group_index={group_index}&v={version}",
                 })

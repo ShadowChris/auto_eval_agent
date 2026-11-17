@@ -1,7 +1,7 @@
 """根据评估 Excel 中的执行失败记录，从原始 JSONL 提取补充数据集。
 
 默认读取“逐题结果”，选取 error 非空且 error 不包含
-“视频文件不存在”的数据。通过 item_id 对齐原始 JSONL 的 id，
+“视频文件不存在”的数据。优先通过 id 对齐原始 JSONL 的 id，兼容旧表 item_id，
 并保持原始数据集顺序输出。
 
 示例：
@@ -25,6 +25,7 @@ import pandas as pd
 DEFAULT_SHEET = "逐题结果"
 DEFAULT_EXCLUDED_ERRORS = ("视频文件不存在",)
 ITEM_ID_COLUMN = "item_id"
+ID_COLUMN = "id"
 SEQUENCE_COLUMN = "序号"
 QUERY_COLUMN = "query"
 ERROR_COLUMN = "error"
@@ -68,12 +69,21 @@ def _read_evaluation(path: Path, sheet: str | int) -> pd.DataFrame:
     if suffix not in {".xlsx", ".xls", ".xlsm"}:
         raise ValueError("评估结果必须是 .xlsx/.xls/.xlsm 文件")
     try:
-        return pd.read_excel(
-            path,
-            sheet_name=sheet,
-            dtype=object,
-            keep_default_na=False,
-        )
+        with pd.ExcelFile(path) as workbook:
+            frame = pd.read_excel(
+                workbook, sheet_name=sheet, dtype=object, keep_default_na=False,
+            )
+            # New exports keep internal evaluation scope in 数据集明细 only.
+            # Do not mistake a failed round for an old whole-conversation case.
+            if "evaluation_scope" not in frame.columns and "数据集明细" in workbook.sheet_names:
+                details = pd.read_excel(
+                    workbook, sheet_name="数据集明细", dtype=object,
+                    keep_default_na=False, usecols=lambda name: name == "evaluation_scope",
+                )
+                frame.attrs["latest_turn_evaluation"] = (
+                    "evaluation_scope" in details.columns and any(details["evaluation_scope"] == "latest_turn")
+                )
+            return frame
     except ValueError as exc:
         raise ValueError(f"无法读取工作表 {sheet}：{exc}") from exc
 
@@ -125,8 +135,10 @@ def extract_failed_subset(
         raise ValueError("原始数据集必须是 .jsonl 文件")
 
     frame = _read_evaluation(evaluation_path, sheet)
-    required_columns = {ITEM_ID_COLUMN, ERROR_COLUMN}
+    required_columns = {ERROR_COLUMN}
     missing_columns = sorted(required_columns - set(frame.columns))
+    if not {ID_COLUMN, ITEM_ID_COLUMN}.intersection(frame.columns):
+        missing_columns.append("id/item_id（至少一列）")
     if missing_columns:
         raise ValueError(
             f"工作表 {sheet} 缺少必需列：{', '.join(missing_columns)}"
@@ -150,11 +162,11 @@ def extract_failed_subset(
             excluded_rows += 1
             continue
 
-        item_id = _text(row.get(ITEM_ID_COLUMN))
+        item_id = _text(row.get(ID_COLUMN)) or _text(row.get(ITEM_ID_COLUMN))
         if not item_id:
-            raise ValueError(f"工作表 {sheet} 第 {row_number} 行缺少 item_id")
+            raise ValueError(f"工作表 {sheet} 第 {row_number} 行缺少 id/item_id")
         if item_id in selected:
-            raise ValueError(f"工作表 {sheet} 存在重复 item_id：{item_id}")
+            raise ValueError(f"工作表 {sheet} 存在重复 id/item_id：{item_id}")
         selected[item_id] = FailedSubsetItem(
             item_id=item_id,
             sequence=_text(row.get(SEQUENCE_COLUMN)),
@@ -163,7 +175,15 @@ def extract_failed_subset(
         )
 
     source_rows = _read_jsonl(dataset_path)
-    source_ids = {_text(row.get("id")) for row in source_rows}
+    from auto_eval.operation_conversation import group_operation_items, normalize_operation_items
+
+    per_round = frame.attrs.get("latest_turn_evaluation", False) or (
+        "evaluation_scope" in frame.columns and any(frame["evaluation_scope"] == "latest_turn")
+    )
+    source_cases = normalize_operation_items(source_rows) if per_round else group_operation_items(source_rows)
+    source_ids = {_text(row.get("id")) for row in source_rows} | {
+        _text(case.get("id")) for case in source_cases
+    }
     missing_ids = sorted(set(selected) - source_ids)
     if missing_ids:
         preview = "、".join(missing_ids[:20])
@@ -176,19 +196,29 @@ def extract_failed_subset(
     output_rows: list[dict[str, Any]] = []
     query_mismatch_ids: list[str] = []
     ordered_items: list[FailedSubsetItem] = []
-    for source_row in source_rows:
+    expanded_selection = dict(selected)
+    for case in ([] if per_round else source_cases):
+        turns = case.get("turns") or []
+        selected_item = selected.get(_text(case.get("id"))) or next(
+            (selected[_text(turn.get("id"))] for turn in turns if _text(turn.get("id")) in selected), None
+        )
+        if selected_item:
+            for turn in turns:
+                expanded_selection[_text(turn.get("id"))] = selected_item
+    for source_row in (source_cases if per_round else source_rows):
         item_id = _text(source_row.get("id"))
-        failed_item = selected.get(item_id)
+        failed_item = expanded_selection.get(item_id)
         if failed_item is None:
             continue
-        output_row = dict(source_row)
-        if failed_item.sequence:
+        output_row = {**(source_row.get("source_data") or {}), **source_row} if per_round else dict(source_row)
+        if failed_item.sequence and item_id in selected:
             output_row.setdefault(SEQUENCE_COLUMN, failed_item.sequence)
         source_query = _text(source_row.get(QUERY_COLUMN))
-        if failed_item.query and source_query != failed_item.query:
+        if item_id in selected and failed_item.query and source_query != failed_item.query:
             query_mismatch_ids.append(item_id)
         output_rows.append(output_row)
-        ordered_items.append(failed_item)
+        if failed_item not in ordered_items:
+            ordered_items.append(failed_item)
 
     output_path = (
         output_path.expanduser().resolve()

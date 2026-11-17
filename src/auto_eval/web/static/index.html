@@ -340,17 +340,17 @@
           <span v-if="opPreparing" class="running">正在解析数据集…</span>
           <span v-else-if="items.length" class="ok">✓ 已导入 {{ items.length }} 条（开始评估时抽帧）</span>
           <span v-if="datasetName" class="hint">数据集：{{ datasetName }}</span>
-          <span v-if="errors.length" class="err">⚠ {{ errors.length }} 条未导入</span>
+          <span v-if="errors.length" class="err">⚠ {{ errors.length }} {{ mode==='operation' ? '条输入异常（已保留为失败行）' : '条未导入' }}</span>
         </div>
         <p v-if="mode==='operation'" class="hint">支持 JSONL、CSV、XLSX。表格必需列：<strong>query</strong>，以及 <strong>id / index / 序号</strong> 至少一列。非空 id 直接复用，缺失时按 index 或序号生成。视频优先读取 <strong>video_path</strong>；没有该列时使用<strong>原文件名</strong>拼接，<strong>文件路径</strong>可选。Excel 优先读取“合并数据”工作表。</p>
         <p v-if="mode==='operation'" class="hint">video_path 支持本地路径或 HTTP/HTTPS 视频直链；开始评估时临时下载，单题评估结束后删除临时原视频。下载或视频校验失败会显示在对应题目下方。</p>
         <p v-else class="hint">示例：{"id":"rich_001","query":"北京明天天气怎么样","context":"当前地点北京","video_path":"data/rich_content/weather.mp4","category":"weather","answer_text":"北京明天晴","content_start_time":0,"content_end_time":18.5}</p>
-        <p v-if="mode==='operation'" class="hint op-optional-fields-help">可选字段：id（题号）、context（背景）、attachment_url_domain / attachment_url_ip（同一张用户图片的域名/IP 地址）、agent_statement / answer（自述）、task_start_time / task_end_time（任务起止时间，单位秒）。图片域名地址优先，为空或读取失败时尝试 IP 地址；两者为空则无附件图片。不再读取 attachment_path；仍支持显式 query_images 多图和手动上传。视频及图片在开始评估时校验。</p>
+        <p v-if="mode==='operation'" class="hint op-optional-fields-help">可选字段：id（题号）、context（背景）、attachment_url_domain / attachment_url_ip（同一张用户图片的域名/IP 地址）、agent_statement / answer（自述）、task_start_time / task_end_time（任务起止时间，单位秒）。图片域名地址优先，为空或读取失败时尝试 IP 地址；两者为空则无附件图片。不再读取 attachment_path；仍支持显式 query_images 多图和手动上传。视频及图片在开始评估时校验。多轮优先用 session_group（会话字符串）和 turn_index（从0开始的轮次）归组，同组按轮次排序；这两个字段为空时，兼容连续的 is_start/is_end（TRUE/FALSE）首尾标记。每轮必须提供完整视频中的起止秒数；每轮独立勾选、评估和重跑，自动携带截至本轮的历史 Query、Answer 和画面，仅评本轮承接要求，导出保持原始行序。</p>
         <div v-if="datasetImportSummary" class="summary dataset-import-summary">
           <span>格式 {{ datasetImportSummary.format }}</span>
           <span v-if="datasetImportSummary.sheet != null">工作表 {{ datasetImportSummary.sheet }}</span>
           <span>源数据 {{ datasetImportSummary.source_rows }} 行</span>
-          <span>导入 {{ datasetImportSummary.imported_rows }} 行</span>
+          <span>导入 {{ datasetImportSummary.imported_rows }} 个 Case</span>
           <span v-if="datasetImportSummary.ignored_empty_rows">忽略空白 {{ datasetImportSummary.ignored_empty_rows }} 行</span>
           <span v-if="datasetImportSummary.missing_video_rows">视频不可访问 {{ datasetImportSummary.missing_video_rows }} 行</span>
         </div>
@@ -378,9 +378,15 @@
                 <td>{{ row.incoming_no }}</td>
                 <td>
                   <strong>{{ row.key }}</strong>
+                  <small v-if="row.turn_count > 1">多轮会话 · 当前第 {{ row.turn_index || row.turn_count }} / {{ row.turn_count }} 轮 · 本轮独立评估</small>
+                  <small v-if="row.session_group">session_group: {{ row.session_group }} · turn_index: {{ row.input_turn_index ?? '未提供' }}</small>
                   <small v-if="row.incoming_id && row.incoming_id !== row.key">id: {{ row.incoming_id }}</small>
                 </td>
-                <td><div class="append-preview-cell" :title="row.query">{{ row.query || '—' }}</div></td>
+                <td>
+                  <div class="append-preview-cell" :title="row.query">{{ row.query || '—' }}</div>
+                  <div v-if="row.input_error" class="err">输入异常（将保留为失败行）：{{ row.input_error }}</div>
+                  <div v-for="warning in row.input_warnings" :key="warning" class="hint">{{ warning }}</div>
+                </td>
                 <td><div class="append-preview-cell" :title="row.context">{{ row.context || '未提供' }}</div></td>
                 <td><div class="append-preview-cell append-path-cell" :title="row.video_path">{{ row.video_path || '未提供' }}</div></td>
                 <td><div class="append-preview-cell append-path-cell" :title="formatAppendPreviewImages(row.query_images)">{{ formatAppendPreviewImages(row.query_images) }}</div><small v-if="row.attachment_url_domain || row.attachment_url_ip" class="hint" :title="formatAttachmentUrls({attachmentUrlDomain:row.attachment_url_domain,attachmentUrlIp:row.attachment_url_ip})">域名链接：{{ row.attachment_url_domain ? '已提供' : '未提供' }} · IP 备用：{{ row.attachment_url_ip ? '已提供' : '未提供' }}</small></td>
@@ -1090,7 +1096,7 @@
           <thead><tr><th>选择</th><th>#</th><th>case_id / Query</th><th>策略 / 图片数</th><th v-for="group in multiGroupColumns" :key="group.group_id">{{ groupRoleLabel(group.group_role) }}｜{{ group.group_name }}<small>{{ group.dataset_name }}</small></th></tr></thead>
           <tbody><tr v-for="(result,index) in pagedResults" :key="result.index ?? index" :class="{'result-error':result.error}">
             <td><input type="checkbox" :checked="isRerunSelected(result)" :disabled="running" @change="setRerunSelected(result,$event.target.checked)"></td>
-            <td>{{ (resultPage-1)*resultPageSize+index+1 }}</td>
+            <td>{{ resultPageOffset+index+1 }}</td>
             <td class="multi-case-cell"><strong>{{ result.case_id || result.item_id }}</strong><div>{{ result.query }}</div><div class="err" v-if="result.alignment_warnings?.length">{{ result.alignment_warnings.join('；') }}</div><div class="err" v-if="result.error">{{ result.error }}</div></td>
             <td><div>{{ result.evaluation_strategy || '—' }}</div><div>{{ result.input_image_count || result.frame_count || 0 }} 张</div><div>总耗时 {{ result.duration_s!=null ? formatProgressElapsed(result.duration_s) : '—' }}</div><frame-preview :task-id="taskId" :item-index="Number(result.index)"></frame-preview><div v-if="result.failure_stage" class="err">失败阶段：{{ result.failure_stage }}</div><button v-if="!running" type="button" class="result-action-button" @click="rerunOne(result)">重跑 Case</button></td>
             <td v-for="group in multiGroupColumns" :key="'cell-'+group.group_id" class="multi-result-cell">
@@ -1154,6 +1160,7 @@
           <button @click="clearDimensionDrillDown">清除</button>
         </span>
         <span class="result-count">共 {{ filteredResults.length }} 条</span>
+        <span v-if="hasConversationResults" class="result-count">同一会话按轮次相邻展示，分页不拆分会话。</span>
       </div>
       <div class="result-table-wrap">
         <table class="grid results compact-results" :style="{ width: resultTableWidth + 'px' }">
@@ -1186,11 +1193,18 @@
           </thead>
           <tbody>
             <template v-for="(r,i) in pagedResults" :key="r.index ?? i">
+              <tr v-if="resultConversationHeading(r)" class="result-conversation-heading">
+                <td colspan="99">
+                  <strong>多轮会话 · {{ resultConversationHeading(r).id }}</strong>
+                  <span>已显示 {{ resultConversationHeading(r).visible }} / {{ resultConversationHeading(r).total }} 轮</span>
+                  <span v-if="resultConversationHeading(r).visible < resultConversationHeading(r).total">（其余轮次尚未完成或未匹配当前筛选）</span>
+                </td>
+              </tr>
               <tr :class="{'result-error':r.error}">
                 <td class="result-select-column" :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'0px'} : {}">
                   <input type="checkbox" :checked="isRerunSelected(r)" :disabled="running" @change="setRerunSelected(r, $event.target.checked)">
                 </td>
-                <td :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'42px'} : {}"><div class="cell-clamp cell-center">{{ (resultPage-1)*resultPageSize+i+1 }}</div></td>
+                <td :class="{'result-frozen-column':mode==='operation'}" :style="mode==='operation' ? {left:'42px'} : {}"><div class="cell-clamp cell-center">{{ resultPageOffset+i+1 }}</div></td>
                 <td
                   v-for="(c,columnIndex) in resultCols"
                   :key="c.key"
@@ -1242,6 +1256,7 @@
                     class="cell-clamp"
                     :class="{'cell-full': c.key==='item_id', 'cell-center': c.rubricDim || ['correctness','winner','total','used_search','truncated','arbitrated','agree','bidirectional_consistent','frame_count'].includes(c.key), 'cell-na': c.rubricDim && isNA(r, c.rubricDim)}"
                   >{{ cell(r, c) }}</div>
+                  <small v-if="c.key==='item_id' && resultTurnLabel(r)" class="result-turn-label">{{ resultTurnLabel(r) }}</small>
                 </td>
                 <td v-if="isVideoMode" class="row-export-cell">
                   <div v-for="(video,videoIndex) in itemVideoLinks(r)" :key="videoIndex" class="row-video-item">
@@ -1284,7 +1299,7 @@
       </div>
       <div class="pagination" v-if="filteredResults.length">
         <span class="page-size">
-          每页
+          {{ hasConversationResults ? '每页目标' : '每页' }}
           <select v-model.number="resultPageSize" @change="changeResultPageSize">
             <option :value="10">10</option>
             <option :value="20">20</option>
@@ -1292,6 +1307,7 @@
           </select>
           条
         </span>
+        <span v-if="hasConversationResults" class="result-count">本页 {{ pagedResults.length }} 条，会话不拆页</span>
         <template v-if="pageCount>1">
           <button @click="changePage(-1)" :disabled="resultPage<=1">上一页</button>
           <template v-for="page in paginationPages(resultPage, pageCount)" :key="'result-page-'+page">
