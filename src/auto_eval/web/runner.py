@@ -9,9 +9,11 @@ import collections
 import json
 import logging
 import os
+import tempfile
 import time
 import traceback
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -37,6 +39,7 @@ from ..judges.ensemble import (
 )
 from ..llm_stream import is_retriable_llm_error
 from ..meta import ground_truth
+from ..operation_keyframes import KEYFRAME_ALGORITHM_VERSION
 from ..observability import (
     bind_chain_context,
     error_details,
@@ -60,8 +63,11 @@ from .operation_media import (
 )
 from .tasks import DEFAULT_OPERATION_CONCURRENCY, Task, prune_task_cache
 from .remote_video import run_video_preparation, video_reference_for_log
-from .video_pipeline import stage_slot, video_item_scope
-from .operation_runs import freeze_frames, verify_frames, frame_items, frozen_evaluation_config, evaluation_snapshot, validate_conversation_snapshot
+from .video_pipeline import OperationBatch, stage_slot, video_item_scope
+from .operation_runs import (
+    FRAME_FIELDS, evaluation_snapshot, frame_items, freeze_frame_item, freeze_frames, frozen_evaluation_config,
+    validate_conversation_snapshot, verify_frame_item, verify_frames,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -242,6 +248,7 @@ def _prepare_rerun_items(task: Task, item_indices: list[int]) -> None:
         return
     if task.options.get("execution_mode") == "evaluate_only":
         return  # 严格复用，缺失帧不能静默回退成另一套视觉输入。
+    validate_frozen = task.mode == "operation" and task.options.get("execution_mode", "full") == "full"
     for index in item_indices:
         item = task.items[index]
         if task.mode == "operation" and _is_multi_group_operation(item):
@@ -250,17 +257,36 @@ def _prepare_rerun_items(task: Task, item_indices: list[int]) -> None:
                 if not isinstance(group_item, dict):
                     continue
                 group_item.pop("prepare_error", None)
+                if validate_frozen and group_item.get("frame_set_id"):
+                    continue
                 if not _valid_cached_frames(group_item):
                     group_item.pop("frames", None)
                     group_item.pop("frame_count", None)
                     group_item.pop("frame_set_id", None)
                     group_item.pop("frame_manifest_path", None)
             continue
+        if validate_frozen and item.get("frame_set_id"):
+            continue
         if not _valid_cached_frames(item):
             item.pop("frames", None)
             item.pop("frame_count", None)
             item.pop("frame_set_id", None)
             item.pop("frame_manifest_path", None)
+
+
+def _rebuild_operation_frames(item: dict, *, generation_id: str, **kwargs) -> dict:
+    """Keep the old evidence reference until new evidence has passed archive verification."""
+    old_version = item["frame_set_id"]
+    source = {key: value for key, value in item.items() if key not in FRAME_FIELDS}
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    # The worker owns the scratch directory even if its caller is cancelled or times out.
+    with tempfile.TemporaryDirectory(prefix="frame-retry-", dir=RUNS_DIR) as scratch:
+        prepared = prepare_session_operation_item(source, rebuild_dir=Path(scratch), runs_dir=RUNS_DIR, **kwargs)
+        freeze_frame_item(prepared, runs_dir=RUNS_DIR, generation_id=generation_id)
+    log_event("视频准备", "坏帧重抽已归档", details={
+        "原帧版本": old_version, "新帧版本": prepared["frame_set_id"], "算法版本": KEYFRAME_ALGORITHM_VERSION,
+    })
+    return prepared
 
 
 async def run_rerun(
@@ -647,9 +673,13 @@ async def _run(
             )
             visual_judge = RichContentJudge(visual_client, rich_profile, prompt_variant="rich_content_quality")
     scale = cfg.rubrics[0].scale if cfg.rubrics else 5
-    sem = asyncio.Semaphore(int(
-        task.options.get("concurrency", _default_task_concurrency(task))
-    ))
+    indices = active_item_indices(task.items) if item_indices is None else list(item_indices)
+    concurrency = int(task.options.get("concurrency", _default_task_concurrency(task)))
+    # Single-item API submissions already share a task-level semaphore across calls.
+    batch = OperationBatch(concurrency, len(indices)) if (
+        indices and task.mode == "operation" and task.single_api_semaphore is None
+    ) else None
+    sem = asyncio.Semaphore(concurrency)
     eval_timeout = float(task.options.get("eval_timeout_s") or task.options.get("eval_timeout") or 300.0)
 
     online_runner = None
@@ -718,8 +748,8 @@ async def _run(
                 progress=0,
                 progress_message="排队等待评测",
             )
-            async with sem:
-                # 排队时间不计入单题耗时；取得并发槽后才启动计时。
+            async with (batch.reserve() if batch is not None else sem) as ticket:
+                # 未准入的等待不计入单题耗时；之后的阶段等待仍计入。
                 started = time.perf_counter()
                 log_event(
                     "任务",
@@ -745,6 +775,16 @@ async def _run(
                     except Exception as exc:
                         last_error = exc
                         preparation_failure_stage = "frame_validation"
+                invalid_frame_rows: set[int] = set()
+                if (last_error is None and task.mode == "operation" and execution_mode == "full"
+                        and (rerun is not None or "execution_mode" in task.options)):
+                    for row in frame_items(item_dict):
+                        if not row.get("frame_set_id"):
+                            continue
+                        try:
+                            await asyncio.to_thread(verify_frame_item, row, RUNS_DIR)
+                        except ValueError:
+                            invalid_frame_rows.add(id(row))
                 if (
                     last_error is None
                     and task.mode == "operation"
@@ -820,7 +860,8 @@ async def _run(
                                 progress_message="部分实验组用户输入图片校验失败",
                             )
                             continue
-                        if _valid_cached_frames(group_item):
+                        rebuild = id(group_item) in invalid_frame_rows
+                        if not rebuild and _valid_cached_frames(group_item):
                             group_item.pop("prepare_error", None)
                             image_counts.append({
                                 "group_id": variant.get("group_id"),
@@ -841,17 +882,22 @@ async def _run(
                             prepared_input["id"] = (
                                 f"{item_id}__{variant.get('group_id') or group_position + 1}"
                             )
+                            prepare_call = _rebuild_operation_frames if rebuild else prepare_session_operation_item
+                            recovery = {"generation_id": attempt_id or task.id} if rebuild else {}
                             prepared = await run_video_preparation(
-                                prepare_session_operation_item,
+                                prepare_call,
                                 prepared_input,
                                 session_name=task.session_name,
                                 item_index=idx * max(1, len(variants)) + group_position,
                                 total_items=total_group_items,
+                                operation_batch=batch,
                                 preparation_timeout_s=float(task.options.get("video_prepare_timeout_s") or 300),
+                                **recovery,
                             )
                             prepared["id"] = group_item.get("id") or prepared["id"]
                             group_item.clear()
                             group_item.update(prepared)
+                            invalid_frame_rows.discard(id(group_item))
                             group_item.pop("prepare_error", None)
                             image_counts.append({
                                 "group_id": variant.get("group_id"),
@@ -901,7 +947,7 @@ async def _run(
                 elif (
                     last_error is None
                     and task.mode in ("operation", "rich_content", "rich_content_quality")
-                    and not item_dict.get("frames")
+                    and (not item_dict.get("frames") or id(item_dict) in invalid_frame_rows)
                 ):
                     try:
                         log_event(
@@ -916,6 +962,9 @@ async def _run(
                                 raise ValueError("缺少 rich_content 视觉模式配置")
                             prepare_call = prepare_session_rich_content_item
                             prepare_kwargs = {"profile": rich_profile}
+                        elif id(item_dict) in invalid_frame_rows:
+                            prepare_call = _rebuild_operation_frames
+                            prepare_kwargs = {"generation_id": attempt_id or task.id}
                         else:
                             prepare_call = prepare_session_operation_item
                             prepare_kwargs = {}
@@ -926,11 +975,13 @@ async def _run(
                             item_index=idx,
                             total_items=len(task.items),
                             operation_pipeline=task.mode == "operation",
+                            operation_batch=batch,
                             preparation_timeout_s=float(task.options.get("video_prepare_timeout_s") or 300),
                             **prepare_kwargs,
                         )
                         item_dict.clear()
                         item_dict.update(prepared)
+                        invalid_frame_rows.discard(id(item_dict))
                         _persist_task(task)
                         video_prepare_warnings = item_dict.get("video_prepare_warnings") or []
                         if video_prepare_warnings:
@@ -965,7 +1016,9 @@ async def _run(
                         )
                 if last_error is None and task.mode == "operation" and "execution_mode" in task.options:
                     try:
-                        await asyncio.to_thread(freeze_frames, item_dict, runs_dir=RUNS_DIR, generation_id=task.id)
+                        await asyncio.to_thread(
+                            freeze_frames, item_dict, runs_dir=RUNS_DIR, generation_id=attempt_id or task.id,
+                        )
                         _persist_task(task)
                     except Exception as exc:
                         last_error = exc
@@ -988,62 +1041,65 @@ async def _run(
                             "evaluation_status": "not_evaluated", "frame_count": len((variant.get("item") or {}).get("frames") or []),
                         } for variant in item_dict["group_variants"]]
                 if last_error is None and not extract_only:
-                    for attempt in range(2):
-                        trace_start = len(pending_judge_traces)
-                        try:
-                            if attempt:
+                    async with (batch.model(ticket) if batch is not None else nullcontext()):
+                        for attempt in range(2):
+                            trace_start = len(pending_judge_traces)
+                            try:
+                                if attempt:
+                                    log_event(
+                                        "单题评测",
+                                        "开始外层重试",
+                                        level=logging.WARNING,
+                                        details={"请求次数": f"{attempt + 1}/2"},
+                                        progress=15,
+                                        progress_message="正在重新执行单题评测",
+                                    )
+                                async with stage_slot("model", enabled=task.mode == "operation"):
+                                    if ticket is not None:
+                                        ticket.release_handoff()
+                                    res = await asyncio.wait_for(
+                                        _eval_one(
+                                            task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
+                                            online_runner, process_dims, arbitrator,
+                                            rich_judges=rich_judges,
+                                            visual_judge=visual_judge,
+                                            task=task,
+                                        ),
+                                        timeout=eval_timeout,
+                                    )
+                                break
+                            except asyncio.TimeoutError:
+                                last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
                                 log_event(
                                     "单题评测",
-                                    "开始外层重试",
-                                    level=logging.WARNING,
-                                    details={"请求次数": f"{attempt + 1}/2"},
-                                    progress=15,
-                                    progress_message="正在重新执行单题评测",
+                                    "超时",
+                                    level=logging.ERROR,
+                                    details=error_details(last_error),
                                 )
-                            async with stage_slot("model", enabled=task.mode == "operation"):
-                                res = await asyncio.wait_for(
-                                    _eval_one(
-                                        task.mode, idx, item_dict, rubrics, pair_judges, cfg, scale,
-                                        online_runner, process_dims, arbitrator,
-                                        rich_judges=rich_judges,
-                                        visual_judge=visual_judge,
-                                        task=task,
-                                    ),
-                                    timeout=eval_timeout,
+                                break
+                            except Exception as e:
+                                last_error = e
+                                format_error = task.mode == "operation" and isinstance(e, JudgeOutputParseError)
+                                if format_error:
+                                    for _, record in pending_judge_traces[trace_start:]:
+                                        record["status"] = "invalid_output"
+                                        record["output_validation_error"] = str(e)
+                                retryable = is_retriable_llm_error(e) or format_error
+                                will_retry = attempt == 0 and retryable
+                                log_event(
+                                    "单题评测",
+                                    "失败，准备重试" if will_retry else "最终失败",
+                                    level=logging.WARNING if will_retry else logging.ERROR,
+                                    details={
+                                        "请求次数": f"{attempt + 1}/2",
+                                        "可重试": retryable,
+                                        **error_details(e),
+                                    },
                                 )
-                            break
-                        except asyncio.TimeoutError:
-                            last_error = TimeoutError(f"单题评估超过 {eval_timeout:.0f} 秒")
-                            log_event(
-                                "单题评测",
-                                "超时",
-                                level=logging.ERROR,
-                                details=error_details(last_error),
-                            )
-                            break
-                        except Exception as e:
-                            last_error = e
-                            format_error = task.mode == "operation" and isinstance(e, JudgeOutputParseError)
-                            if format_error:
-                                for _, record in pending_judge_traces[trace_start:]:
-                                    record["status"] = "invalid_output"
-                                    record["output_validation_error"] = str(e)
-                            retryable = is_retriable_llm_error(e) or format_error
-                            will_retry = attempt == 0 and retryable
-                            log_event(
-                                "单题评测",
-                                "失败，准备重试" if will_retry else "最终失败",
-                                level=logging.WARNING if will_retry else logging.ERROR,
-                                details={
-                                    "请求次数": f"{attempt + 1}/2",
-                                    "可重试": retryable,
-                                    **error_details(e),
-                                },
-                            )
-                            if will_retry:
-                                await asyncio.sleep(1.0)
-                                continue
-                            break
+                                if will_retry:
+                                    await asyncio.sleep(1.0)
+                                    continue
+                                break
                 if res is None:
                     error_result = {
                         "index": idx,
@@ -1067,11 +1123,12 @@ async def _run(
                     )
             res["index"] = idx
             if task.mode == "operation":
+                evidence_rows = [row for row in frame_items(item_dict) if id(row) not in invalid_frame_rows]
                 res["execution_mode"] = execution_mode
-                res["frame_count"] = sum(len(row.get("frames") or []) for row in frame_items(item_dict))
+                res["frame_count"] = sum(len(row.get("frames") or []) for row in evidence_rows)
                 res["evaluation_status"] = ("not_evaluated" if extract_only else "done") if not res.get("error") else "error"
-                res["frame_set_id"] = item_dict.get("frame_set_id")
-                res["frame_sets"] = [row.get("frame_set_id") for row in frame_items(item_dict) if row.get("frame_set_id")]
+                res["frame_set_id"] = None if id(item_dict) in invalid_frame_rows else item_dict.get("frame_set_id")
+                res["frame_sets"] = [row.get("frame_set_id") for row in evidence_rows if row.get("frame_set_id")]
                 if snapshot:
                     res["policy_hash"] = snapshot.get("policy_hash")
                 if res.get("error"):
@@ -1180,8 +1237,29 @@ async def _run(
             )
             _persist_task(task)
 
-    indices = active_item_indices(task.items) if item_indices is None else list(item_indices)
-    await asyncio.gather(*[one(index, task.items[index]) for index in indices])
+    if batch is None:
+        await asyncio.gather(*(one(index, task.items[index]) for index in indices))
+        return
+    if rerun is not None and execution_mode == "full":
+        # Ready evidence can be evaluated while failed video preparations are retried.
+        def has_frames(index: int) -> bool:
+            item = task.items[index]
+            rows = frame_items(item)
+            return bool(rows) and all(row.get("frames") for row in rows)
+
+        indices.sort(key=has_frames, reverse=True)
+    workers = [asyncio.create_task(one(index, task.items[index])) for index in indices]
+    observer = None if extract_only else asyncio.create_task(batch.observe())
+    try:
+        await asyncio.gather(*workers)
+    finally:
+        pending = [worker for worker in workers if not worker.done()]
+        if observer is not None:
+            pending.append(observer)
+        for worker in pending:
+            worker.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        batch.report(task.id)
 
 
 def _write_eval_error(

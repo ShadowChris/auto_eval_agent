@@ -1,8 +1,11 @@
+import hashlib
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
+from auto_eval.media import FFmpegUnavailableError, resolve_ffmpeg_executable
 from auto_eval.web import server
 from auto_eval.web.operation_media import (
     prepare_session_operation_item,
@@ -142,7 +145,8 @@ def test_operation_jsonl_reports_invalid_rows_without_losing_valid_rows():
     assert "agent_statement 必须是字符串" in errors[2]
 
 
-def test_prepare_operation_item_resolves_project_relative_path_and_caches_frames(
+@pytest.mark.asyncio
+async def test_prepare_operation_item_resolves_project_relative_path_and_caches_frames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     video = tmp_path / "data" / "alarm.mp4"
@@ -164,8 +168,8 @@ def test_prepare_operation_item_resolves_project_relative_path_and_caches_frames
     monkeypatch.setattr(server, "extract_scene_keyframes", fake_extract)
     monkeypatch.delenv("OPERATION_VIDEO_ROOTS", raising=False)
 
-    first = server._prepare_operation_item({"query": "q", "video_path": "data/alarm.mp4"})
-    second = server._prepare_operation_item({"query": "q", "video_path": "data/alarm.mp4"})
+    first = await server._prepare_operation_item({"query": "q", "video_path": "data/alarm.mp4"})
+    second = await server._prepare_operation_item({"query": "q", "video_path": "data/alarm.mp4"})
 
     assert first["media"] == [str(video)]
     assert first["frame_count"] == 1
@@ -228,7 +232,7 @@ def test_operation_video_path_rejects_ambiguous_relative_path(
 
 @pytest.mark.asyncio
 async def test_batch_prepare_isolates_item_errors(monkeypatch: pytest.MonkeyPatch):
-    def fake_prepare(item):
+    async def fake_prepare(item):
         if item["query"] == "bad":
             raise ValueError("视频不存在")
         return {**item, "frames": ["one.jpg"], "media": ["one.mp4"]}
@@ -243,6 +247,42 @@ async def test_batch_prepare_isolates_item_errors(monkeypatch: pytest.MonkeyPatc
     assert response["failed"] == 1
     assert response["items"][0]["id"] == "ok"
     assert "broken：视频不存在" in response["errors"][0]
+
+
+@pytest.mark.asyncio
+async def test_import_preserves_real_frames_and_separates_time_windows(tmp_path, monkeypatch):
+    try:
+        ffmpeg = resolve_ffmpeg_executable()
+    except FFmpegUnavailableError:
+        pytest.skip("需要 FFmpeg")
+    video = tmp_path / "sample.mp4"
+    subprocess.run([
+        ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=3:size=160x240:rate=10",
+        "-c:v", "mpeg4", "-q:v", "3", str(video),
+    ], check=True, capture_output=True)
+    runs = tmp_path / "runs"
+    monkeypatch.setattr(server, "RUNS_DIR", runs)
+    monkeypatch.setattr(server, "BASE_DIR", tmp_path)
+    items = [
+        {"id": "full", "query": "自动结束", "video_path": str(video), "task_start_time": 0},
+        {"id": "bounded", "query": "指定结束", "video_path": str(video), "task_start_time": 0, "task_end_time": 1.5},
+    ]
+
+    def evidence(item):
+        frames = [Path(path) for path in item["frames"]]
+        metadata = json.loads((frames[0].parent / "keyframes.json").read_text(encoding="utf-8"))
+        return [(record["time"], hashlib.sha256(frame.read_bytes()).hexdigest())
+                for record, frame in zip(metadata["selected"], frames, strict=True)]
+
+    imported = await server.api_prepare_operation(OperationPrepareReq(items=items))
+    assert not imported["errors"]
+    assert imported["items"][0]["frames"][0] != imported["items"][1]["frames"][0]
+    for index, (raw, result) in enumerate(zip(items, imported["items"], strict=True)):
+        reference = prepare_session_operation_item(
+            raw, session_name="original-preparation", item_index=index, total_items=2,
+            base_dir=tmp_path, runs_dir=runs,
+        )
+        assert evidence(result) == evidence(reference)
 
 
 def test_session_prepare_uses_history_name_and_one_based_item_sequence(

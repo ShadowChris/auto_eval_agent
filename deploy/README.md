@@ -21,8 +21,12 @@ python -c "import sys; print(sys.executable)"
 python -c "import os, sys; print(os.path.dirname(sys.executable))"
 ```
 
-已有环境能运行项目时不需要重新安装依赖；新环境可先执行
-`python -m pip install -e ".[web,video]"`。
+新环境及从旧版升级到 v4.13 的任务类环境需要安装视频依赖，然后在启动或重启服务前运行抽帧检查。
+
+```bash
+python -m pip install -e ".[web,video]"
+python scripts/check_ffmpeg.py
+```
 
 ## 2. 复制模板，修改本机配置
 

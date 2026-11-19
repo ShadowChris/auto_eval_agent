@@ -34,7 +34,7 @@ web = [
     "openpyxl>=3.1",
     "xlrd>=2.0",
 ]
-video = ["imageio-ffmpeg>=0.6,<1"]  # Pip Wheel 内含常见平台的 FFmpeg 可执行文件
+video = ["imageio-ffmpeg>=0.6,<1", "opencv-python-headless>=4.10,<4.13"]
 data = ["pandas>=2.0", "openpyxl>=3.1", "xlrd>=2.0"]  # XLSX/XLS/CSV 数据集转换
 
 [project.scripts]

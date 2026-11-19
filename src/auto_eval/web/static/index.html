@@ -613,7 +613,7 @@
     </template>
     <div class="row">
       <span class="lbl">整体任务并发：</span>
-      <input aria-label="整体任务并发" type="number" min="1" max="64" v-model.number="concurrency" style="width:70px">
+      <input aria-label="整体任务并发" type="number" min="1" max="64" v-model.number="concurrency" style="width:70px" :title="mode === 'operation' ? '任务类批跑同时评估的题数上限。抽帧并发和待评估容量自动计算。' : null">
       <span class="hint">（当前批次同时处理的题目上限，包含视频下载、抽帧、阶段排队和模型评估）</span>
     </div>
     <div v-if="['operation', 'operation_multi_group'].includes(mode) && submitMode!=='append'" class="row">
@@ -633,7 +633,7 @@
         <button type="button" @click="savePipelineConfig" :disabled="pipelineBusy || !pipelineDirty">{{ pipelineBusy ? '处理中…' : '应用并保存' }}</button>
         <button type="button" @click="refreshPipelineConfig" :disabled="pipelineBusy">读取当前配置</button>
       </div>
-      <p class="hint">服务级共享上限：免重启生效，影响所有正在运行和后续批跑。降低上限不会中断已开始的阶段。抽帧/模型评估填 0 表示不额外限流，仍受整体任务并发和线程池约束；模型评估按题计数，不等同于 API 请求数。</p>
+      <p class="hint">服务级共享上限，保存后影响所有正在运行和后续批跑的阶段准入。抽帧填 0 使用每进程 12 槽的默认保护上限。模型评估填 0 沿用批次并发和供应商限速，按题计数。</p>
       <p v-if="pipelineMessage" class="provider-message" :class="{err:pipelineError,ok:!pipelineError}" role="status">{{ pipelineMessage }}</p>
     </div>
     <div class="row">

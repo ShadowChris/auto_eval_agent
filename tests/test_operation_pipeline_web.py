@@ -96,7 +96,8 @@ async def test_increasing_limit_releases_already_queued_stages(store, stage):
         await asyncio.sleep(0.07)
         assert not entered[1].is_set()
         values[key] = 2
-        store.save(values)
+        response = await asyncio.to_thread(TestClient(server.app).put, "/api/operation/pipeline-config", json=values)
+        assert response.status_code == 200
         await eventually(entered[1].is_set)
         assert video_pipeline._COUNTS[stage] == 2
     finally:
@@ -124,7 +125,8 @@ async def test_lowering_limit_waits_for_inflight_work_including_previous_unlimit
     try:
         await eventually(lambda: entered[0].is_set() and entered[1].is_set())
         values[key] = 1
-        store.save(values)
+        response = await asyncio.to_thread(TestClient(server.app).put, "/api/operation/pipeline-config", json=values)
+        assert response.status_code == 200
         tasks.append(asyncio.create_task(worker(2)))
         await asyncio.sleep(0.07)
         assert not entered[2].is_set()
