@@ -398,7 +398,7 @@ def test_prefix_frames_reuse_window_cache_and_never_include_future(tmp_path):
     calls = []
 
     def extract(video, directory, **kwargs):
-        calls.append((kwargs["task_start_time"], kwargs["task_end_time"]))
+        calls.append((kwargs["task_start_time"], kwargs["task_end_time"], kwargs["max_frames"]))
         frame = directory / "kf_001.jpg"
         Image.new("RGB", (10, 10), "red").save(frame)
         (directory / "keyframes.json").write_text(json.dumps({"selected": [{"time": kwargs["task_end_time"] - 1}]}))
@@ -420,7 +420,21 @@ def test_prefix_frames_reuse_window_cache_and_never_include_future(tmp_path):
             with pytest.raises(ValueError, match="旧时间窗策略"):
                 freeze_frames(unsafe, runs_dir=tmp_path / "runs")
             marker.write_text(original)
-    assert calls == [(0, 4), (4, 8), (8, 12)]
+    assert calls == [(0, 4, 15), (4, 8, 15), (8, 12, 15)]
+
+    shared_frames = list((tmp_path / "runs" / "videos" / "conversation_windows").glob("*/kf_001.jpg"))
+    assert len(shared_frames) == 3
+    for frame in shared_frames:
+        Image.new("RGB", (10, 10), "blue").save(frame)
+    repaired = prepare_session_operation_item(parsed()[1], session_name="prefixes", item_index=1, total_items=3,
+        base_dir=tmp_path, runs_dir=tmp_path / "runs", probe_fn=lambda _: 12, extract_fn=extract,
+        rebuild_dir=tmp_path / "scratch")
+    assert calls[-2:] == [(0, 4, 15), (4, 8, 15)]
+    assert [r["time"] for r in repaired["frame_manifest"]] == [3, 7]
+    assert [r["turn_index"] for r in repaired["frame_manifest"]] == [1, 2]
+    for frame in repaired["frames"]:
+        with Image.open(frame) as image:
+            assert image.getpixel((5, 5))[0] > 200
 
 
 def test_input_images_stay_round_scoped_in_history_and_results(tmp_path):
@@ -440,10 +454,15 @@ def test_input_images_stay_round_scoped_in_history_and_results(tmp_path):
     assert not earlier["turns"][0].get("query_images")
 
 
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="需要 FFmpeg")
 def test_last_frame_cannot_seek_across_round_boundary(tmp_path):
+    from auto_eval.media import FFmpegUnavailableError, resolve_ffmpeg_executable
+
+    try:
+        ffmpeg = resolve_ffmpeg_executable()
+    except FFmpegUnavailableError:
+        pytest.skip("需要 FFmpeg")
     video = tmp_path / "boundary.mp4"
-    subprocess.run([shutil.which("ffmpeg"), "-v", "error", "-f", "lavfi", "-i", "color=red:s=160x240:r=4:d=2",
+    subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=red:s=160x240:r=4:d=2",
         "-f", "lavfi", "-i", "color=blue:s=160x240:r=4:d=2", "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video)], check=True, capture_output=True)
     turns = source_rows()[:2]
@@ -452,6 +471,9 @@ def test_last_frame_cannot_seek_across_round_boundary(tmp_path):
     item = parsed(turns)[0]
     prepared = prepare_session_operation_item(item, session_name="boundary", item_index=0, total_items=2,
         base_dir=tmp_path, runs_dir=tmp_path / "runs")
+    metadata = json.loads((Path(prepared["frames"][0]).parent / "keyframes.json").read_text(encoding="utf-8"))
+    assert metadata["algorithm_version"] == "hybrid-state-v4.13"
+    assert 1 <= len(prepared["frames"]) <= 15
     for frame in prepared["frames"]:
         with Image.open(frame) as image:
             red, _, blue = image.convert("RGB").getpixel((20, 20))

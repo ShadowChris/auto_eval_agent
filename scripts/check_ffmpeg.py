@@ -6,12 +6,19 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import imageio_ffmpeg
-
-from auto_eval.media import KeyframeConfig, extract_scene_keyframes, probe_duration
+from auto_eval.media import probe_duration
+from auto_eval.operation_keyframes import extract_scene_keyframes
 
 
 def main() -> None:
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError('无法导入 OpenCV。请在当前环境执行 python -m pip install -e ".[web,video]"') from exc
+    print(f"[OK] OpenCV：{cv2.__version__}")
+
+    import imageio_ffmpeg
+
     ffmpeg = Path(imageio_ffmpeg.get_ffmpeg_exe()).resolve()
     if not ffmpeg.is_file():
         raise RuntimeError(f"Pip FFmpeg 可执行文件不存在：{ffmpeg}")
@@ -46,14 +53,8 @@ def main() -> None:
         frames = extract_scene_keyframes(
             video,
             frame_dir,
-            config=KeyframeConfig(
-                task_start_time=0,
-                task_end_time=1.8,
-                max_frames=6,
-                sample_fps=1,
-                max_edge=160,
-                protected_sample_interval=0,
-            ),
+            task_start_time=0,
+            task_end_time=1.8,
         )
 
         if not 1.5 <= duration <= 2.5:

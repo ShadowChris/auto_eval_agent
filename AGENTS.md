@@ -9,7 +9,7 @@ Application code is in `src/auto_eval/`. Keep domain models in `schema.py`, conf
 Use Python 3.10 or later. Install the editable package and development/web dependencies with:
 
 ```bash
-python -m pip install -e ".[dev,web]"
+python -m pip install -e ".[dev,web,video]"
 python -m pytest -q
 python -m uvicorn auto_eval.web.server:app --host 127.0.0.1 --port 8502
 ```

@@ -40,7 +40,8 @@ from ..analysis.operation_comparison import compare_operation_batches
 from ..analysis.operation_report import build_comparison_report, build_single_report
 from ..config import ExpertKnowledgeBase, load_config
 from ..expert_knowledge import ExpertKnowledgeStore, render_expert_knowledge
-from ..media import extract_scene_keyframes, probe_duration
+from ..media import extract_scene_keyframes as extract_visual_keyframes, probe_duration
+from ..operation_keyframes import extract_scene_keyframes
 from ..paths import RUNS_DIR
 from ..query_images import attachment_image_fields
 from ..report.operation import OPERATION_REPORT_ASSETS, build_operation_report_html
@@ -95,6 +96,7 @@ from .frame_preview import create_frame_preview_router
 from .pipeline_config import current_pipeline_config, save_pipeline_config
 from .operation_runs import EXECUTION_MODES, evaluation_snapshot, fork_items, validate_conversation_snapshot
 from .remote_video import cleanup_stale_video_downloads, is_remote_video_url, run_video_preparation
+from .video_pipeline import refresh_extraction_slots
 from .operation_comparison_import import (
     SUPPORTED_SUFFIXES as COMPARISON_IMPORT_SUFFIXES,
     import_operation_comparison_file,
@@ -429,8 +431,8 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
     return resolve_operation_video_path(raw_path, base_dir=BASE_DIR)
 
 
-def _prepare_operation_item(item: dict) -> dict:
-    return prepare_cached_operation_item(
+async def _prepare_operation_item(item: dict) -> dict:
+    return await prepare_cached_operation_item(
         item,
         base_dir=BASE_DIR,
         runs_dir=RUNS_DIR,
@@ -967,6 +969,7 @@ def api_operation_pipeline_config_save(req: OperationPipelineConfigReq):
         config = save_pipeline_config(req.model_dump())
     except (OSError, ValueError) as exc:
         raise HTTPException(500, "阶段并发配置保存失败，请检查服务端配置和写入权限") from exc
+    refresh_extraction_slots()
     return {"ok": True, "config": asdict(config)}
 
 
@@ -1975,7 +1978,7 @@ async def api_prepare_operation(req: OperationPrepareReq):
             try:
                 if item.get("input_error"):
                     raise ValueError(item["input_error"])
-                prepared = await run_video_preparation(_prepare_operation_item, item)
+                prepared = await _prepare_operation_item(item)
                 return index, prepared, None
             except Exception as exc:
                 line = item.get("source_line") or index + 1
@@ -2023,7 +2026,8 @@ async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation
     frame_dir = video_dir / f"{video_id}_frames"
 
     def prepare_upload() -> tuple[float, list]:
-        return probe_duration(video_path), extract_scene_keyframes(video_path, frame_dir)
+        extract = extract_scene_keyframes if mode == "operation" else extract_visual_keyframes
+        return probe_duration(video_path), extract(video_path, frame_dir)
 
     duration, frames = await run_video_preparation(
         prepare_upload, operation_pipeline=mode == "operation",
