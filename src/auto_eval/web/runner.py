@@ -751,12 +751,15 @@ async def _run(
             async with (batch.reserve() if batch is not None else sem) as ticket:
                 # 未准入的等待不计入单题耗时；之后的阶段等待仍计入。
                 started = time.perf_counter()
+                # 单题墙钟起点（epoch 秒）：逐题进度 started_at（毫秒，同既有口径）与结果行
+                # started_at 同源，评估平台按题记录「评估开始时刻」。
+                started_wall = time.time()
                 log_event(
                     "任务",
                     "开始评测",
                     progress=1,
                     progress_message="开始评测",
-                    progress_fields={"started_at": int(time.time() * 1000)},
+                    progress_fields={"started_at": int(started_wall * 1000)},
                 )
                 last_error = None
                 res = None
@@ -1122,6 +1125,12 @@ async def _run(
                         request_id=request_id,
                     )
             res["index"] = idx
+            # 单题评估起止墙钟（epoch 秒，同任务级 created_at/started_at 与结果行 last_rerun_at 口径）：
+            # 评估平台逐 query 时间线按题取「评估开始/结束时刻」。duration_s 仍是 perf_counter
+            # 口径的「准入 → 出结果」耗时，两者不互相推导。
+            finished_wall = time.time()
+            res["started_at"] = started_wall
+            res["finished_at"] = finished_wall
             if task.mode == "operation":
                 evidence_rows = [row for row in frame_items(item_dict) if id(row) not in invalid_frame_rows]
                 res["execution_mode"] = execution_mode
@@ -1220,6 +1229,9 @@ async def _run(
                 progress=100,
                 progress_message=("抽帧失败" if failed else "抽帧完成，待评估") if extract_only else ("评测失败" if failed else "评测完成"),
                 progress_status="error" if failed else "done",
+                # 终态事件带结束时刻（epoch 毫秒，同逐题进度 started_at 口径）：评估平台与
+                # 历史快照的逐题耗时不再依赖事件 updated_at 或查看时刻。
+                progress_fields={"finished_at": int(finished_wall * 1000)},
             )
             await task.publish(
                 "result",
