@@ -116,6 +116,12 @@ def _record_progress(task: Task, item_index: int, payload: dict) -> dict:
     return event_payload
 
 
+def _item_finished_ms(res: dict) -> int:
+    """逐题终态进度事件的结束时刻（epoch 毫秒，同 started_at 口径）。"""
+    # 取结果行 finished_at（one() 落的墙钟终点）；连坐失败 / 未开始即停止的行没有，退当前时刻。
+    return int(float(res.get("finished_at") or time.time()) * 1000)
+
+
 def reset_item_progress(task: Task, indexes: list[int]) -> None:
     """重跑前重置所选条目的逐题进度：清掉上一轮的事件序列与终态
     （done/error、percent 100），回落「排队中（重跑）」并即时 fanout——
@@ -371,6 +377,7 @@ def _make_item_evaluator(
             progress=100,
             progress_message="评测失败" if failed else "评测完成",
             progress_status="error" if failed else "done",
+            progress_fields={"finished_at": _item_finished_ms(res)},
         )
         await task.publish(
             "result",
@@ -446,12 +453,15 @@ def _make_item_evaluator(
                 progress_message="排队等待评测",
             )
             started = time.perf_counter()
+            # 单题墙钟起点（epoch 秒）：逐题进度 started_at（毫秒，同既有口径）与结果行
+            # started_at 同源，评估平台按题记录「评估开始时刻」。
+            started_wall = time.time()
             log_event(
                 "任务",
                 "开始评测",
                 progress=1,
                 progress_message="开始评测",
-                progress_fields={"started_at": int(time.time() * 1000)},
+                progress_fields={"started_at": int(started_wall * 1000)},
             )
             last_error = None
             res = None
@@ -613,6 +623,11 @@ def _make_item_evaluator(
                     request_id=request_id,
                 )
             res["index"] = idx
+            # 单题评估起止墙钟（epoch 秒）：评估平台逐 query 时间线按题取「评估开始 / 结束时刻」。
+            # 覆盖成功与失败两条路径；调用方传入的 started 仍是 perf_counter 口径，仅用于日志耗时。
+            finished_wall = time.time()
+            res["started_at"] = started_wall
+            res["finished_at"] = finished_wall
             if pending_judge_traces:
                 await asyncio.to_thread(
                     flush_web_trace_records,
@@ -989,6 +1004,7 @@ async def _run_update_batch_body(
             progress=100,
             progress_message="评测失败" if failed else "评测完成",
             progress_status="error" if failed else "done",
+            progress_fields={"finished_at": _item_finished_ms(res)},
         )
         await task.publish(
             "result",
