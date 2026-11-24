@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import hashlib
 import ipaddress
 import json
 import os
@@ -100,8 +101,12 @@ def test_download_preserves_signed_query_host_and_tls_server_name(tmp_path, netw
         requests.append(request)
         return httpx.Response(200, content=b"video", headers={"content-type": "application/octet-stream"})
     network(handler)
-    video = remote_video.download_remote_video("https://cdn.test/download?token=secret", tmp_path)
+    digests = []
+    video = remote_video.download_remote_video(
+        "https://cdn.test/download?token=secret", tmp_path, record_digest=digests.append,
+    )
     assert video.read_bytes() == b"video"
+    assert digests == [hashlib.sha256(b"video").hexdigest()]
     assert requests[0].url.host == "93.184.216.34"
     assert requests[0].headers["host"] == "cdn.test"
     assert requests[0].url.query == b"token=secret"

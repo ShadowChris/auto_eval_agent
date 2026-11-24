@@ -5,6 +5,7 @@ import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
+import hashlib
 import math
 from pathlib import Path
 import shutil
@@ -112,6 +113,7 @@ def _check_stop(cancel: threading.Event | None, deadline: float) -> None:
 
 def download_remote_video(
     url: str, directory: Path, *, config: RemoteVideoConfig | None = None,
+    record_digest: Callable[[str], None] | None = None,
 ) -> Path:
     """下载到调用方拥有的临时目录；失败不留下半文件，不返回原始签名错误。"""
     cfg = config or load_remote_video_config()
@@ -162,6 +164,7 @@ def download_remote_video(
                             if length.isdigit() and int(length) > max_bytes:
                                 raise ValueError(f"远程视频超过 {cfg.max_size_mb:g}MB 大小限制")
                             size = 0
+                            digest = hashlib.sha256() if record_digest is not None else None
                             with part.open("wb") as handle:
                                 for chunk in response.iter_bytes():
                                     _check_stop(cancel, deadline)
@@ -169,10 +172,14 @@ def download_remote_video(
                                     if size > max_bytes:
                                         raise ValueError(f"远程视频超过 {cfg.max_size_mb:g}MB 大小限制")
                                     handle.write(chunk)
+                                    if digest is not None:
+                                        digest.update(chunk)
                             _check_stop(cancel, deadline)
                             if not size:
                                 raise ValueError("远程视频为空文件")
                             part.replace(target)
+                            if digest is not None:
+                                record_digest(digest.hexdigest())
                             return target
                         finally:
                             response.close()
@@ -196,7 +203,9 @@ def download_remote_video(
 
 
 @contextmanager
-def local_video_input(raw: str, runs_dir: Path) -> Iterator[Path | None]:
+def local_video_input(
+    raw: str, runs_dir: Path, *, record_digest: Callable[[str], None] | None = None,
+) -> Iterator[Path | None]:
     """本地输入不处理；远程输入只在本次准备期间持有临时原视频。"""
     prepared = _PREPARED_INPUT.get()
     if prepared is not None and prepared[0] == raw:
@@ -217,7 +226,10 @@ def local_video_input(raw: str, runs_dir: Path) -> Iterator[Path | None]:
                 "视频准备", "下载远程视频", details={"视频链接": video_reference_for_log(raw)},
                 progress=4, progress_message="正在下载远程视频",
             )
-            yield download_remote_video(raw, directory)
+            if record_digest is None:
+                yield download_remote_video(raw, directory)
+            else:
+                yield download_remote_video(raw, directory, record_digest=record_digest)
         finally:
             with _LOCK:
                 _ACTIVE.discard(directory.resolve())

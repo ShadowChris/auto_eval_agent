@@ -1,4 +1,4 @@
-"""任务类阶段资源配置，不改变批跑接口的 concurrency 含义。"""
+"""任务类下载、抽帧和模型阶段的服务级资源配置。"""
 from dataclasses import asdict, dataclass, fields
 from functools import lru_cache
 import json
