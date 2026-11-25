@@ -448,9 +448,15 @@ def test_frontend_rerun_progress_static_asserts():
     # rerunMode 标志 + 提交重跑预置 pending 行（与后端重置互为幂等）
     assert "const rerunMode = ref(false);" in app_js
     assert 'message: "排队中（重跑）"' in app_js
-    # result 事件批次口径分支：重跑中忽略无 batch 标记的回放事件
-    assert "if (d.batch) {" in app_js
-    assert "else if (!rerunMode.value)" in app_js
+    # 重跑头部进度按本次选中 index 聚合，不使用后端单批的 progress/total
+    assert "let rerunExpectedIndexes = new Set();" in app_js
+    assert "let rerunCompletedIndexes = new Set();" in app_js
+    assert "function setRerunProgress(indexes, fallbackTotal = 0)" in app_js
+    assert "progress.value = rerunCompletedIndexes.size;" in app_js
+    assert "total.value = d.total;" not in app_js
+    # 重跑中只让实时 batch 结果更新逐题完成态，忽略断线回放的旧 result
+    assert "if (rerunMode.value) {" in app_js
+    assert "if (index != null && (!rerunMode.value || d.batch))" in app_js
     # 历史快照字符串键双键回落（快照 item_progress 键为 str(idx)）
     assert "itemProgress.value[String(index)]" in app_js
     assert "progressEvents.value[String(index)]" in app_js

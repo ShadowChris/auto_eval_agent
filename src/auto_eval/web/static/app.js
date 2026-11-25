@@ -141,9 +141,34 @@ createApp({
     // 手动重跑：结果表行内勾选（index 数组，随翻页/筛选存活），提交走 /api/eval/rerun
     const rerunSelection = ref([]);
     const rerunSubmitting = ref(false);
-    // 重跑进行中：头部计数切「重跑中… k/N」（批内口径），并忽略无 batch
-    // 标记的 result 事件（全量跑/断线回放），避免把 k/N 打回旧值
+    // 重跑进行中：头部按本次选中 index 聚合计数，不直接使用后端的批内进度。
+    // 一次重跑可能拆成多个并发批，每个批的 progress/total 只描述该批。
     const rerunMode = ref(false);
+    let rerunExpectedIndexes = new Set();
+    let rerunCompletedIndexes = new Set();
+
+    function clearRerunProgress() {
+      rerunExpectedIndexes = new Set();
+      rerunCompletedIndexes = new Set();
+    }
+
+    function setRerunProgress(indexes, fallbackTotal = 0) {
+      const normalized = [...new Set(
+        indexes.filter((index) => Number.isInteger(index))
+      )];
+      rerunExpectedIndexes = new Set(normalized);
+      rerunCompletedIndexes = new Set();
+      total.value = normalized.length || fallbackTotal;
+      progress.value = 0;
+    }
+
+    function markRerunProgressDone(index) {
+      if (!Number.isInteger(index) || !rerunExpectedIndexes.has(index)) return false;
+      if (rerunCompletedIndexes.has(index)) return false;
+      rerunCompletedIndexes.add(index);
+      progress.value = rerunCompletedIndexes.size;
+      return true;
+    }
 
     const formatHint = computed(
       () =>
@@ -478,8 +503,7 @@ createApp({
         rerunMode.value = true;
         taskPaused.value = false;
         taskStopped.value = false;
-        total.value = indexes.length;
-        progress.value = 0;
+        setRerunProgress(indexes);
         // 与 submit() 同形预置所选行 pending：mergeItemProgress 的 stage_rank
         // 只前进、finished_at 一经设置就保留，不重置会永远停在上一轮「完成」。
         // 与后端 reset_item_progress 互为幂等（SSE 回放也会推来 pending 态）。
@@ -1038,6 +1062,7 @@ createApp({
         ])
       );
       running.value = true;
+      clearRerunProgress();
       rerunMode.value = false; // 全量跑：计数器回到全量口径
       taskPaused.value = false;
       taskStopped.value = false;
@@ -1186,15 +1211,15 @@ createApp({
         const result = d.result;
         const index = result && result.index;
         upsertResultRow(result);
-        // 重跑批次的 result 事件带 batch 标记：progress/total 为批内口径（k/N）；
-        // 无标记的是全量跑或断线回放的旧事件，重跑中忽略，避免 k/N 被打回旧值
-        if (d.batch) {
-          progress.value = d.progress;
-          total.value = d.total;
-        } else if (!rerunMode.value) {
+        // 重跑按本次选中的 index 去重计数；d.progress/d.total 只是当前批内口径。
+        if (rerunMode.value) {
+          if (d.batch) markRerunProgressDone(index);
+        } else {
           progress.value = d.progress;
         }
-        if (index != null) {
+        // 重跑订阅回放时会先推旧 result（无 batch 标记），不能让它们覆盖刚重置的
+        // pending 状态；只有实时批次结果才更新逐题完成态。
+        if (index != null && (!rerunMode.value || d.batch)) {
           const previous = itemProgress.value[index] || {};
           itemProgress.value[index] = {
             ...previous,
@@ -1212,6 +1237,7 @@ createApp({
         resultPage.value = 1;
         running.value = false;
         rerunMode.value = false;
+        clearRerunProgress();
         taskPaused.value = false;
         taskStopped.value = false;
         es.close();
@@ -1229,6 +1255,7 @@ createApp({
         } catch (_) {}
         running.value = false;
         rerunMode.value = false;
+        clearRerunProgress();
         taskPaused.value = false;
         if (stopped) taskStopped.value = true;
         es.close();
@@ -1607,11 +1634,14 @@ createApp({
         // worker 弹出 status 即转 running，rerunMode 据此自然回流，不把排队当重跑。
         rerunMode.value = d.status !== "running" && d.status !== "pending" && d.status !== "queued";
         if (rerunMode.value) {
-          const pendingCount = Object.values(d.item_progress || {}).filter(
-            (p) => p && p.status === "pending"
-          ).length;
-          progress.value = 0;
-          total.value = pendingCount || total.value;
+          // 历史重连只按尚未完成的项继续计数，避免把以前的旧结果误算成本次完成。
+          const pendingIndexes = Object.entries(d.item_progress || {})
+            .filter(([, progressItem]) => progressItem && progressItem.status === "pending")
+            .map(([index]) => Number(index))
+            .filter((index) => Number.isInteger(index));
+          setRerunProgress(pendingIndexes, total.value);
+        } else {
+          clearRerunProgress();
         }
         running.value = true;
         taskPaused.value = Boolean(d.paused);
@@ -1620,6 +1650,7 @@ createApp({
       } else {
         running.value = false;
         rerunMode.value = false;
+        clearRerunProgress();
         taskPaused.value = false;
         taskStopped.value = false;
       }
