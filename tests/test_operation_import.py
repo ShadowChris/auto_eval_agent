@@ -232,7 +232,7 @@ def test_operation_video_path_rejects_ambiguous_relative_path(
 
 @pytest.mark.asyncio
 async def test_batch_prepare_isolates_item_errors(monkeypatch: pytest.MonkeyPatch):
-    async def fake_prepare(item):
+    async def fake_prepare(item, *, keyframe_version):
         if item["query"] == "bad":
             raise ValueError("视频不存在")
         return {**item, "frames": ["one.jpg"], "media": ["one.mp4"]}

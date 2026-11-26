@@ -94,7 +94,17 @@ from .operation_groups import align_operation_groups
 from .comparison_uploads import ComparisonUploadStore
 from .frame_preview import create_frame_preview_router
 from .pipeline_config import current_pipeline_config, save_pipeline_config
-from .operation_runs import EXECUTION_MODES, evaluation_snapshot, fork_items, validate_conversation_snapshot
+from .operation_runs import EXECUTION_MODES, fork_items, validate_conversation_snapshot
+from .operation_versions import (
+    DEFAULT_KEYFRAME_VERSION,
+    OperationVersionDefaults,
+    current_version_defaults,
+    get_keyframe_version,
+    list_versions,
+    pin_operation_versions,
+    save_version_defaults,
+    standard_details,
+)
 from .remote_video import cleanup_stale_video_downloads, is_remote_video_url, run_video_preparation
 from .video_pipeline import refresh_extraction_slots
 from .operation_comparison_import import (
@@ -206,6 +216,7 @@ class SingleEvalReq(BaseModel):
 class OperationPrepareReq(BaseModel):
     items: list[dict]
     concurrency: int = 2
+    keyframe_version: str | None = None
 
 
 class OperationPipelineConfigReq(BaseModel):
@@ -431,13 +442,15 @@ def _resolve_operation_video_path(raw_path: str) -> Path:
     return resolve_operation_video_path(raw_path, base_dir=BASE_DIR)
 
 
-async def _prepare_operation_item(item: dict) -> dict:
+async def _prepare_operation_item(item: dict, *, keyframe_version: str | None = None) -> dict:
+    version = get_keyframe_version(keyframe_version or current_version_defaults().keyframe_version)
     return await prepare_cached_operation_item(
         item,
         base_dir=BASE_DIR,
         runs_dir=RUNS_DIR,
         probe_fn=probe_duration,
-        extract_fn=extract_scene_keyframes,
+        extract_fn=extract_scene_keyframes if version.id == DEFAULT_KEYFRAME_VERSION else version.extract,
+        keyframe_version=version.id,
     )
 
 
@@ -963,6 +976,30 @@ def api_operation_pipeline_config():
     return asdict(current_pipeline_config())
 
 
+@app.get("/api/operation/versions")
+def api_operation_versions() -> dict:
+    return list_versions()
+
+
+@app.get("/api/operation/versions/standards/{version}")
+def api_operation_standard_details(version: str) -> dict:
+    try:
+        return standard_details(version)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/operation/versions/defaults")
+def api_operation_version_defaults(defaults: OperationVersionDefaults) -> dict:
+    try:
+        save_version_defaults(defaults)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, "无法保存任务类默认版本") from exc
+    return {"defaults": defaults.model_dump()}
+
+
 @app.put("/api/operation/pipeline-config")
 def api_operation_pipeline_config_save(req: OperationPipelineConfigReq):
     try:
@@ -1137,7 +1174,7 @@ def api_publish_operation_knowledge():
         published = _operation_knowledge_store().publish()
     except FileNotFoundError as exc:
         raise HTTPException(409, str(exc)) from exc
-    # 新任务读取新版本；已经启动的任务仍持有原 AppConfig，保证单次批跑可复现。
+    # 更新专家知识来源及兼容配置；不可变标准包不受影响。
     _state["cfg"] = load_config(CONFIG_DIR)
     return {
         "ok": True,
@@ -1355,6 +1392,9 @@ async def api_eval(req: EvalReq):
         ):
             raise HTTPException(409, "目标历史评估集仍有单题任务在执行")
         append_options = dict(append_task.options or {})
+        for key in ("keyframe_version", "standard_version"):
+            if key in req.options and req.options[key] != append_options.get(key):
+                raise HTTPException(422, "追加必须沿用原版本；如需切换版本，请新建任务")
         for key in (
             "concurrency", "eval_timeout_s", "eval_timeout",
             "request_rate_limit",
@@ -1379,13 +1419,15 @@ async def api_eval(req: EvalReq):
         app_cfg,
     )
     try:
+        if req.mode == "operation" and append_task is None:
+            requested_options = pin_operation_versions(requested_options)
         task_options, runtime_cfg = _normalize_eval_options(
             app_cfg,
             requested_options,
         )
     except KeyError as exc:
         raise HTTPException(422, f"Provider 不存在：{exc.args[0]}") from exc
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         raise HTTPException(422, str(exc)) from exc
     if req.mode == "operation":
         try:
@@ -1753,6 +1795,9 @@ async def api_eval(req: EvalReq):
         "action": action,
         "item_indices": item_indices,
         "dataset_size": active_total(task.items),
+        "operation_versions": {
+            key: task.options[key] for key in ("keyframe_version", "standard_version") if key in task.options
+        },
         "append_id": (task.active_append or {}).get("append_id"),
         "merge_summary": merge_summary if append_task is not None else None,
     }
@@ -1775,14 +1820,16 @@ async def api_eval_single(req: SingleEvalReq):
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
     if task is None:
+        try:
+            options = pin_operation_versions({
+                "judges": [judge_name], "concurrency": single_concurrency, "submission_source": "single_api",
+            })
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from exc
         task = new_task(
             "operation",
             [item],
-            {
-                "judges": [judge_name],
-                "concurrency": single_concurrency,
-                "submission_source": "single_api",
-            },
+            options,
             dataset_name=dataset_name or task_id,
             task_id=task_id,
         )
@@ -1967,6 +2014,9 @@ async def api_prepare_operation(req: OperationPrepareReq):
         raise HTTPException(400, "items 为空")
     from ..operation_conversation import normalize_operation_batch
     try:
+        version = get_keyframe_version(
+            req.keyframe_version if req.keyframe_version is not None else current_version_defaults().keyframe_version,
+        )
         req = req.model_copy(update={"items": normalize_operation_batch(req.items)})
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -1978,7 +2028,7 @@ async def api_prepare_operation(req: OperationPrepareReq):
             try:
                 if item.get("input_error"):
                     raise ValueError(item["input_error"])
-                prepared = await _prepare_operation_item(item)
+                prepared = await _prepare_operation_item(item, keyframe_version=version.id)
                 return index, prepared, None
             except Exception as exc:
                 line = item.get("source_line") or index + 1
@@ -2003,8 +2053,17 @@ async def api_prepare_operation(req: OperationPrepareReq):
     }
 
 @app.post("/api/upload/video")
-async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation"):
+async def api_upload_video(
+    file: UploadFile = File(...), mode: Mode = "operation", keyframe_version: str | None = None,
+):
     """上传视觉评估录屏；富内容模式延迟到开始评估时使用专用参数抽帧。"""
+    try:
+        version = (
+            get_keyframe_version(keyframe_version if keyframe_version is not None else current_version_defaults().keyframe_version)
+            if mode == "operation" else None
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     data = await file.read()
     if len(data) > 20 * 1024 * 1024:
         raise HTTPException(413, "视频过大，限制 ≤20MB")
@@ -2026,7 +2085,7 @@ async def api_upload_video(file: UploadFile = File(...), mode: Mode = "operation
     frame_dir = video_dir / f"{video_id}_frames"
 
     def prepare_upload() -> tuple[float, list]:
-        extract = extract_scene_keyframes if mode == "operation" else extract_visual_keyframes
+        extract = extract_visual_keyframes if version is None else version.extract_configured
         return probe_duration(video_path), extract(video_path, frame_dir)
 
     duration, frames = await run_video_preparation(
@@ -2955,7 +3014,8 @@ async def api_operation_fork(task_id: str, req: OperationForkReq):
         "concurrency", "request_rate_limit", "eval_timeout_s", "video_prepare_timeout_s",
         "operation_layout", "operation_groups", "alignment_summary", "judge_backend",
     }}
-    for key in ("concurrency", "request_rate_limit", "eval_timeout_s", "judge_backend"):
+    for key in ("concurrency", "request_rate_limit", "eval_timeout_s", "judge_backend",
+                "standard_version", "keyframe_version"):
         if key in req.options:
             options[key] = req.options[key]
     options.update({
@@ -2965,11 +3025,10 @@ async def api_operation_fork(task_id: str, req: OperationForkReq):
         "evaluation_timestamp": (source.get("options") or {}).get("evaluation_timestamp") or source.get("created_at"),
     })
     try:
-        # 新版本读取当前已发布 YAML 标准；原版本的配置快照不会被改动。
+        # 新任务锁定选定版本；原任务的规则及帧归档保持不动。
         latest = await asyncio.to_thread(load_config, CONFIG_DIR)
-        options, runtime_cfg = _normalize_eval_options(latest, _with_operation_eval_persona(latest, "operation", options))
-        if req.execution_mode != "extract_only":
-            options["evaluation_snapshot"] = evaluation_snapshot(runtime_cfg)
+        options = pin_operation_versions(_with_operation_eval_persona(latest, "operation", options))
+        options, runtime_cfg = _normalize_eval_options(latest, options)
         items = await asyncio.to_thread(
             fork_items, source, indices, reuse_frames=req.action == "reuse_frames", runs_dir=RUNS_DIR,
         )

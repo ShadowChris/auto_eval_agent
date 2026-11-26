@@ -12,6 +12,7 @@ from auto_eval.judges.rubric_judge import RubricJudge
 from auto_eval.judges.prompts import OPERATION_SYSTEM
 from auto_eval.web import history, operation_runs, runner, server, tasks
 from auto_eval.web.operation_runs import evaluation_snapshot, freeze_frames, fork_items, verify_frames
+from auto_eval.web.operation_versions import DEFAULT_KEYFRAME_VERSION, LEGACY_KEYFRAME_VERSION, pin_operation_versions
 from auto_eval.web.server import OperationForkReq
 from auto_eval.web.tasks import Task
 
@@ -128,6 +129,40 @@ async def test_full_mode_rebuilds_missing_frames_while_evaluate_only_never_does(
     assert len(prepared) == 1
     assert task.items[0]["frame_set_id"] != old_version
     assert task.results[0]["correctness"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_selected_algorithm_never_reuses_a_different_archived_algorithm(runtime, monkeypatch):
+    root, cfg = runtime
+    item = legacy_item(root)
+
+    def mark_algorithm(row, algorithm):
+        (Path(row["frames"][0]).parent / "keyframes.json").write_text(json.dumps({
+            "algorithm_version": algorithm, "selected": [{"index": 1, "time": 3.5}],
+        }))
+    mark_algorithm(item, DEFAULT_KEYFRAME_VERSION)
+    freeze_frames(item, runs_dir=root)
+    original_frames = list(item["frames"])
+
+    def prepare(row, **kwargs):
+        assert "frames" not in row
+        assert kwargs["keyframe_version"] == LEGACY_KEYFRAME_VERSION
+        prepared = {**row, "frames": legacy_item(root, "reextracted", b"legacy algorithm")["frames"]}
+        mark_algorithm(prepared, LEGACY_KEYFRAME_VERSION)
+        return prepared
+
+    async def judge(*args, **kwargs):
+        return {"correctness": "ok", "category": "operation"}
+
+    monkeypatch.setattr(runner, "prepare_session_operation_item", prepare)
+    monkeypatch.setattr(runner, "_eval_one", judge)
+    task = Task(id="switch-algorithm", mode="operation", items=[item],
+                options=pin_operation_versions({"execution_mode": "full", "keyframe_version": LEGACY_KEYFRAME_VERSION}))
+    await runner.run_eval(task, cfg)
+    assert task.results[0]["keyframe_version"] == LEGACY_KEYFRAME_VERSION
+    assert task.results[0]["standard_version"] == task.options["standard_version"]
+    assert Path(original_frames[0]).read_bytes() == b"old"
+    assert task.items[0]["frames"] != original_frames
 
 
 def test_extraction_summary_has_no_effect_statistics_after_history_normalization(runtime):

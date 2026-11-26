@@ -287,11 +287,14 @@ async def test_single_eval_api_creates_operation_task_with_end_user(monkeypatch)
     }
     assert task.mode == "operation"
     assert task.dataset_name == "接口冒烟集"
-    assert task.options == {
+    assert {key: task.options[key] for key in ("judges", "concurrency", "submission_source")} == {
         "judges": ["judge_2"],
         "concurrency": 35,
         "submission_source": "single_api",
     }
+    assert task.options["keyframe_version"] == "hybrid-state-v4.13"
+    assert task.options["standard_version"] == "operation-v1.0"
+    assert task.options["evaluation_snapshot"]["policy_hash"]
     assert task.items[0]["id"] == "simple_001"
     assert task.items[0]["source_data"]["custom_field"] == "保留"
     assert task.items[0]["source_data"]["session_id"] == "session-1"

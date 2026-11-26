@@ -18,6 +18,7 @@ def run_actions_script(assertions: str) -> None:
     modes = js[js.index("    const versionModes = ["):js.index("    const pipelineConfig =")]
     counters = js[js.index("    const activeTaskItemCount ="):js.index("    const unfinishedRerunRows =")]
     functions = js[js.index("    async function createTaskVersion("):js.index("    function exportCsv()")]
+    version_options = js[js.index("    function operationVersionOptions("):js.index("    async function loadOperationVersions(")]
     selection = js[js.index("    function selectFailedResults()"):js.index("    function clearRerunSelection()")]
     unfinished = js[js.index("    const unfinishedRerunRows ="):js.index("    const allPagedResultsSelected =")]
     script = """
@@ -26,6 +27,7 @@ def run_actions_script(assertions: str) -> None:
     const computed = fn => ({get value() { return fn(); }});
     const taskId = ref('source'), running = ref(false), versionBusy = ref(false);
     const versionMode = ref('evaluate_only'), versionScope = ref('all'), versionName = ref('');
+    const forkKeyframeVersion = ref('hybrid-state-v3.2.0'), forkStandardVersion = ref('operation-v1.0');
     const selectedProviderId = ref(''), selectedProviderModel = ref('');
     const concurrency = ref(35), evalTimeout = ref(300), loadedTaskOptions = ref({});
     const items = ref([{id:'a'}, {id:'b'}, {id:'c'}, {id:'d',dataset_status:'excluded'}]);
@@ -42,7 +44,7 @@ def run_actions_script(assertions: str) -> None:
     const loadHistoryTask = async () => {}, loadHistory = () => {};
     const requestRateLimitPayload = () => ({max_requests:9,window_seconds:1});
     const providerApiErrorText = () => 'failure';
-    """ + modes + counters + unfinished + functions + selection + "\n(async () => {\n" + assertions + "\n})().catch(error => {console.error(error);process.exit(1);});"
+    """ + modes + counters + unfinished + version_options + functions + selection + "\n(async () => {\n" + assertions + "\n})().catch(error => {console.error(error);process.exit(1);});"
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
 
 
@@ -86,6 +88,8 @@ def test_version_modes_use_correct_fork_payload_and_filter_selected_items():
       assert.equal(request.body.action, action);
       assert.equal(request.body.execution_mode, mode);
       assert.equal(request.body.item_indices, null);
+      assert.equal(request.body.options.keyframe_version, mode === 'evaluate_only' ? undefined : forkKeyframeVersion.value);
+      assert.equal(request.body.options.standard_version, mode === 'extract_only' ? undefined : forkStandardVersion.value);
     }
     versionScope.value = 'selected';
     selectedRerunIndices.value = new Set([3,2,99,-1,0]);
@@ -113,6 +117,8 @@ def test_extraction_quick_action_is_independent_of_new_version_form():
     assert.equal(requests[0].body.execution_mode, 'evaluate_only');
     assert.equal(requests[0].body.item_indices, null);
     assert.equal(requests[0].body.dataset_name, '');
+    assert.equal(requests[0].body.options.keyframe_version, undefined);
+    assert.equal(requests[0].body.options.standard_version, undefined);
     assert.equal(versionName.value, '未提交的名称');
     assert.ok(confirmations[0].includes('3 条'));
     """)

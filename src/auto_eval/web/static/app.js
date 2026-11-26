@@ -190,15 +190,32 @@ createApp({
     const providerForm = ref(emptyProviderForm());
     const concurrency = ref(35);
     const executionMode = ref("full");
+    const operationVersions = ref({ defaults: {}, keyframes: [], standards: [] });
+    const selectedKeyframeVersion = ref("");
+    const selectedStandardVersion = ref("");
+    const forkKeyframeVersion = ref("");
+    const forkStandardVersion = ref("");
+    const versionDefaultsDraft = ref({});
+    const viewedStandard = ref("");
+    const standardDetails = ref(null);
+    const versionCatalogMessage = ref("");
+    const versionCatalogError = ref(false);
+    const versionDefaultsBusy = ref(false);
+    const standardRuleSections = [
+      ["scope_rules", "评估范围"], ["single_turn_scope_rules", "单轮范围"],
+      ["multi_turn_rules", "多轮规则"], ["evidence_rules", "视觉证据规则"],
+      ["query_image_rules", "用户输入图片"], ["conditional_rules", "条件任务"],
+      ["low_level_rules", "低级错误"], ["prior_knowledge", "通用先验"],
+    ];
     const versionBusy = ref(false);
     const versionName = ref("");
     const versionScope = ref("all");
     const versionPanelOpen = ref(false);
     const versionMode = ref("evaluate_only");
     const versionModes = [
-      { value: "evaluate_only", action: "reuse_frames", label: "复用抽帧进行评估", description: "使用已有帧，不下载或重新抽帧；用当前模型和已发布标准生成新评估结果。" },
+      { value: "evaluate_only", action: "reuse_frames", label: "复用抽帧进行评估", description: "使用已有帧，不下载或重新抽帧；用选定的模型和标准生成新评估结果。" },
       { value: "extract_only", action: "refresh_frames", label: "重新抽帧", description: "重新读取视频并抽帧，不调用评估模型；原有帧版本不会被覆盖。" },
-      { value: "full", action: "refresh_frames", label: "重新抽帧并评估", description: "重新读取视频、抽帧并评估；使用当前模型和已发布标准。" },
+      { value: "full", action: "refresh_frames", label: "重新抽帧并评估", description: "重新读取视频、按选定版本抽帧并评估。" },
     ];
     const selectedVersionMode = computed(() => versionModes.find(option => option.value === versionMode.value) || versionModes[0]);
     const pipelineConfig = ref({ download_concurrency: 10, extraction_concurrency: 0, model_concurrency: 0 });
@@ -777,7 +794,7 @@ createApp({
         knowledgeDraft.value = cloneKnowledge(data.published);
         knowledgeHasDraft.value = false;
         knowledgeError.value = false;
-        knowledgeMessage.value = `已发布 v${data.published.version}，新启动的评测任务将使用此版本。`;
+        knowledgeMessage.value = `已更新来源配置 v${data.published.version}；不会改变已发布的标准包，供打包下一标准版本使用。`;
       } catch (error) {
         knowledgeError.value = true;
         knowledgeMessage.value = `发布失败：${error.message}`;
@@ -1728,7 +1745,11 @@ createApp({
       it.uploading = true; it.uploadError = "";
       const fd = new FormData(); fd.append("file", file);
       try {
-        const r = await fetch(`/api/upload/video?mode=${encodeURIComponent(mode.value)}`, { method: "POST", body: fd });
+        const params = new URLSearchParams({ mode: mode.value });
+        if (mode.value === "operation" && selectedKeyframeVersion.value) {
+          params.set("keyframe_version", selectedKeyframeVersion.value);
+        }
+        const r = await fetch(`/api/upload/video?${params}`, { method: "POST", body: fd });
         if (!r.ok) { it.uploadError = "上传失败 " + r.status; return; }
         const d = await r.json();
         it.videoName = file.name;
@@ -2236,6 +2257,8 @@ createApp({
           } : {}),
           concurrency: concurrency.value,
           ...(["operation", "operation_multi_group"].includes(mode.value) ? { execution_mode: executionMode.value } : {}),
+          ...(!isAppendSubmit && ["operation", "operation_multi_group"].includes(mode.value)
+            ? operationVersionOptions(executionMode.value, selectedKeyframeVersion.value, selectedStandardVersion.value) : {}),
           request_rate_limit: requestRateLimit,
           eval_timeout_s: evalTimeout.value,
           ...(isMultiGroupMode.value ? {
@@ -2297,7 +2320,9 @@ createApp({
       }
       appendPreviewing.value = false;
       taskId.value = d.task_id;
-      loadedTaskOptions.value = body.options;
+      loadedTaskOptions.value = { ...body.options, ...d.operation_versions };
+      forkKeyframeVersion.value = loadedTaskOptions.value.keyframe_version || "";
+      forkStandardVersion.value = loadedTaskOptions.value.standard_version || "";
       eventCursor.value = 0;
       if (isAppendSubmit) {
         clearAppendConflictPreview();
@@ -3682,6 +3707,8 @@ createApp({
         barChartRefs.value = [];
         const options = d.options || {};
         loadedTaskOptions.value = options;
+        forkKeyframeVersion.value = options.keyframe_version || "";
+        forkStandardVersion.value = options.standard_version || "";
         executionMode.value = options.execution_mode || "full";
         versionName.value = "";
         versionScope.value = "all";
@@ -3746,6 +3773,8 @@ createApp({
             options: {
               concurrency: concurrency.value, eval_timeout_s: evalTimeout.value,
               request_rate_limit: requestRateLimitPayload(),
+              ...operationVersionOptions(nextMode, overrides.keyframeVersion ?? forkKeyframeVersion.value,
+                overrides.standardVersion ?? forkStandardVersion.value),
               judge_backend: selectedProviderId.value ? {
                 provider_id: selectedProviderId.value, model: selectedProviderModel.value,
               } : null,
@@ -3767,7 +3796,7 @@ createApp({
     async function evaluatePreparedFrames() {
       if (loadedTaskOptions.value.execution_mode !== "extract_only") return;
       // The quick action always uses the whole task, independently of the new-version form.
-      await createTaskVersion("reuse_frames", "evaluate_only", { scope: "all", name: "" });
+      await createTaskVersion("reuse_frames", "evaluate_only", { scope: "all", name: "", standardVersion: "" });
     }
 
     function exportCsv() {
@@ -4239,6 +4268,82 @@ createApp({
       pipelineAppliedConfig.value = { ...snapshot };
     }
 
+    function operationVersionOptions(execution, keyframes, standard) {
+      return {
+        ...(execution !== "evaluate_only" && keyframes ? { keyframe_version: keyframes } : {}),
+        ...(execution !== "extract_only" && standard ? { standard_version: standard } : {}),
+      };
+    }
+
+    function operationVersionLabel(version) {
+      return version.updated_at ? `${version.name} · ${version.updated_at}` : version.name;
+    }
+
+    function defaultOperationVersionLabel(kind) {
+      const catalog = operationVersions.value;
+      const id = kind === "keyframes" ? catalog.defaults.keyframe_version : catalog.defaults.standard_version;
+      const version = catalog[kind].find(entry => entry.id === id);
+      return `跟随默认（${version ? operationVersionLabel(version) : (id || "读取中")}）`;
+    }
+
+    async function loadOperationVersions() {
+      try {
+        const response = await fetch("/api/operation/versions", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(providerApiErrorText(data));
+        operationVersions.value = data;
+        versionDefaultsDraft.value = { ...data.defaults };
+      } catch (error) {
+        versionCatalogError.value = true;
+        versionCatalogMessage.value = `无法读取版本清单：${error.message}`;
+      }
+    }
+
+    async function showStandard(version) {
+      viewedStandard.value = version;
+      standardDetails.value = null;
+      if (!version) return;
+      try {
+        const response = await fetch(`/api/operation/versions/standards/${encodeURIComponent(version)}`, { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(providerApiErrorText(data));
+        if (viewedStandard.value === version) standardDetails.value = data;
+      } catch (error) {
+        if (viewedStandard.value !== version) return;
+        versionCatalogError.value = true;
+        versionCatalogMessage.value = `无法读取标准：${error.message}`;
+      }
+    }
+
+    async function openOperationVersions() {
+      workspacePage.value = "operation-versions";
+      versionCatalogMessage.value = "";
+      versionCatalogError.value = false;
+      await loadOperationVersions();
+      await showStandard(operationVersions.value.defaults.standard_version);
+    }
+
+    async function saveOperationVersionDefaults() {
+      versionDefaultsBusy.value = true;
+      versionCatalogMessage.value = "";
+      versionCatalogError.value = false;
+      try {
+        const response = await fetch("/api/operation/versions/defaults", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(versionDefaultsDraft.value),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(providerApiErrorText(data));
+        operationVersions.value = { ...operationVersions.value, defaults: data.defaults };
+        versionCatalogMessage.value = "默认版本已保存，仅影响未指定版本的新任务。";
+      } catch (error) {
+        versionCatalogError.value = true;
+        versionCatalogMessage.value = `保存失败：${error.message}`;
+      } finally {
+        versionDefaultsBusy.value = false;
+      }
+    }
+
     async function refreshPipelineConfig() {
       pipelineBusy.value = true;
       pipelineMessage.value = "";
@@ -4297,7 +4402,7 @@ createApp({
       if (d.operation_pipeline) applyPipelineSnapshot(d.operation_pipeline);
       selectedJudges.value = defaultJudgeSelection(mode.value);
       selectedModel.value = d.models[0] || "";
-      await loadProviders(true);
+      await Promise.all([loadProviders(true), loadOperationVersions()]);
       loadHistory();
     });
 
@@ -4319,6 +4424,10 @@ createApp({
       saveProviderDefault, clearProviderDefault,
       concurrency, rateLimitRequests, rateLimitWindowSeconds, evalTimeout,
       executionMode, versionBusy, versionName, versionScope, versionPanelOpen, versionMode,
+      operationVersions, selectedKeyframeVersion, selectedStandardVersion, forkKeyframeVersion, forkStandardVersion,
+      operationVersionLabel, defaultOperationVersionLabel,
+      versionDefaultsDraft, viewedStandard, standardDetails, standardRuleSections, versionDefaultsBusy,
+      versionCatalogMessage, versionCatalogError, openOperationVersions, showStandard, saveOperationVersionDefaults,
       versionModes, selectedVersionMode, activeTaskItemCount, selectedVersionItemCount,
       startTaskVersion, evaluatePreparedFrames,
       loadedTaskOptions,
