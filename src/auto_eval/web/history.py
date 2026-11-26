@@ -319,6 +319,29 @@ def delete_snapshot(task_id: str) -> bool:
     return True
 
 
+def operation_history_versions(mode: str | None, options: dict, results: list[dict]) -> dict:
+    """Expose pinned versions and, for reused or legacy frames, recorded algorithms."""
+    if mode != "operation":
+        return {}
+    execution = options.get("execution_mode", "full")
+    keyframe_version = None if execution == "evaluate_only" else options.get("keyframe_version")
+    versions = set()
+    if not keyframe_version:
+        recorded = options.get("reused_keyframe_versions")
+        if isinstance(recorded, list):
+            versions.update(version for version in recorded if isinstance(version, str) and version)
+        for result in results:
+            recorded = result.get("keyframe_versions")
+            if not isinstance(recorded, list) or not recorded:
+                recorded = [result.get("keyframe_version")]
+            versions.update(version for version in recorded if isinstance(version, str) and version)
+    return {
+        "keyframe_version": keyframe_version,
+        "keyframe_versions": sorted(versions),
+        "standard_version": None if execution == "extract_only" else options.get("standard_version"),
+    }
+
+
 def list_snapshots(limit: int = 50) -> list[dict]:
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
@@ -341,21 +364,20 @@ def list_snapshots(limit: int = 50) -> list[dict]:
             if path.stem != _safe_name(str(task_id))
             else make_session_name(float(created_at or 0), data.get("mode") or "unknown", str(task_id))
         )
-        run_state = batch_run_state(
-            status,
-            data.get("items") or [],
-            data.get("results") or [],
-        )
+        options = data.get("options") or {}
+        results = data.get("results") or []
+        run_state = batch_run_state(status, data.get("items") or [], results)
         rows.append({
             "task_id": task_id,
             "session_name": session_name,
             "dataset_name": data.get("dataset_name") or "",
             "note": data.get("note") or "",
             "mode": data.get("mode"),
-            "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
-            "execution_mode": (data.get("options") or {}).get("execution_mode", "full"),
-            "source_task_id": (data.get("options") or {}).get("source_task_id", ""),
-            "source_dataset_name": (data.get("options") or {}).get("source_dataset_name", ""),
+            "operation_layout": options.get("operation_layout") or "single",
+            "execution_mode": options.get("execution_mode", "full"),
+            **operation_history_versions(data.get("mode"), options, results),
+            "source_task_id": options.get("source_task_id", ""),
+            "source_dataset_name": options.get("source_dataset_name", ""),
             "status": run_state["status"],
             "total": run_state["total"],
             "done": run_state["progress"],
@@ -426,21 +448,20 @@ def list_snapshots_page(page: int = 1, page_size: int = 10) -> tuple[list[dict],
                 str(task_id),
             )
         )
-        run_state = batch_run_state(
-            status,
-            data.get("items") or [],
-            data.get("results") or [],
-        )
+        options = data.get("options") or {}
+        results = data.get("results") or []
+        run_state = batch_run_state(status, data.get("items") or [], results)
         rows.append({
             "task_id": task_id,
             "session_name": session_name,
             "dataset_name": data.get("dataset_name") or "",
             "note": data.get("note") or "",
             "mode": data.get("mode"),
-            "operation_layout": (data.get("options") or {}).get("operation_layout") or "single",
-            "execution_mode": (data.get("options") or {}).get("execution_mode", "full"),
-            "source_task_id": (data.get("options") or {}).get("source_task_id", ""),
-            "source_dataset_name": (data.get("options") or {}).get("source_dataset_name", ""),
+            "operation_layout": options.get("operation_layout") or "single",
+            "execution_mode": options.get("execution_mode", "full"),
+            **operation_history_versions(data.get("mode"), options, results),
+            "source_task_id": options.get("source_task_id", ""),
+            "source_dataset_name": options.get("source_dataset_name", ""),
             "status": run_state["status"],
             "total": run_state["total"],
             "done": run_state["progress"],

@@ -253,7 +253,11 @@ async def test_evaluate_only_missing_frames_never_prepares_or_calls_model(runtim
 @pytest.mark.parametrize("action,mode", [("reuse_frames", "evaluate_only"), ("refresh_frames", "extract_only"), ("refresh_frames", "full")])
 async def test_fork_does_not_mutate_source_and_preserves_time_ids_and_inputs(runtime, monkeypatch, action, mode):
     root, cfg = runtime
-    parent = Task(id="source", mode="operation", items=[legacy_item(root)], options={"execution_mode": "full"}, status="done", created_at=1704067200)
+    item = legacy_item(root)
+    (Path(item["frames"][0]).parent / "keyframes.json").write_text(json.dumps({
+        "algorithm_version": LEGACY_KEYFRAME_VERSION, "selected": [{"index": 1, "time": 3.5}],
+    }))
+    parent = Task(id="source", mode="operation", items=[item], options={"execution_mode": "full"}, status="done", created_at=1704067200)
     parent.results = [{"index": 0, "item_id": "a", "correctness": "nok", "rationale": "原结果"}]
     parent.note = "原备注"
     tasks.TASKS[parent.id] = parent
@@ -280,6 +284,17 @@ async def test_fork_does_not_mutate_source_and_preserves_time_ids_and_inputs(run
     monkeypatch.setattr(runner, "_eval_one", evaluate)
     response = await server.api_operation_fork(parent.id, OperationForkReq(action=action, execution_mode=mode))
     child = tasks.TASKS[response["task_id"]]
+    row = next(row for row in server.api_history(page_size=10)["items"] if row["task_id"] == child.id)
+    assert row["status"] == "running" and not child.results
+    if mode == "evaluate_only":
+        assert row["keyframe_version"] is None
+        assert row["keyframe_versions"] == [LEGACY_KEYFRAME_VERSION]
+        assert history.load_snapshot(child.id)["options"]["reused_keyframe_versions"] == [LEGACY_KEYFRAME_VERSION]
+    else:
+        assert row["keyframe_version"] == DEFAULT_KEYFRAME_VERSION
+        assert row["keyframe_versions"] == []
+    assert row["standard_version"] == child.options.get("standard_version")
+    assert (row["standard_version"] is None) == (mode == "extract_only")
     await child.execution
     assert child.id != parent.id
     assert child.items[0]["id"] == "a"

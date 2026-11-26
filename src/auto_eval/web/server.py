@@ -60,6 +60,7 @@ from .history import (
     load_item_judge_calls,
     load_dataset_artifact,
     load_snapshot,
+    operation_history_versions,
     operation_item_result_row,
     operation_comparison_batch,
     operation_statistics_payload,
@@ -94,7 +95,7 @@ from .operation_groups import align_operation_groups
 from .comparison_uploads import ComparisonUploadStore
 from .frame_preview import create_frame_preview_router
 from .pipeline_config import current_pipeline_config, save_pipeline_config
-from .operation_runs import EXECUTION_MODES, fork_items, validate_conversation_snapshot
+from .operation_runs import EXECUTION_MODES, fork_items, frame_algorithm_versions, validate_conversation_snapshot
 from .operation_versions import (
     DEFAULT_KEYFRAME_VERSION,
     OperationVersionDefaults,
@@ -2342,6 +2343,7 @@ def api_history(
             )
         row.update({
             "status": run_state["status"],
+            **operation_history_versions(live.mode, live.options, live.results),
             "total": run_state["total"],
             "done": live_progress,
             "processed": run_state["processed"],
@@ -3032,6 +3034,8 @@ async def api_operation_fork(task_id: str, req: OperationForkReq):
         items = await asyncio.to_thread(
             fork_items, source, indices, reuse_frames=req.action == "reuse_frames", runs_dir=RUNS_DIR,
         )
+        if req.action == "reuse_frames":
+            options["reused_keyframe_versions"] = await asyncio.to_thread(frame_algorithm_versions, items, RUNS_DIR)
         validate_conversation_snapshot(items, options)
     except (ValueError, KeyError, OSError) as exc:
         raise HTTPException(422, f"无法新建版本：{exc}") from exc

@@ -4279,11 +4279,23 @@ createApp({
       return version.updated_at ? `${version.name} · ${version.updated_at}` : version.name;
     }
 
+    function operationVersionLabelById(kind, id) {
+      if (!id) return "";
+      const version = operationVersions.value[kind].find(entry => entry.id === id);
+      return version ? operationVersionLabel(version) : id;
+    }
+
     function defaultOperationVersionLabel(kind) {
-      const catalog = operationVersions.value;
-      const id = kind === "keyframes" ? catalog.defaults.keyframe_version : catalog.defaults.standard_version;
-      const version = catalog[kind].find(entry => entry.id === id);
-      return `跟随默认（${version ? operationVersionLabel(version) : (id || "读取中")}）`;
+      const defaults = operationVersions.value.defaults;
+      const id = kind === "keyframes" ? defaults.keyframe_version : defaults.standard_version;
+      return `跟随默认（${operationVersionLabelById(kind, id) || "读取中"}）`;
+    }
+
+    function historyKeyframeVersionLabel(item) {
+      const reused = item.execution_mode === "evaluate_only";
+      const ids = !reused && item.keyframe_version ? [item.keyframe_version] : (item.keyframe_versions || []);
+      const label = ids.map(id => operationVersionLabelById("keyframes", id)).filter(Boolean).join(" / ");
+      return reused ? `复用 · ${label || "版本未记录"}` : (label || "未记录");
     }
 
     async function loadOperationVersions() {
@@ -4425,7 +4437,7 @@ createApp({
       concurrency, rateLimitRequests, rateLimitWindowSeconds, evalTimeout,
       executionMode, versionBusy, versionName, versionScope, versionPanelOpen, versionMode,
       operationVersions, selectedKeyframeVersion, selectedStandardVersion, forkKeyframeVersion, forkStandardVersion,
-      operationVersionLabel, defaultOperationVersionLabel,
+      operationVersionLabel, operationVersionLabelById, defaultOperationVersionLabel, historyKeyframeVersionLabel,
       versionDefaultsDraft, viewedStandard, standardDetails, standardRuleSections, versionDefaultsBusy,
       versionCatalogMessage, versionCatalogError, openOperationVersions, showStandard, saveOperationVersionDefaults,
       versionModes, selectedVersionMode, activeTaskItemCount, selectedVersionItemCount,

@@ -72,6 +72,37 @@ def test_history_list_limit_zero_returns_all_rows(tmp_path, monkeypatch):
     assert len(history.list_snapshots(limit=0)) == 3
 
 
+@pytest.mark.parametrize("paginated", [False, True])
+def test_history_lists_saved_versions_without_guessing_legacy_values(tmp_path, monkeypatch, paginated):
+    monkeypatch.setattr(history, "HISTORY_DIR", tmp_path)
+    records = {
+        "full": {"options": {"keyframe_version": "frames-v2", "standard_version": "rules-v1"}},
+        "extract": {"options": {"keyframe_version": "frames-v1", "execution_mode": "extract_only"}},
+        "reuse": {
+            "options": {"standard_version": "rules-v1", "execution_mode": "evaluate_only"},
+            "results": [{"index": 0, "keyframe_version": "frames-v1"}, {"index": 1, "keyframe_versions": ["frames-v1", "frames-v2"]}],
+        },
+        "legacy": {},
+        "other": {"mode": "single"},
+    }
+    for task_id, fields in records.items():
+        row = {"task_id": task_id, "mode": "operation", "status": "done", **fields}
+        (tmp_path / f"{task_id}.json").write_text(json.dumps(row), encoding="utf-8")
+
+    rows = history.list_snapshots_page()[0] if paginated else history.list_snapshots()
+    by_id = {row["task_id"]: row for row in rows}
+    assert by_id["full"]["keyframe_version"] == "frames-v2"
+    assert by_id["full"]["standard_version"] == "rules-v1"
+    assert by_id["extract"]["keyframe_version"] == "frames-v1"
+    assert by_id["extract"]["standard_version"] is None
+    assert by_id["reuse"]["keyframe_version"] is None
+    assert by_id["reuse"]["keyframe_versions"] == ["frames-v1", "frames-v2"]
+    assert by_id["reuse"]["standard_version"] == "rules-v1"
+    assert by_id["legacy"]["keyframe_version"] is None
+    assert by_id["legacy"]["standard_version"] is None
+    assert "keyframe_version" not in by_id["other"]
+
+
 def test_history_note_api_updates_task_and_persists(monkeypatch):
     task = Task(
         id="note-task",

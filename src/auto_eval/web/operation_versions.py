@@ -145,7 +145,7 @@ def pin_operation_versions(options: dict) -> dict:
     """仅在提交新任务时解析默认值及快照，不信任客户端传来的快照。"""
     defaults = current_version_defaults()
     pinned = {key: value for key, value in options.items()
-              if key not in {"evaluation_snapshot", "require_keyframe_version"}}
+              if key not in {"evaluation_snapshot", "require_keyframe_version", "reused_keyframe_versions"}}
     if pinned.get("execution_mode") == "evaluate_only":
         if "keyframe_version" in pinned:
             raise ValueError("仅评估沿用实际归档帧，不能选择抽帧算法")
