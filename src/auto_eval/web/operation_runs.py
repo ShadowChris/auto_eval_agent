@@ -89,6 +89,22 @@ def frame_algorithm_version(item: dict, runs_dir: Path = RUNS_DIR) -> str | None
     return None
 
 
+def frame_algorithm_versions(items: list[dict], runs_dir: Path = RUNS_DIR) -> list[str]:
+    """Read the recorded algorithms of already validated frames, once per archive."""
+    seen = set()
+    versions = set()
+    for item in items:
+        for row in frame_items(item):
+            archive = row.get("frame_set_id")
+            if not archive or archive in seen:
+                continue
+            seen.add(archive)
+            version = frame_algorithm_version(row, runs_dir)
+            if version:
+                versions.add(version)
+    return sorted(versions)
+
+
 def verify_frame_item(item: dict, runs_dir: Path = RUNS_DIR) -> None:
     identity = str(item.get("frame_set_id") or "")
     if not re.fullmatch(r"[0-9a-f]{64}", identity):

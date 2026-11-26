@@ -61,6 +61,10 @@ def test_web_catalog_has_both_real_extractors_and_structured_standard():
     assert {entry["id"]: entry["updated_at"] for entry in catalog["standards"]} == {
         DEFAULT_STANDARD_VERSION: "2026-11-25",
     }
+    assert {entry["id"]: entry["name"] for entry in catalog["keyframes"]} == {
+        DEFAULT_KEYFRAME_VERSION: "v4.13", LEGACY_KEYFRAME_VERSION: "v3.2.0",
+    }
+    assert catalog["standards"][0]["name"] == "v1.0"
     assert get_keyframe_version(LEGACY_KEYFRAME_VERSION).extract.__module__ == "auto_eval.media"
     assert get_keyframe_version(DEFAULT_KEYFRAME_VERSION).extract.__module__ == "auto_eval.operation_keyframes"
     response = client.get(f"/api/operation/versions/standards/{DEFAULT_STANDARD_VERSION}")

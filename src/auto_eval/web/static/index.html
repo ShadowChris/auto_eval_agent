@@ -64,7 +64,7 @@
     </div>
     <div class="table-scroll" v-if="historyItems.length">
       <table class="grid history-table auto-table">
-        <thead><tr><th class="history-comparison-select">对比</th><th>时间</th><th>数据集</th><th>模式</th><th>Provider / 模型</th><th>状态</th><th class="history-progress-cell">进度</th><th class="history-duration-cell">耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
+        <thead><tr><th class="history-comparison-select">对比</th><th>时间</th><th>数据集</th><th>模式</th><th>Provider / 模型</th><th>抽帧 / 标准</th><th>状态</th><th class="history-progress-cell">进度</th><th class="history-duration-cell">耗时</th><th>预览</th><th>操作</th><th>批跑备注</th></tr></thead>
         <tbody>
           <tr v-for="h in pagedHistoryItems" :key="h.task_id">
             <td class="history-comparison-select">
@@ -89,6 +89,13 @@
             <td>
               <div>{{ h.judge_provider || '角色默认配置' }}</div>
               <div class="history-task-id" v-if="h.judge_model">{{ h.judge_model }}</div>
+            </td>
+            <td>
+              <template v-if="h.mode==='operation'">
+                <div>抽帧：{{ historyKeyframeVersionLabel(h) }}</div>
+                <div>标准：{{ h.execution_mode==='extract_only' ? '未执行' : (operationVersionLabelById('standards', h.standard_version) || '未记录') }}</div>
+              </template>
+              <span v-else>—</span>
             </td>
             <td><span class="history-status" :class="'history-status-'+h.status">{{ historyStatusLabel(h.status) }}</span></td>
             <td class="history-progress-cell">{{ h.done }}/{{ h.total }}</td>
@@ -1057,7 +1064,7 @@
       </div>
     </div>
     <p v-if="['operation','operation_multi_group'].includes(mode) && taskId && (loadedTaskOptions.keyframe_version || loadedTaskOptions.standard_version)" class="hint">
-      抽帧：{{ loadedTaskOptions.keyframe_version || '复用已有帧' }} · 标准：{{ loadedTaskOptions.standard_version || '未运行评估' }}
+      抽帧：{{ operationVersionLabelById('keyframes', loadedTaskOptions.keyframe_version) || '复用已有帧' }} · 标准：{{ operationVersionLabelById('standards', loadedTaskOptions.standard_version) || '未运行评估' }}
     </p>
     <div v-if="['operation','operation_multi_group'].includes(mode) && taskId && !running" class="task-actions">
       <p v-if="loadedTaskOptions.source_task_id" class="hint">来源任务：<a href="#" @click.prevent="loadHistoryTask(loadedTaskOptions.source_task_id)">{{ loadedTaskOptions.source_dataset_name || loadedTaskOptions.source_task_id }}</a></p>
