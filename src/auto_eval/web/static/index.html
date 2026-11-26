@@ -1631,6 +1631,7 @@
       </label>
       <button class="primary" :disabled="versionDefaultsBusy || !versionDefaultsDraft.keyframe_version || !versionDefaultsDraft.standard_version" @click="saveOperationVersionDefaults">保存默认版本</button>
     </div>
+    <h3>抽帧算法版本</h3>
     <div class="operation-version-cards">
       <article v-for="version in operationVersions.keyframes" :key="version.id">
         <strong>{{ version.name }}</strong>
