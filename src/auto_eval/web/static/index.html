@@ -39,6 +39,7 @@
 
   <div class="workspace-tabs">
     <button :class="{active: workspacePage==='evaluation'}" @click="workspacePage='evaluation'">评估任务</button>
+    <button :class="{active: workspacePage==='operation-versions'}" @click="openOperationVersions">任务类版本管理</button>
     <button :class="{active: workspacePage==='knowledge'}" @click="openKnowledgePage">任务类专家经验</button>
   </div>
 
@@ -624,6 +625,28 @@
       </select></label>
       <span class="hint">仅评估需完整的受保护帧；推荐从历史任务“新建评估版本”中选择“复用抽帧进行评估”。</span>
     </div>
+    <div v-if="['operation','operation_multi_group'].includes(mode) && submitMode!=='append'" class="row operation-version-selectors">
+      <label>抽帧版本：
+        <select aria-label="抽帧版本" v-model="selectedKeyframeVersion"
+          :disabled="running || executionMode==='evaluate_only'"
+          :aria-describedby="executionMode==='evaluate_only' ? 'operation-version-mode-hint' : null">
+          <option value="">{{ defaultOperationVersionLabel('keyframes') }}</option>
+          <option v-for="version in operationVersions.keyframes" :key="version.id" :value="version.id">{{ operationVersionLabel(version) }}</option>
+        </select>
+      </label>
+      <label>任务类标准：
+        <select aria-label="任务类标准版本" v-model="selectedStandardVersion"
+          :disabled="running || executionMode==='extract_only'"
+          :aria-describedby="executionMode==='extract_only' ? 'operation-version-mode-hint' : null">
+          <option value="">{{ defaultOperationVersionLabel('standards') }}</option>
+          <option v-for="version in operationVersions.standards" :key="version.id" :value="version.id">{{ operationVersionLabel(version) }}</option>
+        </select>
+      </label>
+      <button type="button" @click="openOperationVersions">查看版本和变更</button>
+      <span v-if="executionMode!=='full'" id="operation-version-mode-hint" class="hint">
+        {{ executionMode==='extract_only' ? '只抽帧：不使用评估标准。' : '仅评估：复用已有抽帧，不使用所选抽帧版本。' }}
+      </span>
+    </div>
     <div v-if="['operation', 'operation_multi_group'].includes(mode)" class="operation-pipeline-config">
       <div class="row">
         <span class="lbl">阶段并发：</span>
@@ -1033,7 +1056,10 @@
         </table>
       </div>
     </div>
-    <div v-if="mode==='operation' && taskId && !running" class="task-actions">
+    <p v-if="['operation','operation_multi_group'].includes(mode) && taskId && (loadedTaskOptions.keyframe_version || loadedTaskOptions.standard_version)" class="hint">
+      抽帧：{{ loadedTaskOptions.keyframe_version || '复用已有帧' }} · 标准：{{ loadedTaskOptions.standard_version || '未运行评估' }}
+    </p>
+    <div v-if="['operation','operation_multi_group'].includes(mode) && taskId && !running" class="task-actions">
       <p v-if="loadedTaskOptions.source_task_id" class="hint">来源任务：<a href="#" @click.prevent="loadHistoryTask(loadedTaskOptions.source_task_id)">{{ loadedTaskOptions.source_dataset_name || loadedTaskOptions.source_task_id }}</a></p>
       <div v-if="loadedTaskOptions.execution_mode==='extract_only'" class="task-continue-actions">
         <button type="button" class="primary" @click="evaluatePreparedFrames" :disabled="versionBusy || !activeTaskItemCount">使用这些帧开始评估</button>
@@ -1050,6 +1076,18 @@
           <p class="hint">{{ selectedVersionMode.description }}</p>
           <p v-if="versionMode!=='evaluate_only'" class="task-version-warning">{{ versionMode==='full' ? '将重新消耗视频读取、抽帧和模型资源。' : '将重新消耗视频读取和抽帧资源。' }}</p>
           <div class="task-version-fields">
+            <label v-if="versionMode!=='evaluate_only'" class="task-version-field">抽帧版本
+              <select aria-label="新任务抽帧版本" v-model="forkKeyframeVersion" :disabled="versionBusy">
+                <option value="">{{ defaultOperationVersionLabel('keyframes') }}</option>
+                <option v-for="version in operationVersions.keyframes" :key="version.id" :value="version.id">{{ operationVersionLabel(version) }}</option>
+              </select>
+            </label>
+            <label v-if="versionMode!=='extract_only'" class="task-version-field">任务类标准
+              <select aria-label="新任务标准版本" v-model="forkStandardVersion" :disabled="versionBusy">
+                <option value="">{{ defaultOperationVersionLabel('standards') }}</option>
+                <option v-for="version in operationVersions.standards" :key="version.id" :value="version.id">{{ operationVersionLabel(version) }}</option>
+              </select>
+            </label>
             <label class="task-version-field">题目范围
               <select aria-label="新版本范围" v-model="versionScope" :disabled="versionBusy">
                 <option value="all">全部有效题目（{{ activeTaskItemCount }}）</option>
@@ -1576,6 +1614,84 @@
     </div>
   </section>
 
+  <section v-if="workspacePage==='operation-versions'" class="operation-versions-page">
+    <h2>任务类版本管理</h2>
+    <p class="hint">新任务可独立选择抽帧算法和评估标准。默认值只影响未指定版本的新任务，不修改历史或在跑任务。</p>
+    <p v-if="versionCatalogMessage" :class="versionCatalogError ? 'err' : 'ok'" role="status">{{ versionCatalogMessage }}</p>
+    <div class="row">
+      <label>默认抽帧：
+        <select aria-label="默认抽帧版本" v-model="versionDefaultsDraft.keyframe_version">
+          <option v-for="version in operationVersions.keyframes" :key="version.id" :value="version.id">{{ operationVersionLabel(version) }}</option>
+        </select>
+      </label>
+      <label>默认标准：
+        <select aria-label="默认任务类标准" v-model="versionDefaultsDraft.standard_version">
+          <option v-for="version in operationVersions.standards" :key="version.id" :value="version.id">{{ operationVersionLabel(version) }}</option>
+        </select>
+      </label>
+      <button class="primary" :disabled="versionDefaultsBusy || !versionDefaultsDraft.keyframe_version || !versionDefaultsDraft.standard_version" @click="saveOperationVersionDefaults">保存默认版本</button>
+    </div>
+    <div class="operation-version-cards">
+      <article v-for="version in operationVersions.keyframes" :key="version.id">
+        <strong>{{ version.name }}</strong>
+        <span v-if="version.id===operationVersions.defaults.keyframe_version" class="knowledge-draft-badge">默认</span>
+        <p class="hint">{{ version.id }} · {{ version.previous ? '相较 '+version.previous : '历史基线' }}</p>
+        <p class="hint">更新日期：<time :datetime="version.updated_at">{{ version.updated_at }}</time></p>
+        <ul><li v-for="change in version.changes" :key="change">{{ change }}</li></ul>
+      </article>
+    </div>
+    <h3>任务类标准详情</h3>
+    <label>查看标准：
+      <select aria-label="查看任务类标准版本" :value="viewedStandard" @change="showStandard($event.target.value)">
+        <option v-for="version in operationVersions.standards" :key="version.id" :value="version.id">{{ operationVersionLabel(version) }}</option>
+      </select>
+    </label>
+    <template v-if="standardDetails">
+      <p class="hint">{{ standardDetails.id }} · {{ standardDetails.previous ? '相较 '+standardDetails.previous : '首次封装' }}</p>
+      <p class="hint">更新日期：<time :datetime="standardDetails.updated_at">{{ standardDetails.updated_at }}</time></p>
+      <ul><li v-for="change in standardDetails.changes" :key="change">{{ change }}</li></ul>
+      <details open><summary>判定定义与决策顺序</summary>
+        <dl><template v-for="(definition, key) in standardDetails.policy.correctness" :key="key"><dt>{{ key }}</dt><dd>{{ definition }}</dd></template></dl>
+        <ol><li v-for="rule in standardDetails.policy.decision_order" :key="rule">{{ rule }}</li></ol>
+      </details>
+      <details open><summary>评分维度</summary>
+        <dl v-for="dimension in standardDetails.rubrics" :key="dimension.name">
+          <dt>{{ dimension.name }}（满分 {{ dimension.scale }}，权重 {{ dimension.weight }}）</dt>
+          <dd>{{ dimension.description }}
+            <ul><li v-for="(anchor, score) in dimension.score_anchors" :key="score">{{ score }} 分：{{ anchor }}</li></ul>
+            <ul v-if="dimension.criteria?.length"><li v-for="rule in dimension.criteria" :key="rule">{{ rule }}</li></ul>
+          </dd>
+        </dl>
+      </details>
+      <details><summary>问题类型与复核类别</summary>
+        <dl><template v-for="(issue, key) in standardDetails.policy.issue_types" :key="key"><dt>{{ key }}（{{ issue.allowed_correctness.join(' / ') }}）</dt><dd>{{ issue.description }}</dd></template></dl>
+        <h4>复核类别</h4>
+        <ul><li v-for="rule in standardDetails.policy.review_category_names" :key="rule">{{ rule }}</li></ul>
+      </details>
+      <template v-for="[key, label] in standardRuleSections" :key="key">
+        <details v-if="standardDetails.policy[key]?.length"><summary>{{ label }}</summary>
+          <ul><li v-for="rule in standardDetails.policy[key]" :key="rule">{{ rule }}</li></ul>
+        </details>
+      </template>
+      <details v-if="standardDetails.expert_knowledge"><summary>产品专家知识与卡片目录</summary>
+        <div v-for="category in standardDetails.expert_knowledge.categories" :key="category.key">
+          <h4>{{ category.name }}</h4>
+          <p v-if="category.description">{{ category.description }}</p>
+          <ul><li v-for="rule in category.rules" :key="rule">{{ rule }}</li></ul>
+        </div>
+        <dl v-for="card in standardDetails.expert_knowledge.result_cards" :key="card.key">
+          <dt>{{ card.name }}（{{ card.key }}）</dt>
+          <dd>线索：{{ card.visual_cues.join('；') || '—' }}<br>可证明：{{ card.proves.join('；') || '—' }}<br>不可单独证明：{{ card.does_not_prove.join('；') || '—' }}</dd>
+        </dl>
+      </details>
+      <details><summary>实际 Prompt 模板与补充规则</summary>
+        <pre v-if="standardDetails.skill_rules">{{ standardDetails.skill_rules }}</pre>
+        <div v-for="(text, key) in standardDetails.templates" :key="key"><h4>{{ key }}</h4><pre>{{ text }}</pre></div>
+      </details>
+      <p class="hint">规则快照 SHA-256：<code>{{ standardDetails.policy_hash }}</code></p>
+    </template>
+  </section>
+
   <section v-if="workspacePage==='knowledge'" class="knowledge-page">
     <div class="knowledge-topbar">
       <div>
@@ -1591,6 +1707,7 @@
         <button class="primary" @click="publishKnowledge" :disabled="knowledgeBusy">发布更改</button>
       </div>
     </div>
+    <p class="hint knowledge-version-hint">这里维护专家知识来源。发布更改不会覆盖已发布的任务类标准包；需另外打包新标准版本。</p>
 
     <p v-if="knowledgeMessage" :class="knowledgeError ? 'err' : 'ok'">{{ knowledgeMessage }}</p>
     <p v-if="knowledgeBusy" class="running">正在处理专家经验…</p>

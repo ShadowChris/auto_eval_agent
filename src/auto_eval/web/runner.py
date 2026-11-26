@@ -39,7 +39,6 @@ from ..judges.ensemble import (
 )
 from ..llm_stream import is_retriable_llm_error
 from ..meta import ground_truth
-from ..operation_keyframes import KEYFRAME_ALGORITHM_VERSION
 from ..observability import (
     bind_chain_context,
     error_details,
@@ -65,9 +64,10 @@ from .tasks import DEFAULT_OPERATION_CONCURRENCY, Task, prune_task_cache
 from .remote_video import run_video_preparation, video_reference_for_log
 from .video_pipeline import OperationBatch, stage_slot, video_item_scope
 from .operation_runs import (
-    FRAME_FIELDS, evaluation_snapshot, frame_items, freeze_frame_item, freeze_frames, frozen_evaluation_config,
+    FRAME_FIELDS, evaluation_snapshot, frame_algorithm_version, frame_items, freeze_frame_item, freeze_frames, frozen_evaluation_config,
     validate_conversation_snapshot, verify_frame_item, verify_frames,
 )
+from .operation_versions import DEFAULT_KEYFRAME_VERSION, is_registered_keyframe_version
 
 
 logger = logging.getLogger(__name__)
@@ -284,7 +284,8 @@ def _rebuild_operation_frames(item: dict, *, generation_id: str, **kwargs) -> di
         prepared = prepare_session_operation_item(source, rebuild_dir=Path(scratch), runs_dir=RUNS_DIR, **kwargs)
         freeze_frame_item(prepared, runs_dir=RUNS_DIR, generation_id=generation_id)
     log_event("视频准备", "坏帧重抽已归档", details={
-        "原帧版本": old_version, "新帧版本": prepared["frame_set_id"], "算法版本": KEYFRAME_ALGORITHM_VERSION,
+        "原帧版本": old_version, "新帧版本": prepared["frame_set_id"],
+        "算法版本": kwargs.get("keyframe_version") or DEFAULT_KEYFRAME_VERSION,
     })
     return prepared
 
@@ -607,6 +608,7 @@ async def _run(
 ) -> None:
     execution_mode = task.options.get("execution_mode", "full") if task.mode == "operation" else "full"
     extract_only = execution_mode == "extract_only"
+    selected_algorithm = task.options.get("keyframe_version") if task.mode == "operation" else None
     if execution_mode == "full" and "execution_mode" in task.options:
         _prepare_rerun_items(task, active_item_indices(task.items) if item_indices is None else item_indices)
     snapshot = task.options.get("evaluation_snapshot") if task.mode == "operation" else None
@@ -779,6 +781,23 @@ async def _run(
                         last_error = exc
                         preparation_failure_stage = "frame_validation"
                 invalid_frame_rows: set[int] = set()
+                source_algorithms: dict[int, str] = {}
+                if last_error is None and task.mode == "operation" and execution_mode != "evaluate_only":
+                    for row in frame_items(item_dict):
+                        if not row.get("frames"):
+                            continue
+                        actual = await asyncio.to_thread(frame_algorithm_version, row, RUNS_DIR)
+                        if actual and is_registered_keyframe_version(actual):
+                            source_algorithms[id(row)] = actual
+                        mismatch = selected_algorithm and actual != selected_algorithm and (
+                            actual is not None or task.options.get("require_keyframe_version")
+                        )
+                        if mismatch:
+                            if row.get("frame_set_id"):
+                                invalid_frame_rows.add(id(row))
+                            else:
+                                for key in FRAME_FIELDS:
+                                    row.pop(key, None)
                 if (last_error is None and task.mode == "operation" and execution_mode == "full"
                         and (rerun is not None or "execution_mode" in task.options)):
                     for row in frame_items(item_dict):
@@ -887,6 +906,9 @@ async def _run(
                             )
                             prepare_call = _rebuild_operation_frames if rebuild else prepare_session_operation_item
                             recovery = {"generation_id": attempt_id or task.id} if rebuild else {}
+                            algorithm = selected_algorithm or source_algorithms.get(id(group_item))
+                            if algorithm:
+                                recovery["keyframe_version"] = algorithm
                             prepared = await run_video_preparation(
                                 prepare_call,
                                 prepared_input,
@@ -971,6 +993,10 @@ async def _run(
                         else:
                             prepare_call = prepare_session_operation_item
                             prepare_kwargs = {}
+                        if task.mode == "operation":
+                            algorithm = selected_algorithm or source_algorithms.get(id(item_dict))
+                            if algorithm:
+                                prepare_kwargs["keyframe_version"] = algorithm
                         prepared = await run_video_preparation(
                             prepare_call,
                             item_dict,
@@ -1138,8 +1164,18 @@ async def _run(
                 res["evaluation_status"] = ("not_evaluated" if extract_only else "done") if not res.get("error") else "error"
                 res["frame_set_id"] = None if id(item_dict) in invalid_frame_rows else item_dict.get("frame_set_id")
                 res["frame_sets"] = [row.get("frame_set_id") for row in evidence_rows if row.get("frame_set_id")]
+                algorithms = await asyncio.to_thread(
+                    lambda: [frame_algorithm_version(row, RUNS_DIR) for row in evidence_rows if row.get("frames")],
+                )
+                if algorithms and all(algorithms):
+                    versions = list(dict.fromkeys(algorithms))
+                    res["keyframe_versions"] = versions
+                    if len(versions) == 1:
+                        res["keyframe_version"] = versions[0]
                 if snapshot:
                     res["policy_hash"] = snapshot.get("policy_hash")
+                    if task.options.get("standard_version"):
+                        res["standard_version"] = task.options["standard_version"]
                 if res.get("error"):
                     res.setdefault("failure_stage", preparation_failure_stage or ("extraction" if extract_only or last_error and not item_dict.get("frames") else "evaluation"))
             res["duration_s"] = round(time.perf_counter() - started, 1)

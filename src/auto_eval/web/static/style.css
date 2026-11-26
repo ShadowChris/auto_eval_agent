@@ -750,6 +750,18 @@ tr.result-warning-detail td {
 .task-actions { margin: 12px 0; }
 .task-continue-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0; }
 .task-version-tools { border: 1px solid #dbe3ef; border-radius: 6px; margin: 12px 0 18px; }
+.operation-version-selectors select:disabled { color: #64748b; background: #f1f5f9; cursor: not-allowed; }
+.operation-version-selectors .hint { margin: 0; }
+.operation-versions-page { padding: 18px 20px; }
+.operation-version-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; margin: 16px 0; }
+.operation-version-cards article, .operation-versions-page details { border: 1px solid #dbe3ef; border-radius: 6px; padding: 12px 14px; }
+.operation-versions-page details { margin: 10px 0; }
+.operation-versions-page summary { cursor: pointer; font-weight: 600; }
+.operation-versions-page dt { font-weight: 600; }
+.operation-versions-page dd { margin: 4px 0 12px; }
+.operation-versions-page pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow: auto; }
+.operation-versions-page code { overflow-wrap: anywhere; }
+.knowledge-version-hint { margin: 10px 20px; }
 .task-version-tools > summary { padding: 12px 14px; cursor: pointer; }
 .task-version-tools > summary .hint { margin-left: 8px; }
 .task-version-form { padding: 0 14px 14px; }

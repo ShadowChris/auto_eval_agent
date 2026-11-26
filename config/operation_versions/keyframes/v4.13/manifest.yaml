@@ -1,0 +1,10 @@
+id: hybrid-state-v4.13
+engine: hybrid-state-v4.13
+params_hash: 2fdf73631ab319827584b0f5769603bf573d6379bc8a9cbac2016646841991d7
+name: v4.13 · 当前版
+updated_at: 2026-11-19
+previous: hybrid-state-v3.2.0
+changes:
+  - 固定采样从 1 FPS 提升到 3 FPS。
+  - 按新增内容比例选图，增加局部覆盖及滑动重复检查。
+  - 每个时间窗最多 15 张，首尾帧计入上限。

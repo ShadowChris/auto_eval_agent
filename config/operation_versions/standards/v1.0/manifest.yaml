@@ -1,0 +1,8 @@
+id: operation-v1.0
+name: v1.0 · 当前标准基线
+updated_at: 2026-11-25
+previous: null
+policy_hash: 969dec3ffa8f734958a5326d3a6e88544ce9aec247e251ea898d0ed7dbf41dd5
+changes:
+  - 首次封装既有任务类标准、专家知识和三个实际使用的 Prompt 模板。
+  - 保留当前单轮、逐轮和多组评判口径；本次仅做版本化，不调整评判规则。

@@ -454,7 +454,8 @@ def test_input_images_stay_round_scoped_in_history_and_results(tmp_path):
     assert not earlier["turns"][0].get("query_images")
 
 
-def test_last_frame_cannot_seek_across_round_boundary(tmp_path):
+@pytest.mark.parametrize("algorithm", ["hybrid-state-v4.13", "hybrid-state-v3.2.0"])
+def test_last_frame_cannot_seek_across_round_boundary(tmp_path, algorithm):
     from auto_eval.media import FFmpegUnavailableError, resolve_ffmpeg_executable
 
     try:
@@ -470,10 +471,12 @@ def test_last_frame_cannot_seek_across_round_boundary(tmp_path):
     turns[1].update(task_start_time=2, task_end_time=3.9, is_end=True)
     item = parsed(turns)[0]
     prepared = prepare_session_operation_item(item, session_name="boundary", item_index=0, total_items=2,
-        base_dir=tmp_path, runs_dir=tmp_path / "runs")
+        base_dir=tmp_path, runs_dir=tmp_path / "runs", keyframe_version=algorithm)
     metadata = json.loads((Path(prepared["frames"][0]).parent / "keyframes.json").read_text(encoding="utf-8"))
-    assert metadata["algorithm_version"] == "hybrid-state-v4.13"
-    assert 1 <= len(prepared["frames"]) <= 15
+    assert metadata["algorithm_version"] == algorithm
+    assert prepared["frames"]
+    if algorithm == "hybrid-state-v4.13":
+        assert len(prepared["frames"]) <= 15
     for frame in prepared["frames"]:
         with Image.open(frame) as image:
             red, _, blue = image.convert("RGB").getpixel((20, 20))

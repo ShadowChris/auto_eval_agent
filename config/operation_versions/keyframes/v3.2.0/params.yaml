@@ -1,0 +1,10 @@
+# 已发布版本的完整可配参数；修改时请创建新版本。
+{auto_task_end_confidence_threshold: 0.6, auto_task_end_max_return_shell_distance: 0.02,
+  auto_task_end_min_final_stable_duration_s: 1.5, auto_task_end_min_stable_duration_s: 1.5,
+  auto_task_end_min_task_shell_distance: 0.02, final_dedup_changed_fraction_threshold: 0.01,
+  final_dedup_rms_threshold: 0.008, max_edge: 720, max_frames: 20, protected_begin_window: 20.0,
+  protected_end_window: 5.0, protected_sample_dedup_cf: 0.002, protected_sample_dedup_rms: 0.002,
+  protected_sample_interval: 2.0, sample_fps: 1.0, scene_min_gap_s: 0.8, scene_threshold: 0.06,
+  stable_min_duration_s: 1.5, state_layout_threshold: 0.05, task_end_time: null, task_start_time: 7.0,
+  timestamp_merge_gap_s: 0.25, transient_max_changed_fraction: 0.55, transient_max_duration_s: 4.0,
+  transient_min_changed_fraction: 0.02, transient_return_threshold: 0.065}

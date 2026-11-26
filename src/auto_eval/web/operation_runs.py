@@ -74,6 +74,21 @@ def _safe_frame(raw: str, runs_dir: Path) -> Path:
     return path
 
 
+def frame_algorithm_version(item: dict, runs_dir: Path = RUNS_DIR) -> str | None:
+    """Refuse to label historical evidence with a guessed algorithm version."""
+    frames = item.get("frames") or []
+    if not frames:
+        return None
+    try:
+        path = _safe_frame(str(frames[0]), runs_dir).parent / "keyframes.json"
+        if not path.is_symlink() and path.stat().st_size <= 2 * 1024 * 1024:
+            version = json.loads(path.read_text(encoding="utf-8")).get("algorithm_version")
+            return version if isinstance(version, str) and version else None
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
+
 def verify_frame_item(item: dict, runs_dir: Path = RUNS_DIR) -> None:
     identity = str(item.get("frame_set_id") or "")
     if not re.fullmatch(r"[0-9a-f]{64}", identity):
