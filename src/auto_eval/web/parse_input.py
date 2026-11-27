@@ -329,5 +329,8 @@ def _parse_jsonl_rows(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
                     item[key] = obj[key]
             item["source_data"] = obj.get("source_data") or item["source_data"]
             item["source_line"] = obj.get("source_line", ln)
+        elif mode == "operation" and "session_group" in obj and "turn_index" in obj:
+            item["session_group"] = obj["session_group"]
+            item["turn_index"] = obj["turn_index"]
         items.append(item)
     return items, errors

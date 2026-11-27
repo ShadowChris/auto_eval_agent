@@ -159,7 +159,7 @@ def _to_evalitem(item: dict, idx: int) -> EvalItem:
         query_images=item.get("query_images") or [],
         turns=item.get("turns") or [],
         evaluation_scope=item.get("evaluation_scope") or ("conversation" if item.get("turns") else "single"),
-        turn_index=item.get("turn_index"),
+        turn_index=item.get("turn_index") if item.get("turns") else None,
         metadata=meta,
     )
 
