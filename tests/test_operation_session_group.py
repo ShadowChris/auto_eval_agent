@@ -14,6 +14,7 @@ from auto_eval.config import load_config
 from auto_eval.web import history, server, tasks
 from auto_eval.web.operation_comparison_import import import_operation_comparison_file
 from auto_eval.web.parse_input import parse_jsonl
+from auto_eval.web.runner import _to_evalitem
 
 
 def rows(group="chat-A"):
@@ -24,6 +25,47 @@ def rows(group="chat-A"):
 
 def parse(source):
     return parse_jsonl("\n".join(json.dumps(row, ensure_ascii=False) for row in source), "operation")
+
+
+@pytest.mark.parametrize("number", [0, "0", "0.0"])
+def test_session_group_with_only_first_turn_stays_single_and_preserves_source(number):
+    single = dict(id="single-0", query="打开蓝牙", video_path="single.mp4",
+                  session_group="single", turn_index=number)
+    multi = rows()
+    items, errors = parse([multi[1], single, multi[0]])
+    assert not errors
+    assert [item["id"] for item in items] == [multi[1]["id"], single["id"], multi[0]["id"]]
+    assert [len(item.get("turns") or []) for item in items] == [2, 0, 1]
+    item = items[1]
+    assert item["session_group"] == "single" and item["turn_index"] == number
+    assert "turn_count" not in item and "conversation_id" not in item
+    assert "task_start_time" not in item and "task_end_time" not in item
+    eval_item = _to_evalitem(item, 1)
+    assert eval_item.evaluation_scope == "single" and eval_item.turn_index is None
+    assert not eval_item.turns
+    assert normalize_operation_batch(items) == items
+    snapshot = dict(mode="operation", status="done", items=items, results=[])
+    for name in ("数据集明细", "评估结果"):
+        exported = history.export_rows(snapshot)[name][1]
+        assert exported["session_group"] == "single" and exported["turn_index"] == number
+
+
+def test_single_group_batch_api_input_can_store_markers_in_metadata():
+    raw = dict(id="single", query="打开蓝牙", video_path="single.mp4",
+               metadata=dict(session_group="single-group", turn_index=0))
+    item, = normalize_operation_batch([raw])
+    assert not item.get("turns") and not item.get("input_error")
+    assert item["source_data"]["session_group"] == "single-group"
+    single = server._normalize_single_operation_item(raw)
+    assert single["session_group"] == "single-group" and single["turn_index"] == 0
+    assert not single.get("turns")
+
+
+def test_duplicate_first_turn_is_not_a_single_session():
+    source = rows()[:2]
+    source[1]["turn_index"] = 0
+    items, errors = parse(source)
+    assert len(errors) == 2 and all("重复" in item["input_error"] for item in items)
 
 
 def test_explicit_session_group_sorting_retains_original_rows_and_history_only():
@@ -143,6 +185,32 @@ def test_table_import_without_marker_columns_uses_session_and_preserves_extras(s
     assert not data["errors"]
     assert [int(i["source_data"]["turn_index"]) for i in data["items"]] == [2, 0, 1]
     assert [len(i["turns"]) for i in data["items"]] == [3, 1, 2]
+
+
+@pytest.mark.parametrize("suffix", ["csv", "xlsx"])
+def test_table_import_does_not_require_a_time_window_for_single_session(suffix):
+    single = dict(id="single", query="打开蓝牙", video_path="single.mp4",
+                  session_group="single-group", turn_index=0, task_start_time="", task_end_time="")
+    complete = rows()[:2]
+    invalid_multi = rows("invalid-group")[:2]
+    invalid_multi[0]["task_start_time"] = ""
+    source = pd.DataFrame([single, *complete, *invalid_multi])
+    if suffix == "csv":
+        content = source.to_csv(index=False).encode()
+    else:
+        buffer = BytesIO()
+        source.to_excel(buffer, index=False)
+        content = buffer.getvalue()
+    response = TestClient(server.app).post(
+        "/api/operation/import-table", files={"file": (f"data.{suffix}", content)},
+    )
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    assert not items[0].get("input_error") and not items[0].get("turns")
+    assert items[0]["session_group"] == "single-group" and int(items[0]["turn_index"]) == 0
+    assert items[0].get("task_start_time") is None
+    assert [len(i["turns"]) for i in items[1:3]] == [1, 2]
+    assert all(i.get("input_error") for i in items[3:])
 
 
 def test_excel_uses_raw_session_fields_and_jsonl_remains_independently_reusable():

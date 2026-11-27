@@ -357,6 +357,13 @@ def _normalize_session_group_items(items: list[dict]) -> list[dict] | None:
         except ValueError as exc:
             ordered, invalid = members, str(exc)
         numbers = [] if invalid else [session_turn_number(operation_input_field(row, "turn_index")) for _, row in ordered]
+        if numbers == [0]:
+            # A session identifier describes ownership, not the presence of history.
+            position, row = ordered[0]
+            row["session_group"] = row["source_data"]["session_group"]
+            row["turn_index"] = row["source_data"]["turn_index"]
+            placed.append((position, 0, row))
+            continue
         counts = Counter(numbers)
         expected = 0
         turns = []
