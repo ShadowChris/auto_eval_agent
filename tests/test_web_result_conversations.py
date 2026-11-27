@@ -90,6 +90,37 @@ assert.equal(resultConversationMeta(rows[0],[]),null);
 """)
 
 
+def test_single_round_sessions_do_not_display_multiturn_labels_even_in_old_results():
+    run_script("""
+const oldSingle = {...round(0,'old-single',1,1),session_group:'old-group'};
+const newSingle = {...single(1),session_group:'new-group',turn_index:0};
+items.value = [oldSingle,newSingle];
+results.value = [oldSingle,newSingle];
+assert.equal(hasConversationResults.value,false);
+for (const row of results.value) {
+  assert.equal(resultConversationMeta(row,items.value),null);
+  assert.equal(resultConversationHeading(row),undefined);
+  assert.equal(resultTurnLabel(row),'');
+}
+assert.equal(resultConversationMeta(single(0),[oldSingle]),null);
+assert.equal(resultConversationMeta(single(0),[{
+  evaluation_scope:'latest_turn',turns:[{id:'old-first'}],
+}]),null);
+assert.equal(oldSingle.session_group,'old-group');
+""", bindings=True)
+
+
+def test_only_visible_first_turn_keeps_its_multiturn_heading():
+    run_script("""
+const first = round(0,'multi',1,1);
+items.value = [round(0,'multi',1,2),round(1,'multi',2,2)];
+results.value = [first];
+assert.equal(hasConversationResults.value,true);
+assert.deepEqual(resultConversationHeading(first),{id:'multi',visible:1,total:2});
+assert.equal(resultTurnLabel(first),'第 1 / 2 轮');
+""", bindings=True)
+
+
 def test_other_modes_and_plain_singles_keep_existing_paging_and_order():
     run_script("""
 const rows = [single(5),single(1),single(2)];

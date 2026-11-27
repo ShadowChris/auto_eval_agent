@@ -10,11 +10,15 @@ function resultConversationMeta(result, items) {
   if (scope !== "latest_turn") return null;
   const id = result.conversation_id || item.conversation_id || item.turns?.[0]?.id;
   if (id == null || String(id).trim() === "") return null;
+  const turnIndex = Number(result.turn_index || item.turn_index || item.turns?.length || 1);
+  const turnCount = Math.max(Number(result.turn_count) || 0, Number(item.turn_count) || 0,
+    item.turns?.length || 0, turnIndex || 1);
+  if (turnCount <= 1) return null;
   return {
     id: String(id),
     label: String(result.session_group || item.session_group || id),
-    turnIndex: Number(result.turn_index || item.turn_index || item.turns?.length || 1),
-    turnCount: Number(result.turn_count || item.turn_count || item.turns?.length || 1),
+    turnIndex,
+    turnCount,
   };
 }
 
