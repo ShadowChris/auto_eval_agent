@@ -227,9 +227,10 @@ def _render_c_md(C, focal) -> str:
             L.append("")
             continue
         src = s["category_source_pct"]
+        disabled = f" / 已关闭 {_pct(src['classification_disabled'])}" if "classification_disabled" in src else ""
         L.append(
             f"- 分类来源：dataset {_pct(src.get('dataset'))} / 自动分类 {_pct(src.get('auto_classified'))} "
-            f"/ 兜底 {_pct(src.get('fallback_default'))}"
+            f"/ 兜底 {_pct(src.get('fallback_default'))}{disabled}"
         )
         L.append("| 模型 | 题数 | 平均分 | right占比 | 低一致率 |")
         L.append("|---|---|---|---|---|")
