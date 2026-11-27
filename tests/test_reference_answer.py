@@ -108,7 +108,7 @@ def test_parse_csv_source_data_keeps_raw_row():
     assert items[0]["source_data"]["分享链接"] == "https://x"
 
 
-# ---------- parse_csv：组边界归一化（is_start/is_end 一致性） ----------
+# ---------- parse_csv：显式 is_start/is_end 分组 ----------
 
 
 def _group_sizes(items):
@@ -138,8 +138,8 @@ def test_parse_csv_group_boundary_missing_is_end():
 
 
 def test_parse_csv_group_boundary_missing_is_start():
-    # 组头缺 is_start：上一条 (False,True) 已是组尾，下一条 is_start 非 True
-    # → 下一条应强制为新组开头（turn_index=0）。
+    # 组头缺 is_start：上一条已是组尾，下一条没有显式 is_start，
+    # 应按独立单轮处理，不能自动开启一个新多轮组。
     content = _csv([
         "query,is_start,is_end,video_path",
         "1,true,false,/tmp/a.mp4",
@@ -151,6 +151,20 @@ def test_parse_csv_group_boundary_missing_is_start():
     assert _group_sizes(items) == [[0, 1], [0]]
     assert items[2]["turn_index"] == 0
     assert items[2]["session_group"] != items[1]["session_group"]
+
+
+def test_parse_csv_unmarked_rows_after_closed_session_are_single_turn():
+    content = _csv([
+        "query,is_start,is_end,video_path",
+        "1,true,false,/tmp/a.mp4",
+        "2,false,true,/tmp/a.mp4",
+        "3,false,false,/tmp/b.mp4",
+        "4,false,false,/tmp/b.mp4",
+    ])
+    items, errors = parse_csv(content, "rich_content")
+    assert not errors
+    assert [item["turn_index"] for item in items] == [0, 1, 0, 0]
+    assert len({item["session_group"] for item in items[1:]}) == 3
 
 
 def test_parse_csv_group_boundary_wellformed_unchanged():

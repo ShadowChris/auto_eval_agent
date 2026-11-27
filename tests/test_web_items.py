@@ -111,6 +111,26 @@ def test_start_end_markers_form_one_session():
     assert [item["turn_index"] for item in task.items] == [0, 1]
 
 
+def test_unmarked_items_after_closed_session_remain_single_turn():
+    task = _task([])
+    merge_items_by_id(
+        task,
+        [
+            {"id": "q1", "query": "第一轮", "is_start": True},
+            {"id": "q2", "query": "第二轮"},
+            {"id": "q3", "query": "第三轮", "is_end": True},
+            {"id": "s1", "query": "独立题1"},
+            {"id": "s2", "query": "独立题2"},
+        ],
+    )
+
+    assert task.items[0]["session_group"] == task.items[2]["session_group"]
+    assert [item["turn_index"] for item in task.items[:3]] == [0, 1, 2]
+    for item in task.items[3:]:
+        assert "session_group" not in item
+        assert item["turn_index"] == 0
+
+
 def test_existing_turn_update_reruns_session_suffix():
     task = _task([
         {"id": "q1", "query": "第一轮", "session_group": "s1", "turn_index": 0},

@@ -289,29 +289,23 @@ def parse_csv(content: str, mode: Mode) -> tuple[list[dict], list[str]]:
     if not rows:
         return [], ["CSV 中没有待评测的数据行（已被“不评测”标记剔除）"]
 
-    # —— 组边界归一化：相邻两行若处于两个组，边界应由「上一条 is_end=True」
-    #    且「下一条 is_start=True」共同标记。上游标记了边界一侧，就补上另一侧，
-    #    避免「组尾缺 is_end / 组头缺 is_start」导致分组错乱。
-    n = len(rows)
-    is_start = [_csv_truthy(r.get("is_start")) for r in rows]
-    is_end = [_csv_truthy(r.get("is_end")) for r in rows]
-    for i in range(n - 1):
-        if is_start[i + 1]:
-            is_end[i] = True  # 下一条开启新组 → 本条强制为组尾
-        elif is_end[i]:
-            is_start[i + 1] = True  # 本条已是组尾 → 下一条强制为新组开头
-
-    # —— 按归一化后的 is_start/is_end 切 session（与上游 session_id 列无关）——
+    # —— 按显式 is_start/is_end 切 session（与上游 session_id 列无关）——
+    # 只有 is_start 能开启组；组关闭后的无标记行各自是单轮。组内的无标记
+    # 中间轮仍会追加到当前组，直到 is_end 或下一个 is_start。
     # 每个 session = [(行号, row), ...]；行号从 2 起（1 为表头）。
     sessions: list[list[tuple[int, dict]]] = []
     current: list[tuple[int, dict]] | None = None
     for ln, row in enumerate(rows, start=2):
-        row_is_start = is_start[ln - 2]
-        row_is_end = is_end[ln - 2]
-        if row_is_start or current is None:
+        row_is_start = _csv_truthy(row.get("is_start"))
+        row_is_end = _csv_truthy(row.get("is_end"))
+        if row_is_start:
             if current:
-                sessions.append(current)  # 上一段未闭合，先收尾
+                sessions.append(current)  # 显式新组头：上一段未闭合组先收尾
             current = []
+        elif current is None:
+            # 没有显式组头的行单独成组，避免污染后续单轮。
+            sessions.append([(ln, row)])
+            continue
         current.append((ln, row))
         if row_is_end:
             sessions.append(current)

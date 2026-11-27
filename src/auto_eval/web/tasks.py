@@ -185,31 +185,28 @@ def _marker_truthy(value) -> bool:
 
 
 def _split_incoming_sessions(incoming: list[dict]) -> list[list[dict]]:
-    """按 is_start/is_end 切请求内 session；没有任何真值标记时逐条独立。
+    """按显式 is_start/is_end 切请求内 session。
 
-    与 CSV 导入的边界归一化保持一致：后一条 is_start=True 会补前一条
-    is_end=True；前一条 is_end=True 会补后一条 is_start=True。
+    只有真值 is_start 才能开启多轮 session；未开启 session 时遇到的 item
+    一律作为独立单轮。session 一旦由 is_end 关闭，后续无标记 item 不会
+    自动继承为新 session，直到再次出现 is_start=True。
     """
-    starts = [_marker_truthy(item.get("is_start")) for item in incoming]
-    ends = [_marker_truthy(item.get("is_end")) for item in incoming]
-    if not any(starts) and not any(ends):
-        return [[item] for item in incoming]
-
-    for i in range(len(incoming) - 1):
-        if starts[i + 1]:
-            ends[i] = True
-        elif ends[i]:
-            starts[i + 1] = True
-
     groups: list[list[dict]] = []
     current: list[dict] | None = None
-    for i, item in enumerate(incoming):
-        if starts[i] or current is None:
-            if current:
+    for item in incoming:
+        starts = _marker_truthy(item.get("is_start"))
+        ends = _marker_truthy(item.get("is_end"))
+        if starts:
+            # 新显式组头出现时，前一个未闭合组自然收尾。
+            if current is not None:
                 groups.append(current)
             current = []
+        elif current is None:
+            # 没有显式组头：无标记 item 或孤立组尾都各自形成单轮。
+            groups.append([item])
+            continue
         current.append(item)
-        if ends[i]:
+        if ends:
             groups.append(current)
             current = None
     if current:
