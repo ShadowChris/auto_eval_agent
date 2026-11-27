@@ -254,7 +254,7 @@ def test_rich_content_runner_skips_extra_domain_classification() -> None:
     assert (
         'mode not in ("rich_content", "rich_content_quality") '
         "and classify_model and classify_base_url"
-    ) in runner_source
+    ) in " ".join(runner_source.split())
 
 
 def test_web_keeps_rich_content_history_label_and_columns() -> None:

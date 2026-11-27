@@ -63,6 +63,7 @@ class EvalEngine:
                 self.skill_router,
                 evaluation_time=self.evaluation_time,
                 expert_knowledge=cfg.expert_knowledge.get("operation"),
+                enable_classify=cfg.eval_options.enable_classify,
             )
             for c in self.clients
         ]
@@ -100,7 +101,7 @@ class EvalEngine:
 
     async def _rubric_one(self, item: EvalItem, model: str, answer: str) -> Verdict | None:
         # 每个 case 仅一次轻量垂域分类（独立模型，裁判共享结果；双重超时保护）
-        if self._classify_model and self._classify_base_url:
+        if self.opts.enable_classify and self._classify_model and self._classify_base_url:
             try:
                 await asyncio.wait_for(
                     ensure_classified(item, self.skill_router,

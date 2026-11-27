@@ -55,6 +55,7 @@ eval_options:
   search_provider: [tavily]   # 联网检索：tavily | serpapi | bing | jina
   search_topk: 3
   # 轻量垂域分类：每个 case 仅跑一次，独立于裁判
+  enable_classify: true             # 设为 false 可同时跳过预分类和裁判兜底分类，无需清空 API key
   classify_model: glm-5.2-openai
   classify_base_url: http://1239mxgn96959.vicp.fun:4009
   classify_api_key_env: PROXY_API_KEY

@@ -184,6 +184,8 @@ async def ensure_classified(item: EvalItem, skill_router, *,
     """
     if item.category and item.category != "default":
         return  # 已分类（dataset 预标 或 已跑过）
+    if item.metadata.get("category_source") == "classification_disabled":
+        item.metadata.pop("category_source")  # 上次禁用不代表本次已尝试分类
     client = None
     try:
         client = build_openai_client(
@@ -215,11 +217,13 @@ class RubricJudge:
         evaluation_time: datetime | None = None,
         expert_knowledge=None,
         operation_templates: dict | None = None,
+        enable_classify: bool = True,
     ):
         self.client = client
         self.dims = dims
         self.scale = dims[0].scale if dims else 5
         self.skill_router = skill_router
+        self.enable_classify = enable_classify
         self.evaluation_time = evaluation_time
         self.expert_knowledge = expert_knowledge
         self.operation_templates = {
@@ -359,9 +363,13 @@ class RubricJudge:
             if eval_mode == "operation"
             else resolve_prompt_context(item.context, self.evaluation_time)
         )
+        # 重新开启时，上次主动跳过不阻止当前裁判的兜底分类。
+        if self.enable_classify and item.metadata.get("category_source") == "classification_disabled":
+            item.metadata.pop("category_source")
         # 自动垂域分类：若未预标 → 兜底用当前裁判 model 分类（正常流程已在 ensure_classified 完成）
         if (
-            (not item.category or item.category == "default")
+            self.enable_classify
+            and (not item.category or item.category == "default")
             and self.skill_router
             and not item.metadata.get("category_source")
         ):
@@ -372,7 +380,12 @@ class RubricJudge:
             else:
                 item.metadata.setdefault("category_source", "fallback_default")
         else:
-            item.metadata.setdefault("category_source", "dataset")
+            source = (
+                "classification_disabled"
+                if not self.enable_classify and (not item.category or item.category == "default")
+                else "dataset"
+            )
+            item.metadata.setdefault("category_source", source)
         skill_dims, skill_rules, _ = (self.skill_router.match(item) if self.skill_router else (None, "", []))
         is_product_compare = (self.client.cfg.persona == "product_expert") and bool(competitor)
         user_images: list[str] | None = None  # 任务类评测：关键帧 data_url 列表，其余模式为 None

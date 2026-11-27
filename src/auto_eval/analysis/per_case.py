@@ -1,7 +1,7 @@
 """逐条诊断卡：把一道题上散落的盲评/成对/元评测信号汇成一行，可导出 CSV。
 
 纯规则拼接，不调 LLM；标红 case 的自然语言小结可在更上层选择性增强。
-category_source 来自 rubric_judge 打的标记（dataset/auto_classified/fallback_default），
+category_source 来自 rubric_judge 打的标记（dataset/auto_classified/fallback_default/classification_disabled），
 缺失时按 category 字段推断。
 """
 from __future__ import annotations

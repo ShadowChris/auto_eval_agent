@@ -651,6 +651,7 @@ async def _run(
             evaluation_time=evaluation_time,
             expert_knowledge=operation_knowledge,
             operation_templates=(snapshot or {}).get("templates"),
+            enable_classify=cfg.eval_options.enable_classify,
         )
         for c in clients
     ]
@@ -1596,7 +1597,11 @@ async def _eval_one(
     classify_api_key = _env_key or _judge_key or "EMPTY"  # 绝不为 None
     # 富内容视觉识别不依赖问答垂域分类；数据有明确垂域时直接使用 category，
     # 未提供时保留 default，避免每条视频在视觉调用前再多跑一次分类模型。
-    if mode not in ("rich_content", "rich_content_quality") and classify_model and classify_base_url:
+    if (
+        cfg.eval_options.enable_classify
+        and mode not in ("rich_content", "rich_content_quality")
+        and classify_model and classify_base_url
+    ):
         skill_router = SkillRouter(cfg.domain_skills) if cfg.domain_skills else None
         try:
             await asyncio.wait_for(
